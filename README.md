@@ -10,7 +10,20 @@ A DJI Tello localizes itself in a room covered with ArUco markers (TF tree + our
 > 3. Read **[CONTRIBUTING.md](CONTRIBUTING.md)** for the workflow (branch, PR, `Closes #N`).
 
 <!-- STATUS:START -->
-_Progress summary is generated automatically from the issues. See [STATUS.md](STATUS.md)._
+### 📊 Progress: 0/55 tasks (0%) · 0 in progress · 9 up for grabs
+
+`░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░`
+
+| Milestone | Due | Progress |
+|---|---|---|
+| [M1: Infrastructure](https://github.com/clementdumeril/tello-balloon-hunter/milestone/1)  |  2026-11-15  |  `░░░░░░░░░░░░░░░░░░░░` 0% |
+| [M2: TF chain validated (hand-held)](https://github.com/clementdumeril/tello-balloon-hunter/milestone/2)  |  2026-11-22  |  `░░░░░░░░░░░░░░░░░░░░` 0% |
+| [M3: Estimation & autonomous flight](https://github.com/clementdumeril/tello-balloon-hunter/milestone/3)  |  2026-11-29  |  `░░░░░░░░░░░░░░░░░░░░` 0% |
+| [M4: Balloon perception](https://github.com/clementdumeril/tello-balloon-hunter/milestone/4)  |  2026-12-02  |  `░░░░░░░░░░░░░░░░░░░░` 0% |
+| [M5: Interception (feature freeze)](https://github.com/clementdumeril/tello-balloon-hunter/milestone/5)  |  2026-12-06  |  `░░░░░░░░░░░░░░░░░░░░` 0% |
+| [M6: Demo & report](https://github.com/clementdumeril/tello-balloon-hunter/milestone/6)  |  2026-12-18  |  `░░░░░░░░░░░░░░░░░░░░` 0% |
+
+➡️ **Details, owners and free tasks: [STATUS.md](STATUS.md)**
 <!-- STATUS:END -->
 
 ---
