@@ -18,9 +18,9 @@ The course guidelines say: *propose something difficult, with plans to scale it 
 
 | Level | Content | Status |
 |---|---|---|
-| **1. Must have** | ArUco localization through TF · our own drone EKF · autonomous hover and waypoint flight · balloon detection from the Tello camera · fly into the balloon and pop it | Required for the demo |
+| **1. Must have** | Gazebo room to validate the ROS nodes and TF frames before flying · ArUco localization through TF · our own drone EKF · autonomous hover and waypoint flight · balloon detection from the Tello camera · fly into the balloon and pop it | Required for the demo |
 | **2. Target** | Fixed Logitech camera locates the balloon for the search phase · balloon EKF fusing both cameras · delayed-measurement handling in the EKF · automatic marker map · quantitative evaluation | What we aim to present |
-| **3. Stretch** | Gazebo closed-loop testing · Logitech tracking of the drone (background subtraction) · benchmark against `robot_localization` · several balloons in sequence | Only if levels 1 and 2 are solid |
+| **3. Stretch** | Logitech tracking of the drone (background subtraction) · benchmark against `robot_localization` · several balloons in sequence | Only if levels 1 and 2 are solid |
 
 > **Course emphasis:** C106A is a model-based robotics course and is "not particularly interested in learning", nor in chaining off-the-shelf modules. YOLO is one component, not the core of the project. The core is our own localization, estimation (EKF) and control. That is why we write the EKF and the localizer ourselves.
 
@@ -72,7 +72,8 @@ gantt
 
     section D · Simulation
     Python toy simulator          :d6, 2026-11-09, 6d
-    Gazebo (stretch)              :d7, 2026-11-20, 10d
+    Gazebo room + ROS/TF check    :d7, 2026-11-09, 7d
+    Gazebo drone + latency/H.264  :d8, 2026-11-16, 6d
 
     section E · Estimation
     EKF math                      :e1, 2026-11-09, 4d
@@ -208,8 +209,8 @@ The group has 4–5 people. Each role owns a set of workstreams, which means it 
 | ID | Task | Milestone | Depends on | Definition of done |
 |---|---|---|---|---|
 | [**D1**](https://github.com/clementdumeril/tello-balloon-hunter/issues/22) | Python toy simulator with ground truth 🔴 | M1 | – | Ground-truth trajectories<br>Marker map + simulated ArUco pose, velocity, ToF, yaw measurements<br>Configurable noise, delay, dropouts and outliers<br>Same message structure as the real nodes |
-| [**D2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/23) | Gazebo Fortress world (room, markers, fixed camera, balloon) ✨ | M3 | [A1](https://github.com/clementdumeril/tello-balloon-hunter/issues/1) | World with ArUco-textured walls<br>Fixed camera<br>Balloon model |
-| [**D3**](https://github.com/clementdumeril/tello-balloon-hunter/issues/24) | Simulated quadrotor with Tello-like interface, latency and H.264 ✨ | M3 | [D2](https://github.com/clementdumeril/tello-balloon-hunter/issues/23), [A5](https://github.com/clementdumeril/tello-balloon-hunter/issues/5) | Velocity-controlled quadrotor publishing the driver topics<br>Injected latency from A5<br>H.264 encode/decode node |
+| [**D2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/23) | Gazebo Fortress world (room, markers, fixed camera, balloon) | M1 | [A1](https://github.com/clementdumeril/tello-balloon-hunter/issues/1) | World with ArUco-textured walls<br>Fixed camera<br>Balloon model |
+| [**D3**](https://github.com/clementdumeril/tello-balloon-hunter/issues/24) | Simulated quadrotor with Tello-like interface, latency and H.264 | M2 | [D2](https://github.com/clementdumeril/tello-balloon-hunter/issues/23), [A5](https://github.com/clementdumeril/tello-balloon-hunter/issues/5) | Velocity-controlled quadrotor publishing the driver topics<br>Injected latency from A5<br>H.264 encode/decode node |
 
 ### E · State estimation (EKF)
 

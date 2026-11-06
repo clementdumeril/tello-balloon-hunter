@@ -63,7 +63,7 @@ flowchart LR
 | `perception` | `balloon_detector` (YOLO or HSV backend) | Perception |
 | `control` | `position_controller`, `visual_servo` | Drone & control |
 | `mission` | `mission` (state machine) | Mission & integration |
-| `sim` | toy simulator (pure Python), optional Gazebo world | State estimation |
+| `sim` | toy simulator (pure Python), Gazebo world | State estimation |
 
 ## Localization from ArUco markers
 
@@ -160,4 +160,4 @@ The course requires the final result on real hardware. Simulation **only speeds 
 |---|---|---|
 | **Python toy simulator (D1)** | Developing and tuning the EKFs with exact ground truth, outliers and delays | Anything visual |
 | **Rosbag replay** | Perception evaluation (real compression, real lighting), offline localizer and EKF testing | Closed-loop control |
-| **Gazebo Fortress (stretch, D2–D3)** | Closed-loop tests of the controller and mission, with injected latency and H.264 compression | YOLO accuracy, which suffers from the sim-to-real gap |
+| **Gazebo Fortress (D2–D3)** | Validating ROS nodes and TF frames before the first real flight · closed-loop tests of the controller and mission, with injected latency and H.264 compression | YOLO accuracy, which suffers from the sim-to-real gap |
