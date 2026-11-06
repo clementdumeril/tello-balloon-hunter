@@ -20,9 +20,9 @@ pie showData title Tasks
 
 | Milestone | Due | Progress | Done |
 |---|---|---|---|
-| [M1: Infrastructure](https://github.com/clementdumeril/tello-balloon-hunter/milestone/1) | 2026-11-15 | `░░░░░░░░░░░░░░░░░░░░` 0% | 0/16 |
-| [M2: TF chain validated (hand-held)](https://github.com/clementdumeril/tello-balloon-hunter/milestone/2) | 2026-11-22 | `░░░░░░░░░░░░░░░░░░░░` 0% | 0/11 |
-| [M3: Estimation & autonomous flight](https://github.com/clementdumeril/tello-balloon-hunter/milestone/3) | 2026-11-29 | `░░░░░░░░░░░░░░░░░░░░` 0% | 0/10 |
+| [M1: Infrastructure](https://github.com/clementdumeril/tello-balloon-hunter/milestone/1) | 2026-11-15 | `░░░░░░░░░░░░░░░░░░░░` 0% | 0/17 |
+| [M2: TF chain validated (hand-held)](https://github.com/clementdumeril/tello-balloon-hunter/milestone/2) | 2026-11-22 | `░░░░░░░░░░░░░░░░░░░░` 0% | 0/12 |
+| [M3: Estimation & autonomous flight](https://github.com/clementdumeril/tello-balloon-hunter/milestone/3) | 2026-11-29 | `░░░░░░░░░░░░░░░░░░░░` 0% | 0/8 |
 | [M4: Balloon perception](https://github.com/clementdumeril/tello-balloon-hunter/milestone/4) | 2026-12-02 | `░░░░░░░░░░░░░░░░░░░░` 0% | 0/6 |
 | [M5: Interception (feature freeze)](https://github.com/clementdumeril/tello-balloon-hunter/milestone/5) | 2026-12-06 | `░░░░░░░░░░░░░░░░░░░░` 0% | 0/6 |
 | [M6: Demo & report](https://github.com/clementdumeril/tello-balloon-hunter/milestone/6) | 2026-12-18 | `░░░░░░░░░░░░░░░░░░░░` 0% | 0/6 |
@@ -73,11 +73,13 @@ Dependencies are done and nobody is assigned. **Pick from the top.**
 | [**A7**](https://github.com/clementdumeril/tello-balloon-hunter/issues/7) Rosbag recording scripts and test procedure | A2, A4 | M1 |
 | [**B1**](https://github.com/clementdumeril/tello-balloon-hunter/issues/9) Tello camera intrinsic calibration 🔴 | A2 | M1 |
 | [**B2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/10) Logitech C922 intrinsic calibration | A4 | M1 |
+| [**D2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/23) Gazebo Fortress world (room, markers, fixed camera, balloon) | A1 | M1 |
 | [**B5**](https://github.com/clementdumeril/tello-balloon-hunter/issues/13) Marker map v1: hand-measured markers.yaml 🔴 | B3, B4 | M2 |
 | [**B7**](https://github.com/clementdumeril/tello-balloon-hunter/issues/15) Logitech extrinsics: map -> logitech_cam | B2, B5 | M2 |
 | [**C2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/18) Static TF publishers | B5, B7, C1 | M2 |
 | [**C3**](https://github.com/clementdumeril/tello-balloon-hunter/issues/19) ArUco localizer: joint solvePnP over all visible markers 🔴 | B1, C2 | M2 |
 | [**C4**](https://github.com/clementdumeril/tello-balloon-hunter/issues/20) Hand-held validation of the TF chain 🔴 | C3 | M2 |
+| [**D3**](https://github.com/clementdumeril/tello-balloon-hunter/issues/24) Simulated quadrotor with Tello-like interface, latency and H.264 | D2, A5 | M2 |
 | [**E2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/26) EKF implementation validated on the toy simulator 🔴 | E1, D1 | M2 |
 | [**E3**](https://github.com/clementdumeril/tello-balloon-hunter/issues/27) Outlier gating (chi-square) and angle wrapping 🔴 | E2 | M2 |
 | [**F1**](https://github.com/clementdumeril/tello-balloon-hunter/issues/33) Identify the Tello response to rc commands | A2, A3 | M2 |
@@ -85,8 +87,6 @@ Dependencies are done and nobody is assigned. **Pick from the top.**
 | [**G3**](https://github.com/clementdumeril/tello-balloon-hunter/issues/38) HSV color baseline detector | G1 | M2 |
 | [**I2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/49) Ground-truth and evaluation protocol | C4 | M2 |
 | [**B6**](https://github.com/clementdumeril/tello-balloon-hunter/issues/14) Marker map v2: automatic estimation and optimization | B1, B5 | M3 |
-| [**D2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/23) Gazebo Fortress world (room, markers, fixed camera, balloon) ✨ | A1 | M3 |
-| [**D3**](https://github.com/clementdumeril/tello-balloon-hunter/issues/24) Simulated quadrotor with Tello-like interface, latency and H.264 ✨ | D2, A5 | M3 |
 | [**E4**](https://github.com/clementdumeril/tello-balloon-hunter/issues/28) Delayed-measurement handling | E2, A5 | M3 |
 | [**E5**](https://github.com/clementdumeril/tello-balloon-hunter/issues/29) drone_ekf ROS 2 node 🔴 | E3, C3, A6 | M3 |
 | [**E6**](https://github.com/clementdumeril/tello-balloon-hunter/issues/30) Tune Q and R on real data | E5, A7 | M3 |
