@@ -10,7 +10,7 @@ A DJI Tello localizes itself in a room covered with ArUco markers (TF tree + our
 > 3. Read **[CONTRIBUTING.md](CONTRIBUTING.md)** for the workflow (branch, PR, `Closes #N`).
 
 <!-- STATUS:START -->
-### 📊 Progress: 0/55 tasks (0%) · 0 in progress · 9 up for grabs
+### 📊 Progress: 0/55 tasks (0%) · 0 in progress · 8 up for grabs
 
 `░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░`
 

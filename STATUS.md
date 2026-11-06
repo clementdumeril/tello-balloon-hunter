@@ -11,9 +11,9 @@
 pie showData title Tasks
     "Done" : 0
     "In progress" : 0
-    "Up for grabs" : 9
+    "Up for grabs" : 8
     "Waiting on dependencies" : 46
-    "Blocked" : 0
+    "Blocked" : 1
 ```
 
 ## Milestones
@@ -59,7 +59,12 @@ Dependencies are done and nobody is assigned. **Pick from the top.**
 | [**I1**](https://github.com/clementdumeril/tello-balloon-hunter/issues/48) Check-In 1 presentation (week 12) 🔴 | I | M1 |
 | [**A1**](https://github.com/clementdumeril/tello-balloon-hunter/issues/1) Repo, ROS 2 workspace and package skeleton | A | M1 |
 | [**C1**](https://github.com/clementdumeril/tello-balloon-hunter/issues/17) TF tree definition and frame conventions | C | M1 |
-| [**I8**](https://github.com/clementdumeril/tello-balloon-hunter/issues/55) Media log: photos and videos at every stage | I | M6 |
+
+## ⛔ Blocked
+
+| Task | Owner |
+|---|---|
+| [**I8**](https://github.com/clementdumeril/tello-balloon-hunter/issues/55) Media log: photos and videos at every stage | – |
 
 <details><summary>⏳ Waiting on dependencies (46)</summary>
 
