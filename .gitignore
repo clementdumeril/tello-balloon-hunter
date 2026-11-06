@@ -1,0 +1,29 @@
+# ROS 2 / colcon
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Data, kept on the team drive, not in git
+*.bag
+*.db3
+*.mcap
+rosbags/
+datasets/
+runs/
+*.pt
+*.onnx
+*.mp4
+*.avi
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
