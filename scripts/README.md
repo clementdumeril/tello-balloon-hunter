@@ -1,0 +1,53 @@
+# First flight & hardware characterization (no ROS)
+
+`first_flight.py` flies the Tello from the keyboard with live video and on-screen telemetry. It logs every state field to CSV, and it measures what the EKF needs: video latency (A5), telemetry behavior (A6) and hover noise (F1). It runs on Windows, macOS and Linux without ROS.
+
+## Setup (once)
+
+```bash
+python -m venv ~/venvs/tello
+~/venvs/tello/Scripts/python -m pip install -r scripts/requirements.txt   # Windows
+# ~/venvs/tello/bin/python -m pip install -r scripts/requirements.txt     # macOS / Linux
+```
+
+Then connect the PC to the drone's **TELLO-xxxxxx** Wi-Fi (the PC loses internet while connected).
+
+## Before every flight
+
+- [ ] Prop guards on, battery > 25% (the script refuses takeoff below that)
+- [ ] Room lit, **textured floor** under the drone (the Tello drifts over plain or shiny floors)
+- [ ] Nobody within 1 m, a soft landing zone nearby (bed, sofa)
+- [ ] The video window is **focused**: keys typed in other windows are ignored
+
+| Key | Action |
+|---|---|
+| `T` / `G` | take off / land |
+| Arrows | forward, back, left, right (released = stop) |
+| `I` / `K` | up / down |
+| `J` / `L` | yaw left / right |
+| `Space` | hover |
+| `Esc` | land and quit |
+| `Backspace` | **EMERGENCY: motors off, the drone falls.** Only if something goes wrong. |
+
+The keys are the same on AZERTY and QWERTY. Default speed is 30/100 (`--speed`).
+
+## The four runs to do first
+
+1. **Test without a drone:**
+   `python scripts/first_flight.py --mock`
+2. **Latency test (A5)**, drone on the table, motors off:
+   `python scripts/first_flight.py --latency-test`
+   Point the Tello camera at the flashing window from about 30 cm and wait 60 s. The median latency appears on screen and in the summary JSON. Repeat at 1 m, 3 m and 5 m from the PC to see the Wi-Fi effect.
+3. **Telemetry by hand (A6)**, motors off: `python scripts/first_flight.py`
+   Move the drone by hand along its forward axis, then sideways, then up, and watch `vgx`/`vgy`/`vgz`, `h`/`tof` and `yaw`. From the CSV, figure out the units, resolution and frame of each field (velocities may only update in flight, which is worth checking).
+4. **Automatic hover (A6, F1):**
+   `python scripts/first_flight.py --auto-hover 30`
+   Takeoff, 30 s with zero commands, land. Gives ToF and velocity noise and the battery drain.
+
+Results go to `logs/` (not committed): a `*_telemetry.csv` with every Tello state field (`s_*` columns), the commands sent and frame stats, plus a `*_summary.json` with latency, fps, frame drops, battery and flight time. **Copy the numbers into [docs/HARDWARE_AND_CONSTRAINTS.md](../docs/HARDWARE_AND_CONSTRAINTS.md#to-measure-in-week-1)** and attach the JSON to the issue.
+
+## Notes
+
+- The latency measured with the flash includes the screen refresh (~10–30 ms) and the decoding time. It is the latency the rest of our pipeline really sees.
+- The safety layer also auto-lands at 12% battery, and the OSD shows `VIDEO STALLED` if no frame arrives for more than 1 s.
+- If the colors look wrong (blue skin), add `--swap-rb`.

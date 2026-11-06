@@ -27,3 +27,6 @@ runs/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Flight logs from scripts/first_flight.py
+logs/

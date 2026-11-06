@@ -81,6 +81,7 @@ No extensions on any project deadline. Full schedule: [docs/PLAN.md](docs/PLAN.m
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | TF tree, ROS 2 nodes and topics, EKF design (state, models), controller, mission state machine |
 | [docs/HARDWARE_AND_CONSTRAINTS.md](docs/HARDWARE_AND_CONSTRAINTS.md) | Real hardware limits (Tello, C922), room constraints, what we must measure in week 1 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How we work: issues, branches, PRs, data, weekly sync |
+| [scripts/](scripts/README.md) | **First flight tool** (no ROS): keyboard flight, latency test, telemetry logging |
 
 ## Team
 
@@ -98,5 +99,6 @@ No extensions on any project deadline. Full schedule: [docs/PLAN.md](docs/PLAN.m
 src/                 ROS 2 packages (see src/README.md)
 docs/                plan, architecture, hardware notes
 config/              camera calibrations, markers.yaml, EKF parameters
-tools/               scripts (status generator, data tools)
+scripts/             first_flight.py: keyboard flight + latency/telemetry tests (no ROS)
+tools/               status generator
 ```
