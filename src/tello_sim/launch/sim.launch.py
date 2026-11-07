@@ -21,6 +21,19 @@ from launch_ros.actions import Node
 REPO = os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter"))
 
 
+def gazebo_env(headless):
+    """Sourcing ROS Jazzy puts its own gz-tools/vendor libraries first, which hides `gz sim`.
+    Run the system Gazebo Harmonic with the system paths instead."""
+    env = dict(os.environ)
+    env["GZ_CONFIG_PATH"] = "/usr/share/gz"
+    env["LD_LIBRARY_PATH"] = ":".join(p for p in env.get("LD_LIBRARY_PATH", "").split(":")
+                                      if p and not p.startswith("/opt/ros"))
+    if headless:  # over SSH the WSLg display does not answer; force EGL headless rendering
+        env.pop("DISPLAY", None)
+        env.pop("WAYLAND_DISPLAY", None)
+    return env
+
+
 def setup(context):
     lc = lambda n: LaunchConfiguration(n).perform(context)  # noqa: E731
     gui, gpu = lc("gui") == "true", lc("gpu") == "true"
@@ -33,10 +46,10 @@ def setup(context):
                           "--logi-width", "480", "--logi-height", "270", "--logi-rate", "5"]
     gen = ExecuteProcess(cmd=["python3", "-m", "tello_sim.generate_world", "--markers", markers,
                               "--out", str(world_dir), *res], output="screen")
-    gz_cmd = ["gz", "sim", "-r", str(world_dir / "room.sdf")]
+    gz_cmd = ["/usr/bin/gz", "sim", "-r", str(world_dir / "room.sdf")]
     if not gui:
         gz_cmd.insert(2, "-s")
-    gz = ExecuteProcess(cmd=gz_cmd, output="log")
+    gz = ExecuteProcess(cmd=gz_cmd, output="log", env=gazebo_env(headless=not gui))
 
     sim_time = {"use_sim_time": True}
     nodes = [
