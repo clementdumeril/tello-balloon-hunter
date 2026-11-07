@@ -223,6 +223,23 @@ class Keyboard:
         self.listener.stop()
 
 
+def check_tello_network():
+    """Fail fast if this PC is not on the Tello Wi-Fi (the Tello gives addresses in 192.168.10.x)."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("192.168.10.1", 8889))  # no packet is sent: this only asks which local address would be used
+        local_ip = s.getsockname()[0]
+        s.close()
+    except OSError:
+        local_ip = "?"
+    if not local_ip.startswith("192.168.10."):
+        print(f"This PC is not on the Tello Wi-Fi: its address towards the drone is {local_ip}, expected 192.168.10.x.")
+        print("Switch the drone on, connect this PC to the TELLO-xxxxxx Wi-Fi network, then run the script again.")
+        sys.exit(1)
+    print(f"On the Tello Wi-Fi ({local_ip}).")
+
+
 def window_focused(title):
     """True if our OpenCV window is the foreground window (Windows). Elsewhere, assume yes."""
     if sys.platform != "win32":
@@ -260,10 +277,17 @@ def main():
     if args.mock:
         tello = MockTello(args.mock_latency)
     else:
+        check_tello_network()
         from djitellopy import Tello
         tello = Tello()
-    print("Connecting to the Tello (is this PC on the TELLO-xxxx Wi-Fi?)...")
-    tello.connect()
+    print("Connecting to the Tello...")
+    try:
+        tello.connect()
+    except Exception as e:  # noqa: BLE001
+        print(f"\nNo answer from the Tello: {e}")
+        print("Check: drone switched on (LED blinking yellow), no phone app connected to it,\n"
+              "and Windows Firewall allows inbound UDP 8889/8890/11111 (see scripts/README.md).")
+        sys.exit(1)
     battery_start = tello.get_battery()
     print(f"Battery: {battery_start}%")
     can_fly = battery_start >= MIN_BATTERY_TAKEOFF and not args.latency_test
