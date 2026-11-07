@@ -10,4 +10,4 @@ Created by task A1. See [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md#ros-2-nod
 | `perception` | Balloon detector (YOLO / HSV backends) | G |
 | `control` | Position controller, visual servoing | F, H |
 | `mission` | Mission state machine | H |
-| `sim` | Python toy simulator; optional Gazebo world | D |
+| `tello_sim` | Gazebo Harmonic room from `config/markers.yaml`, Tello-like adapter, test flight, evaluation ([README](tello_sim/README.md)) | D |

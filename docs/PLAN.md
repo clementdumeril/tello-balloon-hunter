@@ -209,7 +209,7 @@ The group has 4–5 people. Each role owns a set of workstreams, which means it 
 | ID | Task | Milestone | Depends on | Definition of done |
 |---|---|---|---|---|
 | [**D1**](https://github.com/clementdumeril/tello-balloon-hunter/issues/22) | Python toy simulator with ground truth 🔴 | M1 | – | Ground-truth trajectories<br>Marker map + simulated ArUco pose, velocity, ToF, yaw measurements<br>Configurable noise, delay, dropouts and outliers<br>Same message structure as the real nodes |
-| [**D2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/23) | Gazebo Fortress world (room, markers, fixed camera, balloon) | M1 | [A1](https://github.com/clementdumeril/tello-balloon-hunter/issues/1) | World with ArUco-textured walls<br>Fixed camera<br>Balloon model |
+| [**D2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/23) | Gazebo Harmonic world (room, markers, fixed camera, balloon) | M1 | [A1](https://github.com/clementdumeril/tello-balloon-hunter/issues/1) | World with ArUco-textured walls<br>Fixed camera<br>Balloon model |
 | [**D3**](https://github.com/clementdumeril/tello-balloon-hunter/issues/24) | Simulated quadrotor with Tello-like interface, latency and H.264 | M2 | [D2](https://github.com/clementdumeril/tello-balloon-hunter/issues/23), [A5](https://github.com/clementdumeril/tello-balloon-hunter/issues/5) | Velocity-controlled quadrotor publishing the driver topics<br>Injected latency from A5<br>H.264 encode/decode node |
 
 ### E · State estimation (EKF)
