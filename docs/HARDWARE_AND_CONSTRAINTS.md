@@ -22,7 +22,7 @@ The design choices in this project are driven by what the hardware can really do
 | Video latency | _TBM_ (typically 100–300 ms) | Delayed EKF updates (E4) |
 | Link | Tello is a 2.4 GHz access point; the laptop joins it | Laptop loses internet → use a USB Wi-Fi dongle or ethernet |
 | SDK | UDP: commands on 8889, state on 8890, video on 11111. `rc a b c d` velocity commands | Control rate ~10–20 Hz |
-| Telemetry | vgx/vgy/vgz, ToF height, baro, pitch/roll/yaw, accelerations, battery | Units, resolution, frame and rate are _TBM_ (A6) |
+| Telemetry | vgx/vgy/vgz, ToF height, baro, pitch/roll/yaw, accelerations, battery | **9.8 Hz.** Velocities are integer dm/s (0.1 m/s steps) and read 0 during slow drift; frame not consistent with the commands. `h` in 10 cm steps; ToF in cm (10 = on the ground) |
 | Stabilization | Downward vision positioning system (optical flow) | Needs a **textured floor** and good light |
 | Battery | ~13 min spec, **~8–10 min usable** | Spare batteries, charging schedule |
 | Payload | Very limited | Pin mount kept to a few grams (H1) |
@@ -65,11 +65,11 @@ The design choices in this project are driven by what the hardware can really do
 | Quantity | How | Result | Task |
 |---|---|---|---|
 | Video latency (mean, std) | Tello films a stopwatch on the laptop screen; compare with the clock in the frame | _TBM_ | A5 |
-| Frame drop rate | Count missing frames over 5 min at different distances | _TBM_ | A5 |
-| Telemetry rate | Timestamps of state packets | _TBM_ | A6 |
-| Velocity units, resolution, frame | Move the drone by hand along known axes; check the reported values | _TBM_ | A6 |
-| ToF noise | Std at rest at 3 heights | _TBM_ | A6 |
-| Yaw reference and drift | Yaw at power-on vs. map; drift over 5 min | _TBM_ | A6 |
-| Hover drift without correction | Hover 60 s, measure displacement | _TBM_ | F1 |
-| Step response to `rc` | Step inputs per axis → k, τ | _TBM_ | F1 |
-| Usable flight time | Full battery to auto-land | _TBM_ | A6 |
+| Frame drop rate | Count missing frames over 5 min at different distances | **27.5–30 fps, 3–5.6 % frames lost, longest gap 0.8 s** (3 runs, Nov 7) | A5 |
+| Telemetry rate | Timestamps of state packets | **9.8 Hz** | A6 |
+| Velocity units, resolution, frame | Move the drone by hand along known axes; check the reported values | **integer dm/s**, ±5 at rc 30; **always 0 while hovering** (cannot see drift < 10 cm/s); direction not consistent with the commands → weak EKF input | A6 |
+| ToF noise | Std at rest at 3 heights | **hover at 78 cm: std 5.6 cm, range 67–92 cm** (includes the real altitude wobble) | A6 |
+| Yaw reference and drift | Yaw at power-on vs. map; drift over 5 min | integer degrees; reference changes with each power-on (seen 0, 7, 20, 87, −158); constant while hovering 21 s | A6 |
+| Hover drift without correction | Hover 60 s, measure displacement | visible drift, **not measurable from telemetry** (velocities stay 0). Needs ArUco | F1 |
+| Step response to `rc` | Step inputs per axis → k, τ | **rc 30 → ~0.38 m/s; 63 % of the speed after ~1.2 s; stops ~0.8 s after release**; yaw rc 30 → ~18 °/s (2 steps only) | F1 |
+| Usable flight time | Full battery to auto-land | **~8 %/min in flight → ~10–11 min from full**; 67–77 °C in flight vs up to 92 °C idle on the ground | A6 |
