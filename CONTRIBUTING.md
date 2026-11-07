@@ -35,5 +35,7 @@
 
 ## Environment
 
-- Ubuntu 22.04 + ROS 2 Humble (the course container or a native install)
+- Ubuntu 24.04 + **ROS 2 Jazzy** + **Gazebo Harmonic** on both machines (native, or WSL2 on Windows)
+- Simulation: big PC (`ros2 launch tello_sim sim.launch.py`, see `src/tello_sim/README.md`) · real drone: the laptop
+- Code moves between machines only through Git; real flight data moves as rosbags
 - Python ≥ 3.10, OpenCV with `aruco` (`opencv-contrib-python`), `djitellopy`, `ultralytics`, `numpy`, `scipy`

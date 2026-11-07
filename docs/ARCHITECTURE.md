@@ -160,4 +160,4 @@ The course requires the final result on real hardware. Simulation **only speeds 
 |---|---|---|
 | **Python toy simulator (D1)** | Developing and tuning the EKFs with exact ground truth, outliers and delays | Anything visual |
 | **Rosbag replay** | Perception evaluation (real compression, real lighting), offline localizer and EKF testing | Closed-loop control |
-| **Gazebo Fortress (D2–D3)** | Validating ROS nodes and TF frames before the first real flight · closed-loop tests of the controller and mission, with injected latency and H.264 compression | YOLO accuracy, which suffers from the sim-to-real gap |
+| **Gazebo Harmonic (D2–D3)**, `tello_sim` package | Validating ROS nodes and TF frames before the first real flight · closed-loop tests of the controller and mission, with injected latency and H.264 compression | YOLO accuracy, which suffers from the sim-to-real gap |
