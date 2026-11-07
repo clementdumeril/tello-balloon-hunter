@@ -36,14 +36,15 @@ def gazebo_env(headless):
 
 def setup(context):
     lc = lambda n: LaunchConfiguration(n).perform(context)  # noqa: E731
-    gui, gpu = lc("gui") == "true", lc("gpu") == "true"
+    gui, gpu, record = lc("gui") == "true", lc("gpu") == "true", lc("record") == "true"
     markers, latency = lc("markers"), float(lc("latency"))
     out = Path(lc("out_dir"))
     world_dir = out / "world"
     share = get_package_share_directory("tello_sim")
 
     res = [] if gpu else ["--tello-width", "480", "--tello-height", "360", "--tello-rate", "10",
-                          "--logi-width", "480", "--logi-height", "270", "--logi-rate", "5"]
+                          "--logi-width", "640" if record else "480", "--logi-height", "360" if record else "270",
+                          "--logi-rate", "5"]
     gen = ExecuteProcess(cmd=["python3", "-m", "tello_sim.generate_world", "--markers", markers,
                               "--out", str(world_dir), *res], output="screen")
     gz_cmd = ["/usr/bin/gz", "sim", "-r", str(world_dir / "room.sdf")]
@@ -60,10 +61,14 @@ def setup(context):
         Node(package="aruco_localization", executable="marker_map_publisher", output="screen",
              parameters=[{"markers_file": markers}, sim_time]),
         Node(package="aruco_localization", executable="aruco_localizer", output="screen",
-             parameters=[{"markers_file": markers, "debug_dir": str(out / "debug")}, sim_time]),
+             parameters=[{"markers_file": markers, "debug_dir": str(out / "debug"),
+                          "debug_every_n": 1 if record else 5}, sim_time]),
         Node(package="tello_sim", executable="eval_localization", output="screen",
              parameters=[{"latency": latency, "out_dir": str(out)}, sim_time]),
     ]
+    if record:
+        nodes.append(Node(package="tello_sim", executable="record_flight", output="screen",
+                          parameters=[{"out_dir": str(out / "rec")}, sim_time]))
     if lc("rviz") == "true":
         nodes.append(Node(package="rviz2", executable="rviz2", output="log",
                           arguments=["-d", os.path.join(share, "config", "sim.rviz")], parameters=[sim_time]))
@@ -83,6 +88,7 @@ def generate_launch_description():
         DeclareLaunchArgument("gpu", default_value="false", description="full-res cameras (needs GPU rendering)"),
         DeclareLaunchArgument("rviz", default_value=LaunchConfiguration("gui")),
         DeclareLaunchArgument("test_flight", default_value="true"),
+        DeclareLaunchArgument("record", default_value="false", description="record frames + trajectories for videos"),
         DeclareLaunchArgument("latency", default_value="0.20"),
         DeclareLaunchArgument("markers", default_value=os.path.join(REPO, "config", "markers.yaml")),
         DeclareLaunchArgument("out_dir", default_value=str(Path.home() / "tello_ws/sim_out")),

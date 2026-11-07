@@ -18,5 +18,6 @@ setup(
         "sim_adapter = tello_sim.sim_adapter:main",
         "test_flight = tello_sim.test_flight:main",
         "eval_localization = tello_sim.eval_localization:main",
+        "record_flight = tello_sim.record_flight:main",
     ]},
 )

@@ -9,6 +9,7 @@ import math
 import rclpy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
+from std_msgs.msg import String
 from rclpy.node import Node
 
 
@@ -22,6 +23,8 @@ class TestFlight(Node):
         self.alt = self.declare_parameter("altitude", 1.2).value
         self.side = self.declare_parameter("square_side", 0.8).value
         self.vmax = self.declare_parameter("max_speed", 0.35).value
+        self.balloon = self.declare_parameter("balloon_xy", [3.1, 2.6]).value
+        self.status = self.create_publisher(String, "/test_flight/status", 10)
         self.pub = self.create_publisher(Twist, "/tello/cmd_vel_safe", 10)
         self.create_subscription(Odometry, "/sim/ground_truth", self.on_odom, 20)
         self.pose = None
@@ -48,6 +51,7 @@ class TestFlight(Node):
                 (x0, y0, h, y_0 + 3 * d, "square 4/4 (yaw 270)"),
                 (x0, y0, h - 0.4, y_0, "lower + yaw back"),
                 (x0, y0, h + 0.3, y_0 - d, "higher + yaw -90"),
+                (x0, y0, h, math.atan2(self.balloon[1] - y0, self.balloon[0] - x0), "face the balloon"),
                 (x0, y0, 0.05, y_0, "land"),
             ]
             self.get_logger().info(f"Test flight with {len(self.wps)} waypoints from ({x0:.2f}, {y0:.2f})")
@@ -61,10 +65,14 @@ class TestFlight(Node):
             if not self.done:
                 self.done = True
                 self.get_logger().info("Test flight finished")
+                self.status.publish(String(data="finished"))
                 raise SystemExit
             return
         x, y, z, yaw = self.pose
         tx, ty, tz, tyaw, label = self.wps[self.i]
+        if getattr(self, "_announced", None) != self.i:
+            self._announced = self.i
+            self.status.publish(String(data=label))
         ex, ey, ez, eyaw = tx - x, ty - y, tz - z, wrap(tyaw - yaw)
         c, s = math.cos(yaw), math.sin(yaw)
         vx, vy = 1.2 * (c * ex + s * ey), 1.2 * (-s * ex + c * ey)
