@@ -2,6 +2,20 @@
 
 `first_flight.py` flies the Tello from the keyboard with live video and on-screen telemetry. It logs every state field to CSV, and it measures what the EKF needs: video latency (A5), telemetry behavior (A6) and hover noise (F1). It runs on Windows, macOS and Linux without ROS.
 
+## Easiest way (Windows)
+
+**Double-click `tello_tests.bat`** at the root of the repo. It goes to the right folder by itself and shows a menu:
+
+| Choice | Test |
+|---|---|
+| 1 | Connection check (motors off). **Run it first after every drone power-on** |
+| 2 | Video latency |
+| 3 | Telemetry by hand, then manual flight |
+| 4 | Automatic hover 30 s |
+| 5 | Fake drone, to try the keys without hardware |
+
+You can also run one test directly from any terminal: `tello_tests.bat 2`.
+
 ## Setup (once)
 
 ```bash
