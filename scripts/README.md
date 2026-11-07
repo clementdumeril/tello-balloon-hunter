@@ -53,6 +53,7 @@ Results go to `logs/` (not committed): a `*_telemetry.csv` with every Tello stat
 | `This PC is not on the Tello Wi-Fi` | The PC is on another network (eduroam, home Wi-Fi) | Switch the drone on, wait for the LED to blink yellow, connect the PC to `TELLO-xxxxxx` |
 | `No answer from the Tello` (on the Tello Wi-Fi) | Drone off or in a bad state | Restart the drone |
 | same | The Tello phone app is connected to the drone | Close the app: only one controller at a time |
+| `No answer from the Tello`, although it answered before | **The Tello only answers the first program (address + port) that sent `command` since it was switched on**, until it restarts | Restart the drone, then start `first_flight.py` first. Running another tool (phone app, another script) in between locks the drone onto it |
 | same | Windows Firewall drops the drone's replies (the Tello network is a *Public* network) | In an **administrator** PowerShell: `New-NetFirewallRule -DisplayName "Tello UDP" -Direction Inbound -Protocol UDP -LocalPort 8889,8890,11111 -Action Allow -Profile Any` |
 
 Quick check once on the Tello Wi-Fi: `ping 192.168.10.1` must answer.

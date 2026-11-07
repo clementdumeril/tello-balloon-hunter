@@ -103,22 +103,24 @@ def main():
     log("ping", "OK" if "TTL=" in shell("ping -n 2 192.168.10.1") or "ttl=" in shell("ping -c 2 192.168.10.1") else "FAILED")
     for p in (8889, 8890, 11111):
         log(f"port {p} free", port_free(p))
-    log("command from random port", send_command(0))
+    # The Tello answers only the first address:port that sent 'command' since it was switched on.
+    # Talk from 8889 first, like djitellopy, so this check never locks the drone onto another port.
     log("command from port 8889", send_command(8889))
+    log("command from random port", send_command(0))
     log("state on 8890 (3 s)", listen(8890))
-    log("sdk? (from random port)", send_command(0, b"sdk?"))
     log("battery? (from 8889)", send_command(8889, b"battery?"))
     log("streamon", send_command(8889, b"streamon"))
     log("video on 11111 (3 s)", listen(11111))
     send_command(8889, b"streamoff", timeout=1.0)
 
     r1, r2 = report["command from random port"], report["command from port 8889"]
-    if r1.startswith("reply") and r2.startswith("reply"):
-        v = "UDP link OK: the problem is elsewhere (djitellopy setup), send this report"
+    if r2.startswith("reply"):
+        v = "UDP link OK on port 8889: first_flight.py will work (a NO REPLY on the random port is expected)"
     elif r1.startswith("reply"):
-        v = "Replies reach a random port but not 8889: another program owns 8889, or a rule blocks that port"
+        v = "The drone answers another port but not 8889: restart the drone and run first_flight.py first"
     else:
-        v = "The drone never answers UDP: firewall dropping replies, drone busy with another controller (phone app), or drone needs a restart"
+        v = ("No UDP answer: the drone is locked onto another client (phone app, earlier script) "
+             "or the firewall drops replies. Restart the drone, then run first_flight.py as the FIRST program")
     log("verdict", v)
     finish()
 
