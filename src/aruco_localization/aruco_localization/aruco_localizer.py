@@ -52,6 +52,9 @@ class ArucoLocalizer(Node):
         self.max_reproj = p("max_reprojection_px", 3.0).value
         self.debug_every = p("debug_every_n", 5).value
         self.debug_dir = p("debug_dir", "").value
+        # TF child frame for the ArUco pose. base_link_aruco by default (base_link belongs to the EKF);
+        # the real-drone launch sets base_link until the EKF exists, so RViz shows the camera on the drone.
+        self.child_frame = p("child_frame", "base_link_aruco").value
         self.detector = Detector(self.cfg.get("dictionary", "DICT_4X4_50"))
         self.bridge = CvBridge()
         self.K = self.D = None
@@ -146,7 +149,7 @@ class ArucoLocalizer(Node):
 
         t = TransformStamped()
         t.header = m.header
-        t.child_frame_id = "base_link_aruco"
+        t.child_frame_id = self.child_frame
         t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = map(float, T[:3, 3])
         t.transform.rotation = m.pose.pose.orientation
         self.tf_pub.sendTransform(t)
