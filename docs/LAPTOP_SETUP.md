@@ -62,8 +62,8 @@ RViz should open with the grid and the 44 ArUco markers.
 Print `docs/print/checkerboard_A4.pdf` at 100 % and glue it flat on cardboard (9×6 inner corners, 25 mm squares). With the driver running, drone on the table:
 
 ```bash
-ros2 run camera_calibration cameracalibrator --size 9x6 --square 0.025 \
-  --ros-args -r image:=/tello/image_raw -r camera:=/tello
+ros2 run camera_calibration cameracalibrator --size 9x6 --square 0.025 --no-service-check \
+  --ros-args -r image:=/tello/image_raw -p camera:=/tello
 ```
 
 Move the board in front of the camera (near, far, tilted, in every corner) until X, Y, Size and Skew are green, then **CALIBRATE**, then **SAVE**. Copy the result into the repo:
