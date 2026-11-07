@@ -1,0 +1,49 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Reference Frame: map
+      Cell Size: 0.5
+      Plane Cell Count: 10
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+      Show Arrows: false
+      Marker Scale: 0.4
+    - Class: rviz_default_plugins/MarkerArray
+      Name: ArUco markers
+      Enabled: true
+      Topic:
+        Value: /aruco/map_markers
+        Durability Policy: Transient Local
+    - Class: rviz_default_plugins/Pose
+      Name: ArUco pose
+      Enabled: true
+      Topic:
+        Value: /aruco/pose
+      Shape: Axes
+    - Class: rviz_default_plugins/Image
+      Name: Tello camera (detections)
+      Enabled: true
+      Topic:
+        Value: /aruco/debug_image
+  Global Options:
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 6
+      Focal Point: {X: 1.5, Y: 1.5, Z: 0.8}
+      Pitch: 0.65
+      Yaw: 3.9
+Window Geometry:
+  Width: 1400
+  Height: 900
