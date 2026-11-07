@@ -146,7 +146,7 @@ def build_world(cfg, markers, mesh_dir, args):
     <plugin filename='gz-sim-physics-system' name='gz::sim::systems::Physics'/>
     <plugin filename='gz-sim-user-commands-system' name='gz::sim::systems::UserCommands'/>
     <plugin filename='gz-sim-scene-broadcaster-system' name='gz::sim::systems::SceneBroadcaster'/>
-    <plugin filename='gz-sim-sensors-system' name='gz::sim::systems::Sensors'><render_engine>ogre2</render_engine></plugin>
+    <plugin filename='gz-sim-sensors-system' name='gz::sim::systems::Sensors'><render_engine>{args.render_engine}</render_engine></plugin>
     <scene><ambient>0.55 0.55 0.55 1</ambient><background>0.7 0.8 0.9 1</background><shadows>false</shadows></scene>
     <light type='directional' name='sun'><cast_shadows>false</cast_shadows><pose>0 0 10 0 0 0</pose>
       <diffuse>0.6 0.6 0.6 1</diffuse><specular>0.1 0.1 0.1 1</specular><direction>-0.3 0.2 -1</direction></light>
@@ -176,6 +176,8 @@ def main(argv=None):
     ap.add_argument("--logi-width", type=int, default=960)
     ap.add_argument("--logi-height", type=int, default=540)
     ap.add_argument("--logi-rate", type=float, default=10)
+    ap.add_argument("--render-engine", default="ogre2", choices=["ogre2", "ogre"],
+                    help="ogre is faster with software rendering (no GPU)")
     ap.add_argument("--save-dir", default=None, help="also save camera frames to disk (debug)")
     args = ap.parse_args(argv)
 
