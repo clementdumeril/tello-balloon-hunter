@@ -58,6 +58,10 @@ Results go to `logs/` (not committed): a `*_telemetry.csv` with every Tello stat
 
 Quick check once on the Tello Wi-Fi: `ping 192.168.10.1` must answer.
 
+**Seen on Nov 7:** after a first `command` from a random port, the Tello sent *every* later reply to that port (54753), whatever port the commands came from, and kept executing the commands (state and video kept flowing). `scripts/tello_udp_check.py` now detects this case and shows which port the replies go to. A real power cycle (hold the button until the LEDs go off) clears it.
+
+**Heat:** the Tello heats up fast when it is switched on but not flying (86–89 °C measured after ~10 min on the ground). It shuts itself down near 90 °C. Switch it on just before testing, and switch it off between tests.
+
 ## Notes
 
 - The latency measured with the flash includes the screen refresh (~10–30 ms) and the decoding time. It is the latency the rest of our pipeline really sees.

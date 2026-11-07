@@ -113,16 +113,55 @@ def main():
     log("video on 11111 (3 s)", listen(11111))
     send_command(8889, b"streamoff", timeout=1.0)
 
+    log("temperature", send_command(8889, b"temp?"))
+
     r1, r2 = report["command from random port"], report["command from port 8889"]
     if r2.startswith("reply"):
         v = "UDP link OK on port 8889: first_flight.py will work (a NO REPLY on the random port is expected)"
     elif r1.startswith("reply"):
-        v = "The drone answers another port but not 8889: restart the drone and run first_flight.py first"
+        v = "The drone answers another port but not 8889: switch the drone OFF and on again, then run first_flight.py first"
     else:
-        v = ("No UDP answer: the drone is locked onto another client (phone app, earlier script) "
-             "or the firewall drops replies. Restart the drone, then run first_flight.py as the FIRST program")
+        lock = find_reply_port()
+        log("replies actually go to", lock)
+        if lock.startswith("local port"):
+            v = (f"The drone is locked onto an old client ({lock}). Switch it OFF (hold the button until the LEDs go off), "
+                 "let it cool, switch it on, then run first_flight.py as the FIRST program")
+        else:
+            v = "No UDP answer on any port: firewall dropping replies, or the drone needs a real power cycle"
     log("verdict", v)
     finish()
+
+
+def find_reply_port():
+    """Listen on every ephemeral port, send 'battery?' from 8889, and see where the reply lands."""
+    socks = {}
+    for port in range(49152, 65536):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.bind(("", port))
+            s.setblocking(False)
+            socks[port] = s
+        except OSError:
+            s.close()
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    found = "nowhere (no reply on any ephemeral port)"
+    try:
+        tx.bind(("", 8889))
+        tx.sendto(b"battery?", TELLO)
+        t_end = time.time() + 2.0
+        while time.time() < t_end and found.startswith("nowhere"):
+            for port, s in socks.items():
+                try:
+                    data, _ = s.recvfrom(1024)
+                    found = f"local port {port} (reply {data!r})"
+                    break
+                except OSError:
+                    pass
+    finally:
+        tx.close()
+        for s in socks.values():
+            s.close()
+    return found
 
 
 def finish():
