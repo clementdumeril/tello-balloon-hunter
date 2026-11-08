@@ -50,8 +50,11 @@ else
 fi
 
 say "5/6 Build"
+# ROS setup files use unset variables: relax `set -u` while sourcing them
+set +u
 # shellcheck disable=SC1091
 source /opt/ros/jazzy/setup.bash
+set -u
 cd "$WS"
 colcon build --symlink-install --packages-select aruco_localization tello_driver
 
