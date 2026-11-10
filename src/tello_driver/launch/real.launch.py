@@ -36,8 +36,27 @@ def setup(context):
     ]
     if lc("rviz") == "true":
         nodes.append(Node(package="rviz2", executable="rviz2", output="log",
-                          arguments=["-d", os.path.join(share, "config", "real.rviz")]))
+                          arguments=["-d", rviz_config_centred_on_markers(os.path.join(share, "config", "real.rviz"), lc("markers"))]))
     return nodes
+
+
+def rviz_config_centred_on_markers(template, markers_file):
+    """Copy of the RViz config whose camera looks at the centre of the real marker map."""
+    import yaml
+    try:
+        ms = yaml.safe_load(open(markers_file, encoding="utf-8"))["markers"]
+        cx = sum(m["x"] for m in ms) / len(ms)
+        cy = sum(m["y"] for m in ms) / len(ms)
+        cz = sum(m["z"] for m in ms) / len(ms)
+        span = max(max(m["x"] for m in ms) - min(m["x"] for m in ms), max(m["y"] for m in ms) - min(m["y"] for m in ms))
+    except Exception:  # noqa: BLE001
+        return template
+    text = open(template, encoding="utf-8").read()
+    text = text.replace("Focal Point: {X: 1.5, Y: 1.5, Z: 0.8}", f"Focal Point: {{X: {cx:.2f}, Y: {cy:.2f}, Z: {cz:.2f}}}")
+    text = text.replace("Distance: 6", f"Distance: {max(4.0, 1.8 * span):.1f}")
+    out = Path("/tmp") / "tello_real_centred.rviz"
+    out.write_text(text, encoding="utf-8")
+    return str(out)
 
 
 def generate_launch_description():
