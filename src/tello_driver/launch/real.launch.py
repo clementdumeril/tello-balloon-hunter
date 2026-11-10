@@ -42,7 +42,7 @@ def setup(context):
                           "takeoff_height": takeoff_height(lc("markers"), lc("takeoff_height")),
                           "max_height": float(lc("max_height"))}]),
         Node(package="aruco_localization", executable="marker_map_publisher", output="screen",
-             parameters=[{"markers_file": lc("markers")}]),
+             parameters=[{"markers_file": lc("markers"), "room_mesh": room_mesh(lc("room_mesh"))}]),
         Node(package="aruco_localization", executable="aruco_localizer", output="screen",
              parameters=[{"markers_file": lc("markers"), "child_frame": "base_link",
                           "debug_every_n": 3, "debug_scale": 0.5}]),
@@ -53,6 +53,14 @@ def setup(context):
         nodes.append(Node(package="rviz2", executable="rviz2", output="log",
                           arguments=["-d", rviz_config_centred_on_markers(os.path.join(share, "config", "real.rviz"), lc("markers"))]))
     return nodes
+
+
+def room_mesh(arg):
+    """The room scan in the map frame (tools/room_mesh_to_map.py), if there is one."""
+    if arg != "auto":
+        return arg
+    p = Path.home() / "tello_ws" / "room_scan" / "room_map.obj"
+    return str(p) if p.exists() else ""
 
 
 def takeoff_height(markers_file, arg):
@@ -104,6 +112,8 @@ def generate_launch_description():
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("record", default_value="true", description="save images, poses, telemetry in ~/tello_ws/sessions"),
         DeclareLaunchArgument("markers", default_value=os.path.join(REPO, "config", "markers.yaml")),
+        DeclareLaunchArgument("room_mesh", default_value="auto",
+                              description="room scan OBJ in the map frame; auto = ~/tello_ws/room_scan/room_map.obj"),
         DeclareLaunchArgument("max_height", default_value="2.6",
                               description="ceiling guard (m above the floor): no climbing above max-0.2, descends above"),
         DeclareLaunchArgument("takeoff_height", default_value="auto",

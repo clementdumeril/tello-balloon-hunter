@@ -58,6 +58,15 @@ class MarkerMapPublisher(Node):
         self.body = self.body_markers(TimeMsg())
         self.pub_body.publish(self.body)
         self.create_timer(1.0, lambda: self.pub_body.publish(self.body))
+        # the scanned room (tools/room_mesh_to_map.py), shown/hidden with its checkbox in RViz
+        mesh = self.declare_parameter("room_mesh", "").value
+        if mesh:
+            self.pub_room = self.create_publisher(VizMarker, "/room/mesh", qos)
+            m = viz(TimeMsg(), "map", "room", 0, VizMarker.MESH_RESOURCE, (1, 1, 1), (0.0, 0.0, 0.0, 0.0))
+            m.mesh_resource = "file://" + str(mesh)
+            m.mesh_use_embedded_materials = True  # the scan's own texture
+            self.pub_room.publish(m)
+            self.get_logger().info(f"Room mesh: {mesh}")
         self.get_logger().info(f"Published {len(self.markers)} marker frames from {path}")
 
     def map_markers(self, stamp):

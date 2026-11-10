@@ -17,6 +17,12 @@ Visualization Manager:
       Show Names: true
       Show Arrows: false
       Marker Scale: 0.3
+    - Class: rviz_default_plugins/Marker
+      Name: Room (3D scan)
+      Enabled: true
+      Topic:
+        Value: /room/mesh
+        Durability Policy: Transient Local
     - Class: rviz_default_plugins/MarkerArray
       Name: ArUco markers
       Enabled: true
