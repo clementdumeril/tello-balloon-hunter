@@ -82,6 +82,10 @@ class FakeTello:
         if self.world is not None:
             self.world.flying, self.world.z_target = False, 0.05
 
+    def send_command_without_return(self, cmd):
+        if cmd == "land":
+            threading.Thread(target=self.land, daemon=True).start()
+
     def send_rc_control(self, a, b, c, d):
         if self.world is not None:
             self.world.rc = (a, b, c, d)
@@ -318,6 +322,16 @@ class TelloDriver(Node):
 
     def srv_land(self, req, res):
         self.rc_target = (0, 0, 0, 0)
+        if self.busy.locked():
+            # another command (e.g. a takeoff still waiting for its reply) holds the lock: a landing order must
+            # never be dropped, so send it right away without waiting for an answer
+            self.get_logger().warn("land while another command is running: sending 'land' immediately")
+            try:
+                self.tello.send_command_without_return("land")
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().error(f"land failed: {e}")
+            res.success, res.message = True, "landing (sent immediately)"
+            return res
         self.run_async(self.tello.land, "land")
         res.success, res.message = True, "landing"
         return res
