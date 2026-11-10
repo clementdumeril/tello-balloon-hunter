@@ -174,7 +174,8 @@ class TeleopGui(Node):
         elif time.time() - self.tel_t > 2.0:
             self.status.config(text="driver found, waiting for telemetry...", fg="#ffd24d")
         else:
-            state = "FLYING" if self.in_air() else "ON THE GROUND (t = take off)"
+            state = ("TAKING OFF / CLIMBING (wait)" if self.tel.get("busy") else
+                     "FLYING" if self.in_air() else "ON THE GROUND (t = take off)")
             self.status.config(text=f"{state}   battery {self.tel.get('bat', '?')} %   height {self.tel.get('h', '?')} cm",
                                fg="#60ff90" if self.in_air() else "white")
         self.cmd_lbl.config(text=f"speed {SPEEDS[self.level]} m/s   command: fwd {t.linear.x:+.2f}  left {t.linear.y:+.2f}  "

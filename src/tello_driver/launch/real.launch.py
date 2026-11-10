@@ -38,7 +38,8 @@ def setup(context):
     nodes = [
         Node(package="tello_driver", executable="tello_driver", output="screen",
              parameters=[{"mock": lc("mock") == "true", "camera_info_file": calib,
-                          "mock_markers_file": lc("markers")}]),
+                          "mock_markers_file": lc("markers"),
+                          "takeoff_height": takeoff_height(lc("markers"), lc("takeoff_height"))}]),
         Node(package="aruco_localization", executable="marker_map_publisher", output="screen",
              parameters=[{"markers_file": lc("markers")}]),
         Node(package="aruco_localization", executable="aruco_localizer", output="screen",
@@ -51,6 +52,19 @@ def setup(context):
         nodes.append(Node(package="rviz2", executable="rviz2", output="log",
                           arguments=["-d", rviz_config_centred_on_markers(os.path.join(share, "config", "real.rviz"), lc("markers"))]))
     return nodes
+
+
+def takeoff_height(markers_file, arg):
+    """Height to climb to after takeoff: 0.5 m under the median marker height (camera 55.6 x 43 deg: from
+    2 m away it sees +-0.8 m around its own height), between 1.0 and 2.0 m. 'auto' or a number in metres."""
+    if arg != "auto":
+        return float(arg)
+    import yaml
+    try:
+        zs = sorted(float(m["z"]) for m in yaml.safe_load(open(markers_file, encoding="utf-8"))["markers"])
+    except Exception:  # noqa: BLE001
+        return 0.0
+    return round(min(2.0, max(1.0, zs[len(zs) // 2] - 0.5)), 2)
 
 
 def rviz_config_centred_on_markers(template, markers_file):
@@ -89,6 +103,8 @@ def generate_launch_description():
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("record", default_value="true", description="save images, poses, telemetry in ~/tello_ws/sessions"),
         DeclareLaunchArgument("markers", default_value=os.path.join(REPO, "config", "markers.yaml")),
+        DeclareLaunchArgument("takeoff_height", default_value="auto",
+                              description="climb to this height (m) after takeoff; auto = from the marker heights; 0 = no climb"),
         DeclareLaunchArgument("camera_info_file", default_value="auto",
                               description="calibration YAML; auto = config/tello_camera.yaml if it exists"),
         OpaqueFunction(function=setup),

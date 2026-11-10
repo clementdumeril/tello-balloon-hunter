@@ -69,7 +69,8 @@ class Teleop(Node):
         elif time.time() - self.tel_t > 2.0:
             line = "driver found, waiting for telemetry..."
         else:
-            fly = "FLYING" if self.in_air() else "on the ground (t = take off)"
+            fly = ("climbing (wait)" if self.tel.get("busy") else
+                   "FLYING" if self.in_air() else "on the ground (t = take off)")
             line = (f"{fly} | bat {self.tel.get('bat', '?')}% | h {self.tel.get('h', '?')} cm"
                     f" | key: {self.last_key}")
         # one terminal line only: a wrapped line cannot be rewritten in place and would scroll

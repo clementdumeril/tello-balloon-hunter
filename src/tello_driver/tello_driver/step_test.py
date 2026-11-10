@@ -221,11 +221,14 @@ class StepTest(Node):
                 raise Abort("cancelled")
             r = self.call("takeoff", timeout=3.0)
             self.say(f"takeoff: {r.message if r else '?'}")
+            # the driver takes off then climbs to the height where the markers are visible: wait for both
             t0 = time.time()
-            while not self.in_air() and time.time() - t0 < 12.0:
+            self.spin(0.5)
+            while (not self.in_air() or self.tel.get("busy")) and time.time() - t0 < 25.0:
                 self.check_keys()
                 self.spin(0.1)
-            self.spin(2.0)
+            self.say(f"In the air at {self.tel.get('h', '?')} cm")
+            self.spin(1.5)
         # start point = median of the poses over 1.5 s of hover
         self.say("Hovering, measuring the start point...")
         samples = []

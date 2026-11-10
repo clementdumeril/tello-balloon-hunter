@@ -54,7 +54,7 @@ class FakeWorld:
         self.K, self.D = np.asarray(K, float).reshape(3, 3), np.asarray(D, float).ravel()
 
     def start_pose(self):
-        """2 m in front of the wall that holds the most markers, 1.4 m high, facing it."""
+        """On the floor, 2 m in front of the wall that holds the most markers, facing it (like a real start)."""
         groups = {}
         for m in self.markers.values():
             groups.setdefault(round(math.degrees(math.atan2(m.R[1, 2], m.R[0, 2])) / 45), []).append(m)
@@ -64,7 +64,7 @@ class FakeWorld:
         n[2] = 0.0
         n /= np.linalg.norm(n)
         p = c + 2.0 * n
-        p[2] = 1.4
+        p[2] = 0.0
         return p, math.atan2(-n[1], -n[0])
 
     # ---------------------------------------------------------------- dynamics

@@ -2,6 +2,9 @@
 # Measured by scripts/room_mapper.py on 2026-11-09 18:48 from 20261109_183913
 # (76 images, bundle adjustment RMS 1.07 px; origin marker 6 set at 1.3 m above the floor (--origin-height); hand-held camera at 1.74 m median (sanity check)).
 # Frame map: origin on the floor below marker 6, y out of its wall into the room, z up.
+# 2026-11-09 23:00: all z shifted +0.38 m: the Scaniverse scan (aligned on the markers, 3 cm mean error) puts the
+# floor plane 0.38 m below the old origin (the 'marker 6 at 1.30 m' estimate was too low; real flight ToF agrees).
+# z is now the height above the floor (scan: flat floor, ceiling at 2.90 m).
 # Each marker: centre (m) and yaw_deg = direction the marker faces.
 
 dictionary: DICT_6X6_50
@@ -13,15 +16,15 @@ room:                      # bounding box of the markers + margin (simulator onl
   height: 3.09
 
 markers:
-  - {id:  1, x: -2.832, y: 0.586, z: 2.290, yaw_deg:   -1.3}   # views 7, tilt 4.1 deg
-  - {id:  2, x: -2.784, y: 2.123, z: 2.110, yaw_deg:   -1.9}   # views 14, tilt 4.1 deg
-  - {id:  3, x: -2.804, y: 1.398, z: 2.202, yaw_deg:   -0.7}   # views 17, tilt 3.8 deg
-  - {id:  4, x: -2.089, y: 0.060, z: 1.909, yaw_deg:   88.7}   # views 19, tilt 2.0 deg
-  - {id:  5, x: -1.350, y: 0.042, z: 1.211, yaw_deg:   87.9}   # views 9, tilt 4.0 deg
-  - {id:  6, x: 0.000, y: 0.000, z: 1.300, yaw_deg:   90.0}   # views 22, tilt 1.5 deg
-  - {id:  7, x: -1.406, y: 0.064, z: 1.917, yaw_deg:   89.9}   # views 28, tilt 3.2 deg
-  - {id:  8, x: 0.104, y: 0.014, z: 1.927, yaw_deg:   88.7}   # views 17, tilt 1.1 deg
-  - {id:  9, x: 0.579, y: 0.548, z: 1.809, yaw_deg: -177.2}   # views 14, tilt 3.2 deg
-  - {id: 10, x: -0.660, y: 0.029, z: 1.799, yaw_deg:   89.7}   # views 22, tilt 1.0 deg
-  - {id: 11, x: 0.510, y: 1.332, z: 2.015, yaw_deg: -173.8}   # views 10, tilt 4.4 deg
-  - {id: 12, x: 0.529, y: 1.335, z: 1.510, yaw_deg: -173.8}   # views 12, tilt 2.8 deg
+  - {id:  1, x: -2.832, y: 0.586, z: 2.670, yaw_deg:   -1.3}   # views 7, tilt 4.1 deg
+  - {id:  2, x: -2.784, y: 2.123, z: 2.490, yaw_deg:   -1.9}   # views 14, tilt 4.1 deg
+  - {id:  3, x: -2.804, y: 1.398, z: 2.582, yaw_deg:   -0.7}   # views 17, tilt 3.8 deg
+  - {id:  4, x: -2.089, y: 0.060, z: 2.289, yaw_deg:   88.7}   # views 19, tilt 2.0 deg
+  - {id:  5, x: -1.350, y: 0.042, z: 1.591, yaw_deg:   87.9}   # views 9, tilt 4.0 deg
+  - {id:  6, x: 0.000, y: 0.000, z: 1.680, yaw_deg:   90.0}   # views 22, tilt 1.5 deg
+  - {id:  7, x: -1.406, y: 0.064, z: 2.297, yaw_deg:   89.9}   # views 28, tilt 3.2 deg
+  - {id:  8, x: 0.104, y: 0.014, z: 2.307, yaw_deg:   88.7}   # views 17, tilt 1.1 deg
+  - {id:  9, x: 0.579, y: 0.548, z: 2.189, yaw_deg: -177.2}   # views 14, tilt 3.2 deg
+  - {id: 10, x: -0.660, y: 0.029, z: 2.179, yaw_deg:   89.7}   # views 22, tilt 1.0 deg
+  - {id: 11, x: 0.510, y: 1.332, z: 2.395, yaw_deg: -173.8}   # views 10, tilt 4.4 deg
+  - {id: 12, x: 0.529, y: 1.335, z: 1.890, yaw_deg: -173.8}   # views 12, tilt 2.8 deg

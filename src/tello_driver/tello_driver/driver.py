@@ -65,9 +65,24 @@ class FakeTello:
     def takeoff(self):
         if self.world is not None:
             self.world.flying = True
-            self.world.z_target = max(self.world.p[2], 1.0)
-        time.sleep(1.0)
+            self.world.z_target = max(self.world.p[2], 0.85)  # the real Tello stops around 0.8-0.9 m
+            self.wait_z()
+        else:
+            time.sleep(1.0)
         self.is_flying = True
+
+    def move_up(self, cm):
+        if self.world is not None:
+            self.world.z_target = self.world.p[2] + cm / 100.0
+            self.wait_z()
+
+    def wait_z(self, timeout=8.0):
+        t0 = time.time()
+        while self.world.z_target is not None and time.time() - t0 < timeout:
+            time.sleep(0.05)
+
+    def get_height(self):
+        return int(self.world.p[2] * 100) if self.world is not None else 80
 
     def land(self):
         if self.world is not None:
@@ -137,6 +152,9 @@ class TelloDriver(Node):
         self.max_rc = int(p("max_rc", 60).value)
         self.cmd_timeout = p("cmd_timeout", 0.5).value
         self.low_battery = p("low_battery", 12).value
+        # after the takeoff (~0.8 m), climb to this height (m above the takeoff point, 0 = stay) so that the
+        # camera sees the markers; real.launch.py computes it from the marker map
+        self.takeoff_height = p("takeoff_height", 0.0).value
 
         # Refuse to run next to another driver (e.g. a forgotten fake drone): two sources of /tello/image_raw
         # make the camera view flicker and the pose jump between them.
@@ -276,6 +294,7 @@ class TelloDriver(Node):
         st = dict(self.state)
         st["stamp"] = self.get_clock().now().nanoseconds * 1e-9
         st["flying"] = bool(self.tello.is_flying)
+        st["busy"] = self.busy.locked()  # takeoff / climb / land running: not ready for velocity commands
         self.pub_tel.publish(String(data=json.dumps(st)))
         bat = self.state.get("bat")
         if self.tello.is_flying and isinstance(bat, (int, float)) and bat <= self.low_battery:
@@ -292,6 +311,8 @@ class TelloDriver(Node):
         self.last_cmd = time.time()
 
     def send_rc(self):
+        if self.busy.locked():
+            return  # a takeoff / climb / land command is running: rc would interfere with it
         rc = self.rc_target if time.time() - self.last_cmd < self.cmd_timeout else (0, 0, 0, 0)
         try:
             self.tello.send_rc_control(*rc)  # also keeps the link alive (the Tello lands after 15 s of silence)
@@ -316,9 +337,20 @@ class TelloDriver(Node):
         if isinstance(bat, (int, float)) and bat < 25:
             res.success, res.message = False, f"battery {bat} % < 25 %: takeoff refused"
             return res
-        self.run_async(self.tello.takeoff, "takeoff")
-        res.success, res.message = True, "taking off"
+        self.run_async(self.takeoff_and_climb, "takeoff")
+        res.success, res.message = True, ("taking off" + (f", then climbing to {self.takeoff_height:.2f} m"
+                                                         if self.takeoff_height > 0 else ""))
         return res
+
+    def takeoff_and_climb(self):
+        self.tello.takeoff()
+        if self.takeoff_height <= 0:
+            return
+        h = self.tello.get_height()  # cm above the takeoff point
+        delta = int(round(self.takeoff_height * 100 - h))
+        if delta >= 20:  # the SDK refuses moves under 20 cm
+            self.get_logger().info(f"climbing {delta} cm to {self.takeoff_height:.2f} m (markers in view)")
+            self.tello.move_up(min(delta, 200))
 
     def srv_land(self, req, res):
         self.rc_target = (0, 0, 0, 0)
