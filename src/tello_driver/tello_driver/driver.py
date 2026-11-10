@@ -138,9 +138,38 @@ class TelloDriver(Node):
         self.last_cmd = 0.0
         self.busy = threading.Lock()
         self.state = {}
+        self.last_frame_t = time.time()
+        self.video_timeout = p("video_timeout", 3.0).value
+        self.restarting = False
         self.create_timer(1 / 60, self.poll_video)
         self.create_timer(0.1, self.poll_state)
         self.create_timer(0.05, self.send_rc)
+        self.create_timer(1.0, self.video_watchdog)
+
+    def video_watchdog(self):
+        """The Wi-Fi/WSL route to the drone can drop for a few seconds (Windows re-checks the network ~20 s
+        after joining the Tello's Wi-Fi). That kills djitellopy's decoder thread for good: restart the stream."""
+        if self.mock or self.restarting or time.time() - self.last_frame_t < self.video_timeout:
+            return
+        self.restarting = True
+        self.get_logger().warn(f"No video for {time.time() - self.last_frame_t:.0f} s: restarting the stream")
+
+        def restart():
+            try:
+                try:
+                    self.tello.streamoff()
+                except Exception:  # noqa: BLE001
+                    self.tello.background_frame_read = None
+                time.sleep(0.5)
+                self.tello.streamon()
+                self.reader = self.tello.get_frame_read()
+                self.get_logger().info("Video stream restarted")
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().warn(f"Video restart failed ({e}): retrying", throttle_duration_sec=5.0)
+            finally:
+                self.last_frame_t = time.time()  # give the new stream time to start
+                self.restarting = False
+        threading.Thread(target=restart, daemon=True).start()
 
     def wait_for_tello_network(self, timeout):
         """WSL mirrored networking takes a few seconds to follow a Wi-Fi change: wait for a route to the drone."""
@@ -175,6 +204,7 @@ class TelloDriver(Node):
         if frame.shape[:2] == (300, 400) and not frame.any():
             return
         self.last_frame = frame
+        self.last_frame_t = time.time()
         h, w = frame.shape[:2]
         if self.info is None or (self.info.width, self.info.height) != (w, h):
             self.info, calibrated = load_camera_info(self.calib_file, w, h, self.frame_id)
