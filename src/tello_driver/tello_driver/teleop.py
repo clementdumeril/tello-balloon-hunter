@@ -7,6 +7,7 @@
 Each key press moves for `hold` seconds (a terminal cannot see key releases): keep the key
 pressed to keep moving; the driver's watchdog stops the drone if nothing arrives.
 """
+import os
 import select
 import sys
 import termios
@@ -70,20 +71,32 @@ class Teleop(Node):
         self.pub.publish(self.cmd if time.time() < self.until else Twist())
 
 
+ARROWS = {b"\x1b[A": "UP", b"\x1b[B": "DOWN", b"\x1b[C": "RIGHT", b"\x1b[D": "LEFT",
+          b"\x1bOA": "UP", b"\x1bOB": "DOWN", b"\x1bOC": "RIGHT", b"\x1bOD": "LEFT"}
+_pending = b""
+
+
 def read_key(timeout):
-    r, _, _ = select.select([sys.stdin], [], [], timeout)
-    if not r:
-        return None
-    c = sys.stdin.read(1)
-    if c == "\x1b":  # arrow keys: ESC [ A/B/C/D
-        seq = sys.stdin.read(2) if select.select([sys.stdin], [], [], 0.01)[0] else ""
-        return {"[A": "UP", "[B": "DOWN", "[C": "RIGHT", "[D": "LEFT"}.get(seq)
-    return c.lower()
+    """One key, or None. Reads the raw terminal bytes with os.read: sys.stdin is buffered, so after
+    sys.stdin.read(1) the rest of an arrow sequence (ESC [ A) sits in Python's buffer, select() sees
+    nothing left, and the arrow is lost."""
+    global _pending
+    fd = sys.stdin.fileno()
+    if not _pending:
+        if not select.select([fd], [], [], timeout)[0]:
+            return None
+        _pending = os.read(fd, 64)
+    if _pending.startswith(b"\x1b"):
+        if len(_pending) < 3 and select.select([fd], [], [], 0.02)[0]:
+            _pending += os.read(fd, 64)
+        seq, _pending = _pending[:3], _pending[3:]
+        return ARROWS.get(seq)
+    c, _pending = _pending[:1], _pending[1:]
+    return c.decode(errors="ignore").lower()
 
 
 def main():
     # same local-only ROS 2 settings as real.launch.py, or the teleop cannot see the driver on the Tello Wi-Fi
-    import os
     os.environ.setdefault("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST")
     os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "LARGE_DATA")
     rclpy.init()
