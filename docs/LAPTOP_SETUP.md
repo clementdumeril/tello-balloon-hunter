@@ -74,6 +74,19 @@ loads `~/tello_ws/room_scan/room_map.obj`, made from a Scaniverse OBJ + its mark
 its distance sensor and the ArUco pose. Ceiling guard for every program: `max_height` 2.6 m (launch argument), it
 brakes ahead of the limit and descends if above it.
 
+## Marker tour (first autonomous mission)
+
+Same start as the identification flight (drone on the floor, 2 m from the marker wall, facing it, no teleop):
+
+```bash
+ros2 run tello_driver tello_marker_tour
+```
+
+ENTER takes off; the drone climbs, then visits every marker (stops in front of it, facing it, 2 s), changing
+walls from the room centre, comes back to its start point and lands. About 2 min. Flight zone: 0.6 m from the
+marker walls and inside the room scan, heights 1.2-2.2 m, at most 0.3 m/s. **Any key = stop and land.**
+Checked on the fake drone (12/12 markers, 119 s). Recorded in `~/tello_ws/sessions/tour_<time>/`.
+
 ## Identification flight (the drone's model, for the position controller)
 
 Drone facing the marker wall at about 2 m, 2-3 markers in the picture, nothing within 1 m, battery > 30 %.
