@@ -115,12 +115,19 @@ class TelloDriver(Node):
         if self.mock:
             self.tello = FakeTello()
         else:
+            self.wait_for_tello_network(p("network_timeout", 30.0).value)
             from djitellopy import Tello
             self.tello = Tello()
         self.get_logger().info("Connecting to the Tello" + (" (FAKE)" if self.mock else "") + "...")
-        self.tello.connect()
+        try:
+            self.tello.connect()
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().fatal(f"No answer from the Tello ({e}). Switch it OFF and on, then start this launch "
+                                    "FIRST (the Tello answers only its first client), and stay on its Wi-Fi.")
+            raise SystemExit(1)
         self.get_logger().info(f"Connected, battery {self.tello.get_battery()} %")
         self.tello.streamon()
+        self.get_logger().info("Video stream on, waiting for the first frames...")
         self.reader = self.tello.get_frame_read()
 
         self.info = None
@@ -132,6 +139,30 @@ class TelloDriver(Node):
         self.create_timer(1 / 60, self.poll_video)
         self.create_timer(0.1, self.poll_state)
         self.create_timer(0.05, self.send_rc)
+
+    def wait_for_tello_network(self, timeout):
+        """WSL mirrored networking takes a few seconds to follow a Wi-Fi change: wait for a route to the drone."""
+        import socket
+        t0, warned = time.time(), False
+        while True:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("192.168.10.1", 8889))  # sends nothing: only asks for a route
+                ip = s.getsockname()[0]
+                s.close()
+                if ip.startswith("192.168.10."):
+                    self.get_logger().info(f"On the Tello Wi-Fi ({ip})")
+                    return
+            except OSError:
+                ip = "no route"
+            if time.time() - t0 > timeout:
+                self.get_logger().fatal(f"Not on the Tello Wi-Fi after {timeout:.0f} s ({ip}). Connect Windows to "
+                                        "TELLO-xxxxxx, wait ~10 s, then relaunch.")
+                raise SystemExit(1)
+            if not warned:
+                self.get_logger().warn("Waiting for the Tello Wi-Fi (connect Windows to TELLO-xxxxxx)...")
+                warned = True
+            time.sleep(1.0)
 
     # ---------------------------------------------------------------- video
     def poll_video(self):

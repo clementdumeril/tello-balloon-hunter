@@ -26,13 +26,21 @@ def log(key, value):
     print(f"{key:28s} {value}")
 
 
-def local_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(TELLO)
-        return s.getsockname()[0]
-    finally:
-        s.close()
+def local_ip(wait=15.0):
+    """Local address towards the drone; waits a bit (WSL takes a few seconds to follow a Wi-Fi change)."""
+    t0 = time.time()
+    while True:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(TELLO)
+            ip = s.getsockname()[0]
+        except OSError:
+            ip = "no route"
+        finally:
+            s.close()
+        if ip.startswith("192.168.10.") or time.time() - t0 > wait:
+            return ip
+        time.sleep(1.0)
 
 
 def port_free(port):
