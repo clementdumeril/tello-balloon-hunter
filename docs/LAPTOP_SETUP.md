@@ -78,10 +78,10 @@ ros2 run tello_driver tello_step_test
 ENTER takes off. About 1 min 30: on each axis (forward, left, up, turn) two doublets (+0.3 m/s for 1.2 s then
 -0.3 m/s, so the drone comes back), with a re-centring on the start point in between. **Any key = stop and land.**
 Automatic landing if the drone leaves a +-0.8 m box, if no marker is seen for 3 s, or on low battery.
-It lands, then fits per axis $	au \dot v = K u(t-L) - v$ and prints $K$ (real/commanded speed), $	au$ and $L$.
+It lands, then fits per axis $\tau \dot v = K u(t-L) - v$ and prints $K$ (real/commanded speed), $\tau$ and $L$.
 Results in `~/tello_ws/sessions/step_<time>/` (`model.yaml`, `step_fit.png`). Re-fit a folder:
-`ros2 run tello_driver tello_step_fit <folder>`. Checked on the fake drone (built-in $	au$ = 0.8 s, $L$ = 0.1 s):
-fit $K$ 0.97-1.09, $	au$ 0.75-0.90 s, $L$ 0.10-0.16 s (0.1 s + camera/localizer).
+`ros2 run tello_driver tello_step_fit <folder>`. Checked on the fake drone (built-in $\tau$ = 0.8 s, $L$ = 0.1 s):
+fit $K$ 0.97-1.09, $\tau$ 0.75-0.90 s, $L$ 0.10-0.16 s (0.1 s + camera/localizer).
 
 ## 4. Camera calibration (once per drone, before trusting positions)
 
