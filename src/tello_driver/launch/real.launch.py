@@ -62,11 +62,17 @@ def rviz_config_centred_on_markers(template, markers_file):
         cy = sum(m["y"] for m in ms) / len(ms)
         cz = sum(m["z"] for m in ms) / len(ms)
         span = max(max(m["x"] for m in ms) - min(m["x"] for m in ms), max(m["y"] for m in ms) - min(m["y"] for m in ms))
+        # look from the side the markers face (their mean normal), so their printed side is visible
+        import math
+        nx = sum(math.cos(math.radians(m.get("yaw_deg", 0))) for m in ms)
+        ny = sum(math.sin(math.radians(m.get("yaw_deg", 0))) for m in ms)
+        view_yaw = math.atan2(ny, nx) if abs(nx) + abs(ny) > 1e-3 else 3.9
     except Exception:  # noqa: BLE001
         return template
     text = open(template, encoding="utf-8").read()
     text = text.replace("Focal Point: {X: 1.5, Y: 1.5, Z: 0.8}", f"Focal Point: {{X: {cx:.2f}, Y: {cy:.2f}, Z: {cz:.2f}}}")
-    text = text.replace("Distance: 6", f"Distance: {max(4.0, 1.8 * span):.1f}")
+    text = text.replace("Distance: 6", f"Distance: {max(4.5, 2.2 * span):.1f}")
+    text = text.replace("Yaw: 3.9", f"Yaw: {view_yaw:.2f}")
     out = Path("/tmp") / "tello_real_centred.rviz"
     out.write_text(text, encoding="utf-8")
     return str(out)
