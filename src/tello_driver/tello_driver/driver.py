@@ -116,7 +116,9 @@ class TelloDriver(Node):
             self.tello = FakeTello()
         else:
             self.wait_for_tello_network(p("network_timeout", 30.0).value)
+            import logging
             from djitellopy import Tello
+            Tello.LOGGER.setLevel(logging.WARNING)  # no 'rc 0 0 0 0' line 20 times per second
             self.tello = Tello()
         self.get_logger().info("Connecting to the Tello" + (" (FAKE)" if self.mock else "") + "...")
         try:

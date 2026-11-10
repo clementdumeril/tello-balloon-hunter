@@ -10,13 +10,14 @@ import os
 from pathlib import Path
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 from ament_index_python.packages import get_package_share_directory
 
 REPO = os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter"))
+LOCAL_ROS_ENV = {"ROS_AUTOMATIC_DISCOVERY_RANGE": "LOCALHOST", "FASTDDS_BUILTIN_TRANSPORTS": "LARGE_DATA"}
 
 
 def setup(context):
@@ -61,6 +62,9 @@ def rviz_config_centred_on_markers(template, markers_file):
 
 def generate_launch_description():
     return LaunchDescription([
+        # All nodes run on this PC. Keep ROS 2 discovery and data local (localhost + shared memory) so that
+        # switching Windows to the Tello Wi-Fi (no multicast, no internet) does not cut the nodes off.
+        *[SetEnvironmentVariable(k, v) for k, v in LOCAL_ROS_ENV.items()],
         DeclareLaunchArgument("mock", default_value="false"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("markers", default_value=os.path.join(REPO, "config", "markers.yaml")),

@@ -82,6 +82,10 @@ def read_key(timeout):
 
 
 def main():
+    # same local-only ROS 2 settings as real.launch.py, or the teleop cannot see the driver on the Tello Wi-Fi
+    import os
+    os.environ.setdefault("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST")
+    os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "LARGE_DATA")
     rclpy.init()
     node = Teleop()
     old = termios.tcgetattr(sys.stdin)
