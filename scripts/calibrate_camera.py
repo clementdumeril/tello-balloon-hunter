@@ -31,6 +31,8 @@ STILL_PX = 3.0                    # mean corner motion between frames still coun
 STILL_TIME = 0.3                  # seconds still before the photo
 SHARP_MIN = 30.0                  # Laplacian variance on the board (below = blurry)
 MIN_VIEWS, MAX_VIEWS = 15, 40
+WIN = "Calibration de la camera"
+PHOTOS = Path(__file__).resolve().parent.parent / "logs" / "calibration"
 
 CHECKS = [  # key, label, test on the measurement
     ("near", "Près (damier grand dans l'image)", lambda m: m["w"] > 0.45),
@@ -137,7 +139,7 @@ def missing_hint(cov_cells, cov_checks):
     return " · ".join(parts)
 
 
-def run(frames_iter, save=True, show=True):
+def run(frames_iter, save=True, show=True, photo_dir=None):
     obj, img_pts, views = [], [], []
     cov_cells, cov_checks = set(), set()
     size = K0 = None
@@ -148,8 +150,9 @@ def run(frames_iter, save=True, show=True):
             size = (frame.shape[1], frame.shape[0])
             f0 = math.hypot(*size) / 2 / math.tan(math.radians(82.6) / 2)
             K0 = np.array([[f0, 0, size[0] / 2], [0, f0, size[1] / 2], [0, 0, 1]])
-        complete = len(cov_cells) == GRID * GRID and len(cov_checks) == len(CHECKS) and len(obj) >= MIN_VIEWS
+        complete = len(cov_cells) == GRID * GRID and len(obj) >= MIN_VIEWS and (len(cov_checks) >= 5 or len(obj) >= 25)
         if complete or len(obj) >= MAX_VIEWS:
+            print("Assez de photos variées : calcul de la calibration.")
             break
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         found, corners = cv2.findChessboardCorners(gray, (COLS, ROWS),
@@ -179,14 +182,21 @@ def run(frames_iter, save=True, show=True):
                 still_since = still_since or time.time()
                 status, color = "Ne bouge plus…", (120, 230, 140)
                 take = time.time() - still_since >= STILL_TIME
-        k = 255
+        k, closed = 255, False
         if show:
-            cv2.imshow("Calibration de la camera", draw(frame, cov_cells, cov_checks, len(obj), status, color,
-                                                        corners if found else None, time.time() < flash_until,
-                                                        missing_hint(cov_cells, cov_checks)))
+            hint = missing_hint(cov_cells, cov_checks)
+            if len(obj) >= 10:
+                hint = "Assez de photos : appuie sur C pour calculer (ou continue pour l'améliorer)"
+            cv2.imshow(WIN, draw(frame, cov_cells, cov_checks, len(obj), status, color,
+                                 corners if found else None, time.time() < flash_until, hint))
             k = cv2.waitKey(1) & 0xFF
-        if k == 27:
-            print("Abandon : rien n'est enregistré.")
+            closed = cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1
+        if k == 27 or closed:
+            if len(obj) >= 10:
+                print(f"Fermeture avec {len(obj)} photos : calcul quand même.")
+                break
+            print(f"Abandon avec {len(obj)} photos (il en faut 10) : rien n'est calculé."
+                  + (f" Les photos sont gardées dans {photo_dir}." if photo_dir and obj else ""))
             return None
         if k in (ord("c"), ord("C")) and len(obj) >= 10:
             break
@@ -197,6 +207,8 @@ def run(frames_iter, save=True, show=True):
             cov_cells |= m["cells"]
             cov_checks |= {key for key, _, f in CHECKS if f(m)}
             still_since, flash_until = None, time.time() + 0.25
+            if photo_dir:
+                cv2.imwrite(str(Path(photo_dir) / f"calib_{len(obj):02d}.jpg"), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
             print(f"photo {len(obj)} : cases {len(cov_cells)}/{GRID * GRID}, coché {sorted(cov_checks)}")
     if len(obj) < 10:
         print(f"Seulement {len(obj)} photos : il en faut au moins 10. Relance le script.")
@@ -220,7 +232,7 @@ def run(frames_iter, save=True, show=True):
     if show and frame is not None:
         end = draw(cv2.undistort(frame, K, D), cov_cells, cov_checks, len(obj), f"Calibration {word} : erreur {rms:.2f} px",
                    color, None, False, "Image corrigée : les lignes droites doivent être droites · une touche pour fermer")
-        cv2.imshow("Calibration de la camera", end)
+        cv2.imshow(WIN, end)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
     return rms, K, D
@@ -231,8 +243,34 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:  # noqa: BLE001
         pass
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--from-photos", help="recompute from a folder of saved photos (logs/calibration/...)")
+    a = ap.parse_args()
+    if a.from_photos:
+        files = sorted(Path(a.from_photos).glob("calib_*.jpg"))
+        obj, pts, size = [], [], None
+        for f in files:
+            gray = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
+            size = (gray.shape[1], gray.shape[0])
+            ok, c = cv2.findChessboardCorners(gray, (COLS, ROWS), cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE)
+            if ok:
+                obj.append(board_points())
+                pts.append(cv2.cornerSubPix(gray, c, (11, 11), (-1, -1), (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)))
+        print(f"{len(obj)}/{len(files)} photos utilisables dans {a.from_photos}")
+        if len(obj) < 10:
+            sys.exit("Il faut au moins 10 photos utilisables.")
+        rms, K, D, _, _ = cv2.calibrateCamera(obj, pts, size, None, None)
+        save_calib(CALIB, K, D, size, rms)
+        print(f"Calibration {verdict(rms)[0]} : erreur {rms:.2f} px · fx {K[0, 0]:.1f} fy {K[1, 1]:.1f} cx {K[0, 2]:.1f} cy {K[1, 2]:.1f}")
+        print(f"Enregistrée dans {CALIB}")
+        return
     print(__doc__)
-    run(tello_stream())
+    from datetime import datetime
+    photo_dir = PHOTOS / datetime.now().strftime("%Y%m%d_%H%M%S")
+    photo_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Photos enregistrées au fur et à mesure dans {photo_dir}")
+    run(tello_stream(), photo_dir=photo_dir)
 
 
 if __name__ == "__main__":
