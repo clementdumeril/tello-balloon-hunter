@@ -148,7 +148,7 @@ def run(frames_iter, save=True, show=True, photo_dir=None):
     for frame in frames_iter:
         if size is None:
             size = (frame.shape[1], frame.shape[0])
-            f0 = math.hypot(*size) / 2 / math.tan(math.radians(82.6) / 2)
+            f0 = size[0] / 2 / math.tan(math.radians(55.6) / 2)  # measured Tello video FOV (Nov 9 calibration)
             K0 = np.array([[f0, 0, size[0] / 2], [0, f0, size[1] / 2], [0, 0, 1]])
         complete = len(cov_cells) == GRID * GRID and len(obj) >= MIN_VIEWS and (len(cov_checks) >= 5 or len(obj) >= 25)
         if complete or len(obj) >= MAX_VIEWS:
@@ -220,7 +220,7 @@ def run(frames_iter, save=True, show=True, photo_dir=None):
     if len(keep) < len(obj) and len(keep) >= 10:
         rms, K, D, _, _ = cv2.calibrateCamera([obj[i] for i in keep], [img_pts[i] for i in keep], size, None, None)
     word, color = verdict(rms)
-    f_exp = math.hypot(*size) / 2 / math.tan(math.radians(82.6) / 2)
+    f_exp = size[0] / 2 / math.tan(math.radians(55.6) / 2)  # ~910 px at 960x720 (Nov 9 calibration)
     f_note = "" if abs(K[0, 0] / f_exp - 1) < 0.2 else f"  ATTENTION : focale {K[0, 0]:.0f} px loin des ~{f_exp:.0f} attendus (damier mal imprimé ?)"
     missing = [label for key, label, _ in CHECKS if key not in cov_checks]
     print(f"Calibration {word} : erreur {rms:.2f} px ({len(keep)} photos utilisées sur {len(obj)})\n"

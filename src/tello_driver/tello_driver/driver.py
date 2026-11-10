@@ -80,8 +80,9 @@ def load_camera_info(path, width, height, frame_id):
         if c.get("image_width") and (c["image_width"], c["image_height"]) != (width, height):
             raise ValueError(f"calibration is for {c['image_width']}x{c['image_height']}, stream is {width}x{height}")
         return info, True
-    # uncalibrated: ideal pinhole from the 82.6 deg diagonal field of view
-    f = math.hypot(width, height) / 2 / math.tan(math.radians(82.6) / 2)
+    # uncalibrated: ideal pinhole with the measured video field of view (55.6 deg horizontal, Nov 9 calibration).
+    # DJI's 82.6 deg is the photo mode, not the 960x720 video stream.
+    f = width / 2 / math.tan(math.radians(55.6) / 2)
     info.k = [f, 0.0, width / 2, 0.0, f, height / 2, 0.0, 0.0, 1.0]
     info.d = [0.0] * 5
     info.r = [1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0]
@@ -136,6 +137,9 @@ class TelloDriver(Node):
     def poll_video(self):
         frame = self.reader.frame
         if frame is None or frame is self.last_frame:
+            return
+        # djitellopy starts with a black 400x300 placeholder before the first decoded frame: skip it
+        if frame.shape[:2] == (300, 400) and not frame.any():
             return
         self.last_frame = frame
         h, w = frame.shape[:2]

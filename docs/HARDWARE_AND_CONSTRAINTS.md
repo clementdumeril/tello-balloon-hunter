@@ -18,7 +18,7 @@ The design choices in this project are driven by what the hardware can really do
 | Property | Value | Impact |
 |---|---|---|
 | Video stream | 960×720, ~30 fps, H.264 over Wi-Fi | Compression artifacts, frame drops |
-| Camera | Fixed, forward-facing, ~82.6° diagonal FOV (≈ 680 px focal at 960×720) | Markers only on walls; no ceiling or floor markers |
+| Camera | Fixed, forward-facing. **Calibrated Nov 9: fx 910.5, fy 913.5, cx 466.6, cy 363.9 px at 960×720, small distortion (k1 −0.04), RMS 0.24 px** → video FOV **55.6° horizontal, 43° vertical** (DJI's 82.6° is the photo mode) | Markers only on walls; narrower view than expected → markers closer together |
 | Video latency | _TBM_ (typically 100–300 ms) | Delayed EKF updates (E4) |
 | Link | Tello is a 2.4 GHz access point; the laptop joins it | Laptop loses internet → use a USB Wi-Fi dongle or ethernet |
 | SDK | UDP: commands on 8889, state on 8890, video on 11111. `rc a b c d` velocity commands | Control rate ~10–20 Hz |
@@ -41,9 +41,9 @@ The design choices in this project are driven by what the hardware can really do
 
 | Object | Camera | Distance | Apparent size | Verdict |
 |---|---|---|---|---|
-| 15 cm ArUco | Tello | 3 m | ~34 px | OK for detection; pose accuracy drops with distance |
-| 15 cm ArUco | Tello | 1 m | ~100 px | Very good |
-| 28 cm balloon | Tello | 2 m | ~95 px | Easy to detect |
+| 15 cm ArUco | Tello | 3 m | ~45 px | OK for detection; pose accuracy drops with distance |
+| 15 cm ArUco | Tello | 1 m | ~137 px | Very good. At 1 m the camera sees a 1.05 m wide strip of wall; at 0.5 m only 0.53 m |
+| 28 cm balloon | Tello | 2 m | ~127 px | Easy to detect |
 | 28 cm balloon | C922 (720p) | 4 m | ~63 px | Easy to detect |
 | Tello (~10 cm) | C922 (720p) | 4 m | **~23 px** | **Hard for YOLO.** Small, blurred, thin props, so drone detection by YOLO is not in the plan (only background subtraction as a stretch, C5). |
 

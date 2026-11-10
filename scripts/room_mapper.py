@@ -96,6 +96,10 @@ def tello_stream():
     try:
         while True:
             f = reader.frame
+            # djitellopy starts with a black 400x300 placeholder before the first decoded frame: skip it
+            if f is not None and f.shape[:2] == (300, 400) and not f.any():
+                time.sleep(0.01)
+                continue
             if f is not None and f is not last:
                 last = f
                 yield cv2.cvtColor(f, cv2.COLOR_RGB2BGR)

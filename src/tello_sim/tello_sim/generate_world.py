@@ -15,8 +15,9 @@ import numpy as np
 
 from aruco_localization.marker_map import load_marker_map, marker_image, rpy_from_matrix
 
-# Tello camera: 960x720, ~82.6 deg diagonal FOV -> ~70.2 deg horizontal
-TELLO_HFOV = 2 * math.atan(480 / 683.0)
+# Tello video camera: 960x720, measured fx = 910 px (config/tello_camera.yaml) -> 55.6 deg horizontal.
+# (DJI's 82.6 deg diagonal is the photo mode, not the video stream.)
+TELLO_HFOV = 2 * math.atan(480 / 910.0)
 # Logitech C922: ~78 deg diagonal, 16:9 -> ~70.4 deg horizontal
 LOGI_HFOV = math.radians(70.4)
 
