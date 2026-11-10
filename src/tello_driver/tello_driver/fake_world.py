@@ -15,6 +15,7 @@ from aruco_localization.marker_map import aruco_dictionary, load_marker_map
 LIN_GAIN = 0.38 / 30              # m/s per rc point (measured on the real Tello, Nov 7)
 YAW_GAIN = math.radians(18) / 30  # rad/s per rc point
 TAU = 0.8                         # s, velocity response time constant
+DELAY = 0.10                      # s, command -> motion delay (radio + flight controller)
 CAM_OFFSET = np.array([0.05, 0.0, 0.0])
 R_BASE_CAM = np.column_stack([[0, -1, 0], [0, 0, -1], [1, 0, 0]]).astype(float)  # optical frame in body frame
 
@@ -44,6 +45,7 @@ class FakeWorld:
         self.v = np.zeros(3)   # body-frame velocity (x fwd, y left, z up)
         self.yaw_rate = 0.0
         self.rc = (0, 0, 0, 0)
+        self.rc_queue = []  # (time, rc): applied DELAY s after it was sent
         self.flying = False
         self.z_target = None
         self.t = time.time()
@@ -70,7 +72,11 @@ class FakeWorld:
         now = time.time()
         dt = min(now - self.t, 0.1)
         self.t = now
-        lr, fb, ud, yw = self.rc if self.flying else (0, 0, 0, 0)
+        self.rc_queue.append((now, self.rc))
+        while len(self.rc_queue) > 1 and self.rc_queue[1][0] <= now - DELAY:
+            self.rc_queue.pop(0)
+        rc = self.rc_queue[0][1] if self.rc_queue[0][0] <= now - DELAY else (0, 0, 0, 0)
+        lr, fb, ud, yw = rc if self.flying else (0, 0, 0, 0)
         v_target = np.array([fb, -lr, ud], float) * LIN_GAIN
         if self.z_target is not None:  # takeoff / land: vertical move like the real drone
             dz = self.z_target - self.p[2]
