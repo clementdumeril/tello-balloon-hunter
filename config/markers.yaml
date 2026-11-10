@@ -8,7 +8,7 @@
 # 4.0 x 3.5 m room, 3.0 m ceiling, 2 rows (z = 0.9 and 1.5 m), spacing 0.6 m.
 
 dictionary: DICT_6X6_50     # the markers actually printed and stuck on the walls (ID 12 seen Nov 9)
-marker_size: 0.15          # side of the black square, meters: MEASURE IT on the real sheets and update
+marker_size: 0.20          # side of the black square, meters (measured on the real sheets: 20 cm, Nov 9)
 
 room:                      # used by the simulator only
   size_x: 4.0
