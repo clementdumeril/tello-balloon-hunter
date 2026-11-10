@@ -158,6 +158,7 @@ class TelloDriver(Node):
         # highest allowed height above the floor (m): ceiling 2.80 m in the room, 2.60 m max (user, Nov 9)
         self.max_height = p("max_height", 2.6).value
         self.pose_z, self.pose_t = 0.0, 0.0
+        self.climb_target = None  # set after takeoff: send_rc climbs to it with joystick commands
 
         # Refuse to run next to another driver (e.g. a forgotten fake drone): two sources of /tello/image_raw
         # make the camera view flicker and the pose jump between them.
@@ -308,7 +309,8 @@ class TelloDriver(Node):
         st = dict(self.state)
         st["stamp"] = self.get_clock().now().nanoseconds * 1e-9
         st["flying"] = bool(self.tello.is_flying)
-        st["busy"] = self.busy.locked()  # takeoff / climb / land running: not ready for velocity commands
+        # takeoff / climb / land running: not ready for velocity commands
+        st["busy"] = self.busy.locked() or self.climb_target is not None
         self.pub_tel.publish(String(data=json.dumps(st)))
         bat = self.state.get("bat")
         if self.tello.is_flying and isinstance(bat, (int, float)) and bat <= self.low_battery:
@@ -328,14 +330,20 @@ class TelloDriver(Node):
         if self.busy.locked():
             return  # a takeoff / climb / land command is running: rc would interfere with it
         rc = self.rc_target if time.time() - self.last_cmd < self.cmd_timeout else (0, 0, 0, 0)
-        # ceiling guard, whatever program sends the commands. The drone needs ~1 s to stop (tau ~0.8 s + delay),
-        # so the guard works on the height predicted 1 s ahead, not on the current one.
         hgt = self.height_estimate() if self.tello.is_flying else None
+        vz = 0.0
         if hgt is not None:
             now = time.time()
             self.h_hist = [(t, h) for t, h in getattr(self, "h_hist", []) if now - t < 0.6] + [(now, hgt)]
             t_old, h_old = self.h_hist[0]
             vz = (hgt - h_old) / (now - t_old) if now - t_old > 0.2 else 0.0
+        if self.climb_target is not None and self.tello.is_flying:
+            ud = self.climb_rc(hgt, vz)
+            if ud is not None:
+                rc = (0, 0, ud, 0)  # climbing: other commands wait
+        # ceiling guard, whatever program sends the commands. The drone needs ~1 s to stop (tau ~0.8 s + delay),
+        # so the guard works on the height predicted 1 s ahead, not on the current one.
+        if hgt is not None:
             h_pred = hgt + max(vz, 0.0) * 1.0
             limit = self.max_height - 0.15
             lr, fb, ud, yw = rc
@@ -379,43 +387,36 @@ class TelloDriver(Node):
         return res
 
     def takeoff_and_climb(self):
+        """Takeoff (SDK command), then the climb is done by send_rc with joystick commands, closed-loop on the
+        measured height. The SDK 'up' command was refused right after takeoff ('error Not joystick', Nov 9),
+        and 'h' (barometer) read 20 cm at 80 cm: distance sensor + ArUco pose only."""
         self.tello.takeoff()
-        target = min(self.takeoff_height, self.max_height - 0.6)
-        if self.takeoff_height <= 0:
-            return
-        # Measure the real height, NOT the 'h' field: right after takeoff 'h' (barometer) read 20 cm while the
-        # drone was at 80 cm (Nov 9), and the climb went up to the ceiling. Distance sensor + ArUco pose instead.
-        time.sleep(1.0)
-        samples = []
-        t0 = time.time()
-        while time.time() - t0 < 1.0:
-            hgt = self.height_estimate()
-            if hgt is not None:
-                samples.append(hgt)
-            time.sleep(0.1)
-        if not samples:
-            self.get_logger().warn("no valid height measurement after takeoff: not climbing")
-            return
-        hgt = float(np.median(samples))
-        delta = int(round((target - hgt) * 100))
-        delta = min(delta, 100)  # never more than 1 m in one go
-        if delta >= 20:  # the SDK refuses moves under 20 cm
-            self.get_logger().info(f"at {hgt:.2f} m: climbing {delta} cm towards {target:.2f} m (markers in view)")
-            self.tello.move_up(delta)
-            # the 'ok' can come before the end of the move (seen Nov 9): stay busy until the height is stable
-            hist, t0 = [], time.time()
-            while time.time() - t0 < 6.0:
-                h = self.height_estimate()
-                if h is not None:
-                    hist.append((time.time(), h))
-                old = [x for t, x in hist if time.time() - t > 0.8]
-                if old and h is not None and abs(h - old[-1]) < 0.04:
-                    break
-                time.sleep(0.1)
-            h = self.height_estimate()
-            self.get_logger().info(f"climb done at {h:.2f} m" if h is not None else "climb done")
+        if self.takeoff_height > 0:
+            self.climb_target = min(self.takeoff_height, self.max_height - 0.6)
+            self.climb_t0 = time.time()
+            self.climb_stable = None
+            self.get_logger().info(f"climbing to {self.climb_target:.2f} m (markers in view)")
+
+    def climb_rc(self, hgt, vz):
+        """Vertical rc during the climb phase (None when done)."""
+        now = time.time()
+        if hgt is None:
+            return 0 if now - self.climb_t0 < 10.0 else self.end_climb("no height measurement")
+        err = self.climb_target - (hgt + 0.8 * vz)  # predicted ahead: the drone keeps moving ~1 s
+        if abs(self.climb_target - hgt) < 0.07 and abs(vz) < 0.08:
+            self.climb_stable = self.climb_stable or now
+            if now - self.climb_stable > 0.8:
+                return self.end_climb(f"climb done at {hgt:.2f} m")
         else:
-            self.get_logger().info(f"at {hgt:.2f} m after takeoff: no climb needed (target {target:.2f} m)")
+            self.climb_stable = None
+        if now - self.climb_t0 > 12.0:
+            return self.end_climb(f"climb stopped after 12 s at {hgt:.2f} m")
+        return int(max(-25, min(40, err * 100)))
+
+    def end_climb(self, msg):
+        self.climb_target = None
+        self.get_logger().info(msg)
+        return None
 
     def on_pose(self, m):
         self.pose_z, self.pose_t = m.pose.pose.position.z, time.time()
@@ -433,6 +434,7 @@ class TelloDriver(Node):
 
     def srv_land(self, req, res):
         self.rc_target = (0, 0, 0, 0)
+        self.climb_target = None
         if self.busy.locked():
             # another command (e.g. a takeoff still waiting for its reply) holds the lock: a landing order must
             # never be dropped, so send it right away without waiting for an answer
@@ -448,6 +450,7 @@ class TelloDriver(Node):
         return res
 
     def srv_emergency(self, req, res):
+        self.climb_target = None
         self.tello.emergency()
         res.success, res.message = True, "EMERGENCY: motors off"
         return res

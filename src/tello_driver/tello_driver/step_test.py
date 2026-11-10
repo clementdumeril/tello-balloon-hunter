@@ -45,8 +45,11 @@ def wrap(a):
 
 
 class StepTest(Node):
+    NODE_NAME = "tello_step_test"
+    PREFIX = "step"
+
     def __init__(self):
-        super().__init__("tello_step_test")
+        super().__init__(self.NODE_NAME)
         p = self.declare_parameter
         self.amp = p("amplitude", 0.3).value            # m/s
         self.dur = p("duration", 1.2).value             # s per half of the doublet
@@ -58,7 +61,7 @@ class StepTest(Node):
         self.z_min, self.z_max = p("z_min", 0.4).value, p("z_max", 2.4).value
         self.lost_max = p("lost_timeout", 3.0).value
         self.min_battery = p("min_battery", 30).value
-        out = Path(p("out_dir", str(Path.home() / "tello_ws/sessions")).value) / datetime.now().strftime("step_%Y%m%d_%H%M%S")
+        out = Path(p("out_dir", str(Path.home() / "tello_ws/sessions")).value) / datetime.now().strftime(f"{self.PREFIX}_%Y%m%d_%H%M%S")
         out.mkdir(parents=True, exist_ok=True)
         self.out = out
 
@@ -141,7 +144,12 @@ class StepTest(Node):
             raise Abort(f"battery {bat} %")
         if self.pose and self.p0 is not None and self.pose_age() < 0.5:
             _, x, y, z, _ = self.pose
-            if abs(x - self.p0[0]) > self.box or abs(y - self.p0[1]) > self.box:
+            f = getattr(self, "fence", None)  # (xmin, xmax, ymin, ymax) for missions; else a box around the start
+            if f is not None:
+                tol = 0.3
+                if not (f[0] - tol <= x <= f[1] + tol and f[2] - tol <= y <= f[3] + tol):
+                    raise Abort(f"left the flight zone at ({x:+.2f}, {y:+.2f}) m")
+            elif abs(x - self.p0[0]) > self.box or abs(y - self.p0[1]) > self.box:
                 raise Abort(f"left the safety box ({x - self.p0[0]:+.2f}, {y - self.p0[1]:+.2f} m from the start)")
             if not self.z_min <= z <= self.z_max:
                 raise Abort(f"height {z:.2f} m outside [{self.z_min}, {self.z_max}]")
@@ -217,6 +225,11 @@ class StepTest(Node):
             raise Abort(f"battery {bat} % < {self.min_battery} %: charge it first")
 
     def main(self):
+        self.prepare()
+        self.run_tests()
+
+    def prepare(self):
+        """Checks, takeoff + climb (done by the driver), start point. Shared with the marker tour."""
         self.wait_ready()
         if not self.in_air():
             self.say(f"Battery {self.tel.get('bat')} %. Drone 2 m from the marker wall, markers in view, nothing around.")
@@ -235,7 +248,7 @@ class StepTest(Node):
             while (not self.in_air() or self.tel.get("busy")) and time.time() - t0 < 25.0:
                 self.check_keys()
                 self.spin(0.1)
-            self.say(f"In the air at {self.tel.get('h', '?')} cm")
+            self.say(f"In the air at {self.tel.get('tof', '?')} cm (distance sensor)")
             self.spin(1.5)
         # start point = median of the poses over 1.5 s of hover
         self.say("Hovering, measuring the start point...")
@@ -257,7 +270,9 @@ class StepTest(Node):
         if not self.z_min + 0.3 <= self.p0[2] <= self.z_max - 0.3:
             raise Abort(f"start height {self.p0[2]:.2f} m too close to the limits [{self.z_min}, {self.z_max}]")
         self.say(f"Start point ({self.p0[0]:+.2f}, {self.p0[1]:+.2f}, {self.p0[2]:.2f}) m, "
-                 f"yaw {math.degrees(self.p0[3]):.0f} deg. Safety box +-{self.box} m.")
+                 f"yaw {math.degrees(self.p0[3]):.0f} deg.")
+
+    def run_tests(self):
         names = {"x": "forward/back", "y": "left/right", "z": "up/down", "yaw": "turn"}
         seg = 0
         for axis in self.axes:
@@ -275,12 +290,17 @@ class StepTest(Node):
 
 
 def main():
+    run(StepTest, fit_after=True)
+
+
+def run(cls, fit_after=False):
     os.environ.setdefault("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST")
     os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "LARGE_DATA")
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)  # Ctrl+C must still be able to land
-    node = StepTest()
+    node = cls()
     old = termios.tcgetattr(sys.stdin)
-    print("\n\n".join(__doc__.split("\n\n")[2:4]) + "\n")
+    doc = sys.modules[cls.__module__].__doc__ or ""
+    print("\n\n".join(doc.split("\n\n")[2:4]) + "\n")
     ok = False
     try:
         tty.setcbreak(sys.stdin.fileno())
@@ -301,7 +321,7 @@ def main():
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
         node.close()
         print(f"Data saved in {node.out}")
-    if ok:
+    if ok and fit_after:
         from tello_driver.step_fit import fit
         fit(node.out)
         print(f"Model: {node.out / 'model.yaml'}   plot: {node.out / 'step_fit.png'}")

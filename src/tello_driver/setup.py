@@ -19,6 +19,7 @@ setup(
         "tello_teleop_gui = tello_driver.teleop_gui:main",
         "tello_step_test = tello_driver.step_test:main",
         "tello_step_fit = tello_driver.step_fit:main",
+        "tello_marker_tour = tello_driver.marker_tour:main",
         "session_recorder = tello_driver.session_recorder:main",
     ]},
 )
