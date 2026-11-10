@@ -71,7 +71,9 @@ def rviz_config_centred_on_markers(template, markers_file):
         return template
     text = open(template, encoding="utf-8").read()
     text = text.replace("Focal Point: {X: 1.5, Y: 1.5, Z: 0.8}", f"Focal Point: {{X: {cx:.2f}, Y: {cy:.2f}, Z: {cz:.2f}}}")
-    text = text.replace("Distance: 6", f"Distance: {max(4.5, 2.2 * span):.1f}")
+    text = text.replace("Distance: 6", f"Distance: {max(4.0, 1.6 * span):.1f}")
+    # floor grid under the room (shifted by whole cells so its lines stay on round coordinates)
+    text = text.replace("Offset: {X: 0, Y: 0, Z: 0}", f"Offset: {{X: {round(cx * 2) / 2}, Y: {round(cy * 2) / 2}, Z: 0}}")
     text = text.replace("Yaw: 3.9", f"Yaw: {view_yaw:.2f}")
     out = Path("/tmp") / "tello_real_centred.rviz"
     out.write_text(text, encoding="utf-8")

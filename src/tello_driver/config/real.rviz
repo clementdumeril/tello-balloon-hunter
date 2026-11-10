@@ -9,6 +9,7 @@ Visualization Manager:
       Enabled: true
       Reference Frame: map
       Cell Size: 0.5
+      Offset: {X: 0, Y: 0, Z: 0}
       Plane Cell Count: 10
     - Class: rviz_default_plugins/TF
       Name: TF
