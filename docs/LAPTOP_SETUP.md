@@ -54,15 +54,34 @@ currently sees. Same chain as the real drone, no hardware needed.
    ```bash
    ros2 launch tello_driver real.launch.py
    ```
-3. Ubuntu terminal 2:
+3. Ubuntu terminal 2, the **teleop window** (recommended: the drone moves while a key is held, stops on release):
    ```bash
-   ros2 run tello_driver tello_teleop
+   ros2 run tello_driver tello_teleop_gui
    ```
-   `t` take off · `g` land · arrows move · `i`/`k` up/down · `j`/`l` yaw · space stop · `x` EMERGENCY · `q` land and quit
+   Click the window first (if it loses focus, the drone stops). `t` take off · `g` land · arrows move ·
+   `i`/`k` up/down · `j`/`l` turn · `1`/`2`/`3` speed 0.25/0.5/0.75 m/s · space stop · `x` EMERGENCY · `q` land and quit.
+   Terminal-only version (each press moves 0.35 s): `ros2 run tello_driver tello_teleop`.
 4. In RViz: the drone (grey body, red front rotors, cyan camera field of view) moves among the markers whenever
    the camera sees at least one known marker; green lines = markers used right now, orange = trajectory.
    No green line = no marker in view: the drone stays at its last known pose (hold it 1.5-2.5 m from the wall,
    1.3-1.8 m high, so that 2-3 markers are in the picture).
+
+## Identification flight (the drone's model, for the position controller)
+
+Drone facing the marker wall at about 2 m, 2-3 markers in the picture, nothing within 1 m, battery > 30 %.
+**No teleop running** (the script refuses to start otherwise). Terminal 1: the launch as above. Terminal 2:
+
+```bash
+ros2 run tello_driver tello_step_test
+```
+
+ENTER takes off. About 1 min 30: on each axis (forward, left, up, turn) two doublets (+0.3 m/s for 1.2 s then
+-0.3 m/s, so the drone comes back), with a re-centring on the start point in between. **Any key = stop and land.**
+Automatic landing if the drone leaves a +-0.8 m box, if no marker is seen for 3 s, or on low battery.
+It lands, then fits per axis $	au \dot v = K u(t-L) - v$ and prints $K$ (real/commanded speed), $	au$ and $L$.
+Results in `~/tello_ws/sessions/step_<time>/` (`model.yaml`, `step_fit.png`). Re-fit a folder:
+`ros2 run tello_driver tello_step_fit <folder>`. Checked on the fake drone (built-in $	au$ = 0.8 s, $L$ = 0.1 s):
+fit $K$ 0.97-1.09, $	au$ 0.75-0.90 s, $L$ 0.10-0.16 s (0.1 s + camera/localizer).
 
 ## 4. Camera calibration (once per drone, before trusting positions)
 
