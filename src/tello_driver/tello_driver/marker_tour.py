@@ -81,7 +81,9 @@ class MarkerTour(StepTest):
             y = min(max(m.t[1] + self.standoff * n[1], f[2]), f[3])
             z = min(max(m.t[2], self.z_lo), self.z_hi)
             yaw = math.atan2(m.t[1] - y, m.t[0] - x)  # facing the marker
-            wps.append({"id": m.id, "p": (x, y, z), "yaw": yaw, "ang": math.atan2(m.t[1] - cy, m.t[0] - cx)})
+            wall = round(math.degrees(math.atan2(n[1], n[0])) / 90) % 4  # which wall (normal direction)
+            wps.append({"id": m.id, "p": (x, y, z), "yaw": yaw, "wall": wall,
+                        "ang": math.atan2(m.t[1] - cy, m.t[0] - cx)})
         wps.sort(key=lambda w: w["ang"])
         # start with the wall the drone is facing (no blind turn first), then go round the room
         x0, y0, yaw0 = self.p0[0], self.p0[1], self.p0[3]
@@ -149,7 +151,16 @@ class MarkerTour(StepTest):
             raise Abort(f"start point ({x0:+.2f}, {y0:+.2f}) outside the flight zone: start closer to the room centre")
         wps = self.waypoints()
         self.say("Tour: " + " -> ".join(str(w["id"]) for w in wps))
+        centre = ((f[0] + f[1]) / 2, (f[2] + f[3]) / 2)
+        wall = wps[0]["wall"]
         for i, w in enumerate(wps):
+            if w["wall"] != wall:
+                # another wall: turn from the room centre, where its markers are 1.5-2 m away and fully in view
+                # (turning next to a wall left them cut at the image edges or out of the field of view)
+                wall = w["wall"]
+                _, x, y, z, yaw = self.pose
+                self.say(f"[{i + 1}/{len(wps)}] next wall: back to the room centre ({centre[0]:+.2f}, {centre[1]:+.2f})")
+                self.goto((centre[0], centre[1], z), yaw)
             self.say(f"[{i + 1}/{len(wps)}] marker {w['id']}: turning to face it")
             _, x, y, z, _ = self.pose
             self.goto((x, y, z), w["yaw"], timeout=12.0, yaw_only=True)
