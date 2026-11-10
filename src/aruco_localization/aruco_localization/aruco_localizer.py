@@ -51,6 +51,7 @@ class ArucoLocalizer(Node):
         self.cfg, self.markers = load_marker_map(p("markers_file", "").value)
         self.max_reproj = p("max_reprojection_px", 3.0).value
         self.debug_every = p("debug_every_n", 5).value
+        self.debug_scale = p("debug_scale", 1.0).value  # < 1 shrinks the debug image (lighter for RViz)
         self.debug_dir = p("debug_dir", "").value
         # TF child frame for the ArUco pose. base_link_aruco by default (base_link belongs to the EKF);
         # the real-drone launch sets base_link until the EKF exists, so RViz shows the camera on the drone.
@@ -68,7 +69,8 @@ class ArucoLocalizer(Node):
         self.pub_pose = self.create_publisher(PoseWithCovarianceStamped, "/aruco/pose", 10)
         self.pub_dbg = self.create_publisher(Image, "/aruco/debug_image", 2)
         self.create_subscription(CameraInfo, "/tello/camera_info", self.on_info, 5)
-        self.create_subscription(Image, "/tello/image_raw", self.on_image, 5)
+        # depth 1: always process the most recent frame; never queue up old ones (that only adds latency)
+        self.create_subscription(Image, "/tello/image_raw", self.on_image, 1)
         if self.debug_dir:
             Path(self.debug_dir).mkdir(parents=True, exist_ok=True)
 
@@ -160,6 +162,8 @@ class ArucoLocalizer(Node):
             cv2.aruco.drawDetectedMarkers(dbg, corners, ids)
         txt = f"{len(used)} markers  reproj {err:.2f}px  {'OK' if ok else 'REJECTED'}" if used else "no marker"
         cv2.putText(dbg, txt, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if ok else (0, 0, 255), 2)
+        if self.debug_scale != 1.0:
+            dbg = cv2.resize(dbg, None, fx=self.debug_scale, fy=self.debug_scale, interpolation=cv2.INTER_AREA)
         out = self.bridge.cv2_to_imgmsg(dbg, encoding="bgr8")
         out.header = msg.header
         self.pub_dbg.publish(out)

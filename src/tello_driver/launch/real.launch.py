@@ -40,7 +40,8 @@ def setup(context):
         Node(package="aruco_localization", executable="marker_map_publisher", output="screen",
              parameters=[{"markers_file": lc("markers")}]),
         Node(package="aruco_localization", executable="aruco_localizer", output="screen",
-             parameters=[{"markers_file": lc("markers"), "child_frame": "base_link", "debug_every_n": 2}]),
+             parameters=[{"markers_file": lc("markers"), "child_frame": "base_link",
+                          "debug_every_n": 3, "debug_scale": 0.5}]),
     ]
     if lc("rviz") == "true":
         nodes.append(Node(package="rviz2", executable="rviz2", output="log",
