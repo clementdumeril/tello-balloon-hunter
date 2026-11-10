@@ -131,7 +131,7 @@ class FakeWorld:
     def state(self):
         return {"pitch": 0, "roll": 0, "yaw": int(round(-math.degrees(self.yaw))),
                 "vgx": int(round(self.v[0] * 10)), "vgy": int(round(self.v[1] * 10)), "vgz": int(round(-self.v[2] * 10)),
-                "templ": 50, "temph": 52, "tof": int(self.p[2] * 100), "h": int(self.p[2] * 100), "bat": 90,
+                "templ": 50, "temph": 52, "tof": int(self.p[2] * 100), "h": int(self.p[2] * 100) if self.flying else 0, "bat": 90,
                 "baro": float(self.p[2] * 100), "time": 0, "agx": 0.0, "agy": 0.0, "agz": -1000.0,
                 "true_x": round(float(self.p[0]), 3), "true_y": round(float(self.p[1]), 3), "true_z": round(float(self.p[2]), 3),
                 "true_yaw_deg": round(math.degrees(self.yaw), 1)}
