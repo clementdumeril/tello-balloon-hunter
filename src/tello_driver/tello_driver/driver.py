@@ -26,7 +26,9 @@ from std_srvs.srv import Trigger
 
 # ---------------------------------------------------------------- fake drone (tests without hardware)
 class FakeFrameRead:
-    def __init__(self):
+    """Without a marker map: a plain moving test pattern. With one: the virtual camera view of the markers."""
+    def __init__(self, world=None):
+        self.world = world
         self._t = -1
         self._frame = None
 
@@ -35,30 +37,58 @@ class FakeFrameRead:
         k = int(time.time() * 30)
         if k != self._t:
             self._t = k
-            img = np.full((720, 960, 3), 90, np.uint8)
-            img[:, :, 0] = (np.arange(960) * 255 // 960).astype(np.uint8)
-            img[(k * 7) % 720, :, :] = 255
-            self._frame = img
+            if self.world is not None:
+                self._frame = self.world.render()
+            else:
+                img = np.full((720, 960, 3), 90, np.uint8)
+                img[:, :, 0] = (np.arange(960) * 255 // 960).astype(np.uint8)
+                img[(k * 7) % 720, :, :] = 255
+                self._frame = img
         return self._frame
 
 
 class FakeTello:
-    def __init__(self):
+    def __init__(self, markers_file=""):
+        self.world = None
+        if markers_file:
+            from tello_driver.fake_world import FakeWorld
+            self.world = FakeWorld(markers_file)
         self.is_flying = False
-        self.rc = (0, 0, 0, 0)
 
     def connect(self): pass
     def streamon(self): pass
     def streamoff(self): pass
     def end(self): pass
     def get_battery(self): return 90
-    def get_frame_read(self): return FakeFrameRead()
-    def takeoff(self): time.sleep(1.0); self.is_flying = True
-    def land(self): time.sleep(1.0); self.is_flying = False
-    def emergency(self): self.is_flying = False
-    def send_rc_control(self, a, b, c, d): self.rc = (a, b, c, d)
+    def get_frame_read(self): return FakeFrameRead(self.world)
+
+    def takeoff(self):
+        if self.world is not None:
+            self.world.flying = True
+            self.world.z_target = max(self.world.p[2], 1.0)
+        time.sleep(1.0)
+        self.is_flying = True
+
+    def land(self):
+        if self.world is not None:
+            self.world.z_target = 0.05
+        time.sleep(1.0)
+        self.is_flying = False
+        if self.world is not None:
+            self.world.flying = False
+
+    def emergency(self):
+        self.is_flying = False
+        if self.world is not None:
+            self.world.flying, self.world.z_target = False, 0.05
+
+    def send_rc_control(self, a, b, c, d):
+        if self.world is not None:
+            self.world.rc = (a, b, c, d)
 
     def get_current_state(self):
+        if self.world is not None:
+            return self.world.state()
         return {"pitch": 0, "roll": 0, "yaw": 0, "vgx": 0, "vgy": 0, "vgz": 0, "templ": 50, "temph": 52,
                 "tof": 80 if self.is_flying else 10, "h": 80 if self.is_flying else 0, "bat": 90,
                 "baro": 80.0, "time": 0, "agx": 0.0, "agy": 0.0, "agz": -1000.0}
@@ -124,7 +154,8 @@ class TelloDriver(Node):
         self.create_service(Trigger, "~/emergency", self.srv_emergency)
 
         if self.mock:
-            self.tello = FakeTello()
+            # with a marker map, the fake drone renders the markers and flies with the rc commands
+            self.tello = FakeTello(p("mock_markers_file", "").value)
         else:
             self.wait_for_tello_network(p("network_timeout", 30.0).value)
             import logging
@@ -219,6 +250,8 @@ class TelloDriver(Node):
         h, w = frame.shape[:2]
         if self.info is None or (self.info.width, self.info.height) != (w, h):
             self.info, calibrated = load_camera_info(self.calib_file, w, h, self.frame_id)
+            if self.mock and getattr(self.tello, "world", None) is not None:
+                self.tello.world.set_camera(self.info.k, self.info.d)  # render with the same intrinsics
             self.get_logger().info(f"Video {w}x{h}, camera_info: " +
                                    (f"calibration {self.calib_file}" if calibrated else "UNCALIBRATED (ideal pinhole from the FOV)"))
         stamp = self.get_clock().now().to_msg()

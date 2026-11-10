@@ -1,7 +1,8 @@
 """Real drone: Tello driver + marker frames + ArUco localizer + RViz.
 
     ros2 launch tello_driver real.launch.py                      # real Tello, RViz
-    ros2 launch tello_driver real.launch.py mock:=true           # fake drone (no hardware), to test the setup
+    ros2 launch tello_driver real.launch.py mock:=true           # fake drone: virtual camera in the marker map,
+                                                                 # flies with the teleop (no hardware needed)
     ros2 launch tello_driver real.launch.py camera_info_file:=$HOME/tello_ws/src/tello-balloon-hunter/config/tello_camera.yaml
 
 Then, in a second terminal:  ros2 run tello_driver tello_teleop
@@ -36,7 +37,8 @@ def setup(context):
         calib = str(default) if default.exists() else ""
     nodes = [
         Node(package="tello_driver", executable="tello_driver", output="screen",
-             parameters=[{"mock": lc("mock") == "true", "camera_info_file": calib}]),
+             parameters=[{"mock": lc("mock") == "true", "camera_info_file": calib,
+                          "mock_markers_file": lc("markers")}]),
         Node(package="aruco_localization", executable="marker_map_publisher", output="screen",
              parameters=[{"markers_file": lc("markers")}]),
         Node(package="aruco_localization", executable="aruco_localizer", output="screen",
