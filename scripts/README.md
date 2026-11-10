@@ -16,6 +16,18 @@
 
 You can also run one test directly from any terminal: `tello_tests.bat 2`.
 
+## Mapping the room without a tape measure (`room_mapper.py`, menu 6-7-8)
+
+The printed size of the markers (15 cm) is the only measurement needed. Every image that shows two markers gives their relative pose; a bundle adjustment then refines all marker and camera poses together. The origin is a marker, not a room corner.
+
+1. **Calibrate** (menu 6): show the printed checkerboard (glued flat on cardboard) near, far, tilted and in every corner of the image until 25+ views, then press `C`. Writes `config/tello_camera.yaml`.
+2. **Film** (menu 7), motors off:
+   - put the drone **on the floor about 2 m from a wall, facing markers**, then press `F` (floor reference; the camera is 3.5 cm above the floor);
+   - pick it up and walk slowly along the walls, 1-2 m away, at several heights, **always with 2+ markers in view**, until every marker is listed and "linked groups: 1".
+3. **Compute** (menu 8): writes `config/markers.yaml` (the previous version is backed up) and prints each marker with its number of views and tilt. A tilt above 4 degrees means the marker is not flat or upright.
+
+Validated on synthetic Tello images (13 markers on 2 walls, 960×720): horizontal error 0.4 cm median (2.9 cm max), yaw 1.4 degrees max, height offset 3.3 cm common to all markers.
+
 ## Setup (once)
 
 ```bash

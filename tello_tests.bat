@@ -28,6 +28,11 @@ echo        keys: T take off, G land, arrows move, I/K up/down, J/L yaw,
 echo              Space hover, Esc land+quit, Backspace EMERGENCY
 echo   4  Automatic hover 30 s
 echo   5  Fake drone (no hardware, to try the keys)
+echo.
+echo   ROOM MAP (no tape measure needed)
+echo   6  Calibrate the camera   (show the printed checkerboard, C to compute)
+echo   7  Film the markers       (drone in hand, motors off: F on the floor first, then walk)
+echo   8  Compute the map        (writes config\markers.yaml)
 echo   Q  Quit
 echo.
 set "CHOICE="
@@ -38,8 +43,11 @@ if /i "%CHOICE%"=="2" ( "%PY%" scripts\first_flight.py --latency-test & goto don
 if /i "%CHOICE%"=="3" ( "%PY%" scripts\first_flight.py & goto done )
 if /i "%CHOICE%"=="4" ( "%PY%" scripts\first_flight.py --auto-hover 30 & goto done )
 if /i "%CHOICE%"=="5" ( "%PY%" scripts\first_flight.py --mock & goto done )
+if /i "%CHOICE%"=="6" ( "%PY%" scripts\room_mapper.py calibrate & goto done )
+if /i "%CHOICE%"=="7" ( "%PY%" scripts\room_mapper.py capture & goto done )
+if /i "%CHOICE%"=="8" ( "%PY%" scripts\room_mapper.py solve & goto done )
 if /i "%CHOICE%"=="Q" exit /b 0
-if defined ONESHOT ( echo Unknown test "%CHOICE%": use 1-5 & exit /b 1 )
+if defined ONESHOT ( echo Unknown test "%CHOICE%": use 1-8 & exit /b 1 )
 goto menu
 
 :done
