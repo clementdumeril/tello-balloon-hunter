@@ -141,6 +141,21 @@ class MarkerTour(StepTest):
         if time.time() - t0 >= timeout - 0.05:
             self.say("  (not reached in time, going on)")
 
+    def turn(self, yaw_t):
+        """Turn in place. A turn over 100 deg is split: first face the markers' centroid (the main wall), so the
+        drone never spends long blind (a 180 deg turn could go round through the side without markers)."""
+        _, x, y, z, yaw = self.pose
+        cx, cy = np.mean([m.t[0] for m in self.markers.values()]), np.mean([m.t[1] for m in self.markers.values()])
+        mid = math.atan2(cy - y, cx - x)
+        lost = self.lost_max
+        self.lost_max = 7.0  # the IMU heading carries the turn while the markers are out of view
+        try:
+            if abs(wrap(yaw_t - yaw)) > math.radians(100) and abs(wrap(mid - yaw)) < abs(wrap(yaw_t - yaw)):
+                self.goto((x, y, z), mid, timeout=10.0, yaw_only=True)
+            self.goto((x, y, z), yaw_t, timeout=12.0, yaw_only=True)
+        finally:
+            self.lost_max = lost
+
     def main(self):
         self.prepare()
         f = self.fence
@@ -162,8 +177,7 @@ class MarkerTour(StepTest):
                 self.say(f"[{i + 1}/{len(wps)}] next wall: back to the room centre ({centre[0]:+.2f}, {centre[1]:+.2f})")
                 self.goto((centre[0], centre[1], z), yaw)
             self.say(f"[{i + 1}/{len(wps)}] marker {w['id']}: turning to face it")
-            _, x, y, z, _ = self.pose
-            self.goto((x, y, z), w["yaw"], timeout=12.0, yaw_only=True)
+            self.turn(w["yaw"])
             self.say(f"[{i + 1}/{len(wps)}] marker {w['id']}: flying to ({w['p'][0]:+.2f}, {w['p'][1]:+.2f}, "
                      f"{w['p'][2]:.2f})")
             self.goto(w["p"], w["yaw"])
