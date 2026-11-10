@@ -4,6 +4,7 @@ Subscribes: /tello/image_raw, /tello/camera_info
 Publishes:  /aruco/pose (PoseWithCovarianceStamped, frame map, pose of base_link)
             TF map -> base_link_aruco (visualization only: base_link itself belongs to the EKF)
             /aruco/debug_image (annotated, throttled)
+            /aruco/path (nav_msgs/Path, trail of the poses) and /aruco/sight_lines (camera -> seen markers), for RViz
 Works with OpenCV 4.6 (Ubuntu 24.04 system package) and >= 4.7.
 """
 import math
@@ -13,11 +14,13 @@ import cv2
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
-from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
+from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped, TransformStamped
+from nav_msgs.msg import Path as PathMsg
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image
 from tf2_ros import Buffer, TransformBroadcaster, TransformListener
+from visualization_msgs.msg import Marker as VizMarker
 
 from aruco_localization.marker_map import (aruco_dictionary, load_marker_map, matrix_from_quat,
                                            quat_from_matrix)
@@ -69,6 +72,12 @@ class ArucoLocalizer(Node):
         self.tf_pub = TransformBroadcaster(self)
         self.pub_pose = self.create_publisher(PoseWithCovarianceStamped, "/aruco/pose", 10)
         self.pub_dbg = self.create_publisher(Image, "/aruco/debug_image", 2)
+        self.pub_path = self.create_publisher(PathMsg, "/aruco/path", 2)
+        self.pub_sight = self.create_publisher(VizMarker, "/aruco/sight_lines", 5)
+        self.path = PathMsg()
+        self.path.header.frame_id = "map"
+        self.path_max = p("path_length", 2000).value
+        self.last_path_pub = 0.0
         self.create_subscription(CameraInfo, "/tello/camera_info", self.on_info, 5)
         # depth 1: always process the most recent frame; never queue up old ones (that only adds latency)
         self.create_subscription(Image, "/tello/image_raw", self.on_image, 1)
@@ -131,6 +140,7 @@ class ArucoLocalizer(Node):
                     self.ambiguous += 1
         if ok:
             self.publish(msg.header.stamp, T_map_base, err, dist, len(used))
+            self.publish_viz(msg.header.stamp, T_map_cam[:3, 3], used)
         if self.debug_every and self.n % self.debug_every == 0:
             self.publish_debug(msg, img, corners, ids, ok, err, used)
 
@@ -166,6 +176,7 @@ class ArucoLocalizer(Node):
             cov[k * 7] = sigma_yaw ** 2
         m.pose.covariance = cov.tolist()
         self.pub_pose.publish(m)
+        self.last_pose = m.pose.pose
 
         t = TransformStamped()
         t.header = m.header
@@ -173,6 +184,33 @@ class ArucoLocalizer(Node):
         t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = map(float, T[:3, 3])
         t.transform.rotation = m.pose.pose.orientation
         self.tf_pub.sendTransform(t)
+
+    def publish_viz(self, stamp, cam_pos, used):
+        """RViz helpers: trail of the drone poses, and one line from the camera to each marker it used."""
+        ps = PoseStamped()
+        ps.header.stamp = stamp
+        ps.header.frame_id = "map"
+        ps.pose = self.last_pose
+        self.path.poses.append(ps)
+        del self.path.poses[:-self.path_max]
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if now - self.last_path_pub > 0.2:  # 5 Hz is plenty for a trail
+            self.path.header.stamp = stamp
+            self.pub_path.publish(self.path)
+            self.last_path_pub = now
+        m = VizMarker()
+        m.header.stamp = stamp
+        m.header.frame_id = "map"
+        m.ns, m.id, m.type, m.action = "sight", 0, VizMarker.LINE_LIST, VizMarker.ADD
+        m.scale.x = 0.01
+        m.color.r, m.color.g, m.color.b, m.color.a = 0.1, 1.0, 0.2, 0.9
+        m.pose.orientation.w = 1.0
+        m.lifetime.nanosec = 500_000_000  # disappears half a second after the markers are lost
+        for i in used:
+            c = self.markers[i].t
+            m.points += [Point(x=float(cam_pos[0]), y=float(cam_pos[1]), z=float(cam_pos[2])),
+                         Point(x=float(c[0]), y=float(c[1]), z=float(c[2]))]
+        self.pub_sight.publish(m)
 
     def publish_debug(self, msg, img, corners, ids, ok, err, used):
         dbg = img.copy()

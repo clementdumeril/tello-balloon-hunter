@@ -15,16 +15,35 @@ Visualization Manager:
       Enabled: true
       Show Names: true
       Show Arrows: false
-      Marker Scale: 0.4
+      Marker Scale: 0.3
     - Class: rviz_default_plugins/MarkerArray
       Name: ArUco markers
       Enabled: true
       Topic:
         Value: /aruco/map_markers
         Durability Policy: Transient Local
-    - Class: rviz_default_plugins/PoseWithCovariance
-      Name: ArUco pose
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Drone (body + camera view)
       Enabled: true
+      Topic:
+        Value: /tello/body_markers
+        Durability Policy: Transient Local
+    - Class: rviz_default_plugins/Marker
+      Name: Markers seen now (green lines)
+      Enabled: true
+      Topic:
+        Value: /aruco/sight_lines
+    - Class: rviz_default_plugins/Path
+      Name: Drone trajectory
+      Enabled: true
+      Topic:
+        Value: /aruco/path
+      Color: 255; 170; 0
+      Line Style: Billboards
+      Line Width: 0.02
+    - Class: rviz_default_plugins/PoseWithCovariance
+      Name: ArUco pose (raw)
+      Enabled: false
       Topic:
         Value: /aruco/pose
       Shape: Axes
