@@ -9,6 +9,7 @@ A status line shows whether the driver is there, whether the drone is flying, an
 import json
 import os
 import select
+import shutil
 import sys
 import termios
 import time
@@ -68,12 +69,19 @@ class Teleop(Node):
         elif time.time() - self.tel_t > 2.0:
             line = "driver found, waiting for telemetry..."
         else:
-            fly = "FLYING" if self.tel.get("flying") else "on the ground (t = take off)"
-            line = (f"{fly} | battery {self.tel.get('bat', '?')} % | height {self.tel.get('h', '?')} cm"
-                    f" | last key: {self.last_key}")
+            fly = "FLYING" if self.in_air() else "on the ground (t = take off)"
+            line = (f"{fly} | bat {self.tel.get('bat', '?')}% | h {self.tel.get('h', '?')} cm"
+                    f" | key: {self.last_key}")
+        # one terminal line only: a wrapped line cannot be rewritten in place and would scroll
+        line = line[:max(20, shutil.get_terminal_size((80, 20)).columns - 1)]
         if line != self.last_status:
             print(CLEAR_LINE + line, end="", flush=True)
             self.last_status = line
+
+    def in_air(self):
+        """Flying, or taking off: the driver sets 'flying' only once the takeoff command has returned."""
+        h = self.tel.get("h", 0)
+        return bool(self.tel.get("flying")) or (isinstance(h, (int, float)) and h >= 20)
 
     def call(self, name):
         c = self.cli[name]
@@ -88,8 +96,8 @@ class Teleop(Node):
     def key(self, k):
         if k in KEY_NAMES:
             self.last_key = KEY_NAMES[k]
-            if k != " " and not self.tel.get("flying", False):
-                self.last_key += " (ignored: not flying, press t)"
+            if k != " " and not self.in_air():
+                self.last_key += " (ignored: on the ground, press t)"
         t = Twist()
         s, w = self.speed, self.yaw_rate
         moves = {"UP": ("x", s), "DOWN": ("x", -s), "LEFT": ("y", s), "RIGHT": ("y", -s),
