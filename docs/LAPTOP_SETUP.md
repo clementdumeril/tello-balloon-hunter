@@ -41,7 +41,11 @@ Test without the drone:
 ros2 launch tello_driver real.launch.py mock:=true
 ```
 
-RViz should open with the grid and the 44 ArUco markers.
+RViz opens on the room (the markers of `config/markers.yaml`, numbered) with a **virtual drone**: a fake camera
+renders the real marker map, the localizer computes the pose from those images, and the drone (grey body, cyan
+camera field of view) appears 2 m in front of the main wall. In a second terminal, `ros2 run tello_driver tello_teleop`
+then `t` (take off) and the arrows fly it: the orange trail is its trajectory, the green lines go to the markers it
+currently sees. Same chain as the real drone, no hardware needed.
 
 ## 3. Every flight session
 
@@ -55,7 +59,10 @@ RViz should open with the grid and the 44 ArUco markers.
    ros2 run tello_driver tello_teleop
    ```
    `t` take off · `g` land · arrows move · `i`/`k` up/down · `j`/`l` yaw · space stop · `x` EMERGENCY · `q` land and quit
-4. In RViz: `base_link` (the drone) moves among the markers whenever the camera sees at least one known marker.
+4. In RViz: the drone (grey body, red front rotors, cyan camera field of view) moves among the markers whenever
+   the camera sees at least one known marker; green lines = markers used right now, orange = trajectory.
+   No green line = no marker in view: the drone stays at its last known pose (hold it 1.5-2.5 m from the wall,
+   1.3-1.8 m high, so that 2-3 markers are in the picture).
 
 ## 4. Camera calibration (once per drone, before trusting positions)
 
