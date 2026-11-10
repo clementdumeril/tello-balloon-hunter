@@ -1,66 +1,27 @@
-# Marker map: the SINGLE source of truth for the marker layout.
-# Used by the Gazebo world generator (src/tello_sim) AND by the real localizer.
-# Frame `map`: origin at a room corner on the floor, x along the west->east wall, y south->north, z up.
-# Each marker: center position (m) and yaw_deg = direction the marker FACES (its normal), marker upright.
-# Marker frame = OpenCV convention: x right, y up, z out of the marker (toward the viewer).
-#
-# PLACEHOLDER layout (task B4 will replace it with the real survey of the room):
-# 4.0 x 3.5 m room, 3.0 m ceiling, 2 rows (z = 0.9 and 1.5 m), spacing 0.6 m.
+# Marker map: the SINGLE source of truth for the marker layout (sim + real localizer).
+# Measured by scripts/room_mapper.py on 2026-11-09 18:48 from 20261109_183913
+# (76 images, bundle adjustment RMS 1.07 px; origin marker 6 set at 1.3 m above the floor (--origin-height); hand-held camera at 1.74 m median (sanity check)).
+# Frame map: origin on the floor below marker 6, y out of its wall into the room, z up.
+# Each marker: centre (m) and yaw_deg = direction the marker faces.
 
-dictionary: DICT_6X6_50     # the markers actually printed and stuck on the walls (ID 12 seen Nov 9)
-marker_size: 0.20          # side of the black square, meters (measured on the real sheets: 20 cm, Nov 9)
+dictionary: DICT_6X6_50
+marker_size: 0.2
 
-room:                      # used by the simulator only
-  size_x: 4.0
-  size_y: 3.5
-  height: 3.0
+room:                      # bounding box of the markers + margin (simulator only)
+  size_x: 4.41
+  size_y: 3.12
+  height: 3.09
 
 markers:
-  # --- west  x=0 wall, markers face yaw=0 deg
-  - {id:  0, x: 0.005, y: 0.550, z: 0.90, yaw_deg:    0}
-  - {id:  1, x: 0.005, y: 1.150, z: 0.90, yaw_deg:    0}
-  - {id:  2, x: 0.005, y: 1.750, z: 0.90, yaw_deg:    0}
-  - {id:  3, x: 0.005, y: 2.350, z: 0.90, yaw_deg:    0}
-  - {id:  4, x: 0.005, y: 2.950, z: 0.90, yaw_deg:    0}
-  - {id:  5, x: 0.005, y: 0.550, z: 1.50, yaw_deg:    0}
-  - {id:  6, x: 0.005, y: 1.150, z: 1.50, yaw_deg:    0}
-  - {id:  7, x: 0.005, y: 1.750, z: 1.50, yaw_deg:    0}
-  - {id:  8, x: 0.005, y: 2.350, z: 1.50, yaw_deg:    0}
-  - {id:  9, x: 0.005, y: 2.950, z: 1.50, yaw_deg:    0}
-  # --- south y=0 wall, markers face yaw=90 deg
-  - {id: 10, x: 3.500, y: 0.005, z: 0.90, yaw_deg:   90}
-  - {id: 11, x: 2.900, y: 0.005, z: 0.90, yaw_deg:   90}
-  - {id: 12, x: 2.300, y: 0.005, z: 0.90, yaw_deg:   90}
-  - {id: 13, x: 1.700, y: 0.005, z: 0.90, yaw_deg:   90}
-  - {id: 14, x: 1.100, y: 0.005, z: 0.90, yaw_deg:   90}
-  - {id: 15, x: 0.500, y: 0.005, z: 0.90, yaw_deg:   90}
-  - {id: 16, x: 3.500, y: 0.005, z: 1.50, yaw_deg:   90}
-  - {id: 17, x: 2.900, y: 0.005, z: 1.50, yaw_deg:   90}
-  - {id: 18, x: 2.300, y: 0.005, z: 1.50, yaw_deg:   90}
-  - {id: 19, x: 1.700, y: 0.005, z: 1.50, yaw_deg:   90}
-  - {id: 20, x: 1.100, y: 0.005, z: 1.50, yaw_deg:   90}
-  - {id: 21, x: 0.500, y: 0.005, z: 1.50, yaw_deg:   90}
-  # --- east  x=max wall, markers face yaw=180 deg
-  - {id: 22, x: 3.995, y: 2.950, z: 0.90, yaw_deg:  180}
-  - {id: 23, x: 3.995, y: 2.350, z: 0.90, yaw_deg:  180}
-  - {id: 24, x: 3.995, y: 1.750, z: 0.90, yaw_deg:  180}
-  - {id: 25, x: 3.995, y: 1.150, z: 0.90, yaw_deg:  180}
-  - {id: 26, x: 3.995, y: 0.550, z: 0.90, yaw_deg:  180}
-  - {id: 27, x: 3.995, y: 2.950, z: 1.50, yaw_deg:  180}
-  - {id: 28, x: 3.995, y: 2.350, z: 1.50, yaw_deg:  180}
-  - {id: 29, x: 3.995, y: 1.750, z: 1.50, yaw_deg:  180}
-  - {id: 30, x: 3.995, y: 1.150, z: 1.50, yaw_deg:  180}
-  - {id: 31, x: 3.995, y: 0.550, z: 1.50, yaw_deg:  180}
-  # --- north y=max wall, markers face yaw=-90 deg
-  - {id: 32, x: 0.500, y: 3.495, z: 0.90, yaw_deg:  -90}
-  - {id: 33, x: 1.100, y: 3.495, z: 0.90, yaw_deg:  -90}
-  - {id: 34, x: 1.700, y: 3.495, z: 0.90, yaw_deg:  -90}
-  - {id: 35, x: 2.300, y: 3.495, z: 0.90, yaw_deg:  -90}
-  - {id: 36, x: 2.900, y: 3.495, z: 0.90, yaw_deg:  -90}
-  - {id: 37, x: 3.500, y: 3.495, z: 0.90, yaw_deg:  -90}
-  - {id: 38, x: 0.500, y: 3.495, z: 1.50, yaw_deg:  -90}
-  - {id: 39, x: 1.100, y: 3.495, z: 1.50, yaw_deg:  -90}
-  - {id: 40, x: 1.700, y: 3.495, z: 1.50, yaw_deg:  -90}
-  - {id: 41, x: 2.300, y: 3.495, z: 1.50, yaw_deg:  -90}
-  - {id: 42, x: 2.900, y: 3.495, z: 1.50, yaw_deg:  -90}
-  - {id: 43, x: 3.500, y: 3.495, z: 1.50, yaw_deg:  -90}
+  - {id:  1, x: -2.832, y: 0.586, z: 2.290, yaw_deg:   -1.3}   # views 7, tilt 4.1 deg
+  - {id:  2, x: -2.784, y: 2.123, z: 2.110, yaw_deg:   -1.9}   # views 14, tilt 4.1 deg
+  - {id:  3, x: -2.804, y: 1.398, z: 2.202, yaw_deg:   -0.7}   # views 17, tilt 3.8 deg
+  - {id:  4, x: -2.089, y: 0.060, z: 1.909, yaw_deg:   88.7}   # views 19, tilt 2.0 deg
+  - {id:  5, x: -1.350, y: 0.042, z: 1.211, yaw_deg:   87.9}   # views 9, tilt 4.0 deg
+  - {id:  6, x: 0.000, y: 0.000, z: 1.300, yaw_deg:   90.0}   # views 22, tilt 1.5 deg
+  - {id:  7, x: -1.406, y: 0.064, z: 1.917, yaw_deg:   89.9}   # views 28, tilt 3.2 deg
+  - {id:  8, x: 0.104, y: 0.014, z: 1.927, yaw_deg:   88.7}   # views 17, tilt 1.1 deg
+  - {id:  9, x: 0.579, y: 0.548, z: 1.809, yaw_deg: -177.2}   # views 14, tilt 3.2 deg
+  - {id: 10, x: -0.660, y: 0.029, z: 1.799, yaw_deg:   89.7}   # views 22, tilt 1.0 deg
+  - {id: 11, x: 0.510, y: 1.332, z: 2.015, yaw_deg: -173.8}   # views 10, tilt 4.4 deg
+  - {id: 12, x: 0.529, y: 1.335, z: 1.510, yaw_deg: -173.8}   # views 12, tilt 2.8 deg

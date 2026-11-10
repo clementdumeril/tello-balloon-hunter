@@ -437,13 +437,19 @@ def cmd_solve(a):
     R_map = np.vstack([x_ax, y, up])  # rows: map axes expressed in the origin-marker frame
     p0 = M[origin][:3, 3]
     floor_cams = [fr for fr in cams if fr["floor"]]
-    if floor_cams:
+    hand_h = [up @ (fr["T"][:3, 3] - p0) for fr in cams if not fr["floor"]]
+    if a.origin_height is not None:  # an explicit height wins (floor frames taken off the floor are misleading)
+        z_offset = a.origin_height
+        floor_note = f"origin marker {origin} set at {a.origin_height} m above the floor (--origin-height)"
+    elif floor_cams:
         cam_h = np.median([up @ (fr["T"][:3, 3] - p0) for fr in floor_cams])
         z_offset = -(cam_h - FLOOR_CAM_HEIGHT)  # height of the origin marker above the floor
         floor_note = f"floor from {len(floor_cams)} floor frames"
     else:
-        z_offset = a.origin_height
-        floor_note = f"NO floor frame: origin marker assumed at {a.origin_height} m"
+        z_offset = 1.0
+        floor_note = "NO floor frame and no --origin-height: origin marker assumed at 1.0 m"
+    if hand_h:
+        floor_note += f"; hand-held camera at {np.median(hand_h) + z_offset:.2f} m median (sanity check)"
     to_map = lambda p: R_map @ (p - p0) + np.array([0, 0, z_offset])  # noqa: E731
 
     out = []
@@ -507,7 +513,7 @@ def main():
     c.add_argument("--dir", help="capture folder (default: latest)")
     c.add_argument("--origin", type=int, help="origin marker id (default: the best connected)")
     c.add_argument("--size", type=float, default=MARKER_SIZE, help="side of the black square [m] (default: marker_size in markers.yaml)")
-    c.add_argument("--origin-height", type=float, default=1.0, help="used only without floor frames")
+    c.add_argument("--origin-height", type=float, default=None, help="height of the origin marker centre above the floor [m]; overrides the floor frames")
     c.add_argument("--stride", type=int, default=1)
     c.add_argument("--min-pairs", type=int, default=2, help="views needed to place a new marker")
     c.add_argument("--ambiguity", type=float, default=3.0, help="min error ratio between the two single-marker poses")
