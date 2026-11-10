@@ -22,6 +22,13 @@ LOCAL_ROS_ENV = {"ROS_AUTOMATIC_DISCOVERY_RANGE": "LOCALHOST", "FASTDDS_BUILTIN_
 
 def setup(context):
     lc = lambda n: LaunchConfiguration(n).perform(context)  # noqa: E731
+    # Remove shared-memory segments left by ROS processes that were killed (Ctrl+C twice, crash, kill -9):
+    # with the local-only settings, stale segments can silently block RViz from receiving anything.
+    import subprocess
+    try:
+        subprocess.run(["fastdds", "shm", "clean"], timeout=15, capture_output=True)
+    except Exception:  # noqa: BLE001
+        pass
     share = get_package_share_directory("tello_driver")
     calib = lc("camera_info_file")
     if calib == "auto":
