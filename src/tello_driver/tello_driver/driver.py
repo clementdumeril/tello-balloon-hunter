@@ -104,6 +104,17 @@ class TelloDriver(Node):
         self.cmd_timeout = p("cmd_timeout", 0.5).value
         self.low_battery = p("low_battery", 12).value
 
+        # Refuse to run next to another driver (e.g. a forgotten fake drone): two sources of /tello/image_raw
+        # make the camera view flicker and the pose jump between them.
+        t0 = time.time()
+        while time.time() - t0 < 2.0:
+            rclpy.spin_once(self, timeout_sec=0.1)
+        others = [i.node_name for i in self.get_publishers_info_by_topic("/tello/image_raw")]
+        if others:
+            self.get_logger().fatal(f"Another node already publishes /tello/image_raw ({', '.join(others)}): stop it "
+                                    "first (close its terminal, or: pkill -f tello_driver/tello_driver).")
+            raise SystemExit(1)
+
         self.pub_img = self.create_publisher(Image, "/tello/image_raw", 5)
         self.pub_info = self.create_publisher(CameraInfo, "/tello/camera_info", 5)
         self.pub_tel = self.create_publisher(String, "/tello/telemetry", 10)
