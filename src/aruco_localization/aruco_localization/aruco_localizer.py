@@ -143,13 +143,22 @@ class ArucoLocalizer(Node):
                 dist = float(np.mean(np.linalg.norm(obj_pts - T_map_cam[:3, 3], axis=1)))
                 ok = err <= self.max_reproj and self.plausible(T_map_base[:3, 3], len(used))
         if ok:
+            self._last_cam = (self.get_clock().now().nanoseconds * 1e-9, T_map_cam[:3, 3].copy())
             self.publish(msg.header.stamp, T_map_base, err, dist, len(used))
             self.publish_viz(msg.header.stamp, T_map_cam[:3, 3], used)
         if self.debug_every and self.n % self.debug_every == 0:
             self.publish_debug(msg, img, corners, ids, ok, err, used)
 
-    def single_marker_pose(self, corners, mk, min_ratio=3.0):
-        """Best IPPE pose of one marker, expressed as map -> camera (rvec, tvec). ok=False if ambiguous."""
+    def single_marker_pose(self, corners, mk, min_ratio=3.0, max_tilt_deg=30.0):
+        """Pose from ONE marker, as map -> camera (rvec, tvec); ok=False if it cannot be disambiguated.
+
+        IPPE gives two mirror poses. Choice, in order:
+          1. drop poses where the camera is tilted > 30 deg (the Tello camera is level, the drone tilts < 15 deg);
+          2. one clearly better reprojection (ratio >= 3) -> it;
+          3. both poses (almost) at the same place -> the best one (head-on view: rejecting it lost the drone
+             in front of marker 10, Nov 10);
+          4. the one closest to the last pose (< 1 s old, < 0.4 m away);
+          5. otherwise reject."""
         h = mk.size / 2.0
         local = np.array([[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]], dtype=np.float64)
         try:
@@ -160,16 +169,33 @@ class ArucoLocalizer(Node):
         if n == 0:
             return False, None, None
         e = np.ravel(errs) if errs is not None else np.zeros(n)
-        k = int(np.argmin(e))
-        if n >= 2:
-            e2 = np.sort(e)
-            if e2[1] / max(e2[0], 1e-6) < min_ratio:
-                return False, None, None
-        R_mc, _ = cv2.Rodrigues(rvecs[k])          # marker -> camera
-        R_cmap = R_mc @ mk.R.T                      # map -> camera
-        t = np.asarray(tvecs[k], float).reshape(3, 1) - R_cmap @ mk.t.reshape(3, 1)
-        rvec, _ = cv2.Rodrigues(R_cmap)
-        return True, rvec, t
+        cands = []
+        for k in range(n):
+            R_mc, _ = cv2.Rodrigues(rvecs[k])          # marker -> camera
+            R_cmap = R_mc @ mk.R.T                      # map -> camera
+            t = np.asarray(tvecs[k], float).reshape(3, 1) - R_cmap @ mk.t.reshape(3, 1)
+            cam = (-R_cmap.T @ t).ravel()               # camera position in map
+            down = R_cmap.T[:, 1]                       # camera 'down' axis in map
+            tilt = math.degrees(math.acos(max(-1.0, min(1.0, -down[2]))))
+            if tilt <= max_tilt_deg:
+                cands.append((e[k], cam, R_cmap, t))
+        if not cands:
+            return False, None, None
+        cands.sort(key=lambda c: c[0])
+        pick = cands[0]
+        if len(cands) >= 2:
+            ratio = cands[1][0] / max(cands[0][0], 1e-6)
+            same = np.linalg.norm(cands[0][1] - cands[1][1]) < 0.15
+            if ratio < min_ratio and not same:
+                last = getattr(self, "_last_cam", None)
+                now = self.get_clock().now().nanoseconds * 1e-9
+                if last is None or now - last[0] > 1.0:
+                    return False, None, None
+                pick = min(cands[:2], key=lambda c: np.linalg.norm(c[1] - last[1]))
+                if np.linalg.norm(pick[1] - last[1]) > 0.4:
+                    return False, None, None
+        rvec, _ = cv2.Rodrigues(pick[2])
+        return True, rvec, pick[3]
 
     def plausible(self, pos, n_markers, max_jump=0.5, window=0.5):
         """Reject a single-marker pose that jumps far from the previous one (a flip the ratio test missed).

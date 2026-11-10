@@ -9,7 +9,8 @@ For each marker: turn in place to face it, fly to 1.2 m in front of it at its he
 holds markers, and inside the room scan on the other sides.
 
 SAFETY: ANY KEY = stop and land. Ctrl+C = land. Automatic landing if the drone leaves the flight zone
-(+0.3 m tolerance), if no marker is seen for 4 s, or on low battery. The driver's ceiling guard (2.6 m) always applies.
+(+0.3 m tolerance), if no marker is seen for 12 s, or on low battery. Markers lost for more than 1 s:
+the drone stops and turns to look for them (towards the marker it is going to, then sweeping +-40 deg). The driver's ceiling guard (2.6 m) always applies.
 """
 import math
 import os
@@ -46,9 +47,12 @@ class MarkerTour(StepTest):
         self.hold = p("hold", 2.0).value
         # room scan extents in the map frame (x min, x max, y min, y max), for the sides without markers
         self.room = list(p("room_box", [-2.99, 1.46, -0.02, 3.12]).value)
-        self.lost_max = p("tour_lost_timeout", 4.0).value
+        self.lost_max = p("tour_lost_timeout", 12.0).value  # searching before giving up and landing
         _, self.markers = load_marker_map(self.markers_file)
         self.fence = self.flight_zone()
+        self.centroid = (float(np.mean([m.t[0] for m in self.markers.values()])),
+                         float(np.mean([m.t[1] for m in self.markers.values()])))
+        self.last_xy = None
 
     def flight_zone(self):
         """Axis-aligned box: room scan shrunk by the margin, and margin from each marker wall."""
@@ -95,12 +99,35 @@ class MarkerTour(StepTest):
         return wps[k:] + wps[:k]
 
     # ---------------------------------------------------------------- control
-    def goto(self, target, yaw_t, timeout=25.0, tol=0.12, yaw_only=False):
-        """Fly to target (x, y, z) with heading yaw_t; yaw_only: turn in place first. Returns when reached."""
+    def search(self, look_at):
+        """No marker in view for > 1 s: turn (IMU heading) towards look_at, then sweep +-40 deg around it,
+        without moving, until the markers come back (the safety check lands after tour_lost_timeout)."""
+        yaw = self.yaw_estimate()
+        if yaw is None or self.last_xy is None:
+            self.send()
+            return
+        lost = self.pose_age()
+        base = math.atan2(look_at[1] - self.last_xy[1], look_at[0] - self.last_xy[0])
+        if lost > 3.0:
+            base += math.radians(40) * math.sin(2 * math.pi * (lost - 3.0) / 6.0)
+        if int(lost) != getattr(self, "_said", -1) and lost > 1.0 and int(lost) % 3 == 1:
+            self._said = int(lost)
+            self.say(f"  markers lost for {lost:.0f} s: searching (turning)")
+        self.send(cw=clip(self.kp_yaw * wrap(base - yaw), self.w_max), blind=True)
+
+    def goto(self, target, yaw_t, timeout=25.0, tol=0.12, yaw_only=False, look_at=None):
+        """Fly to target (x, y, z) with heading yaw_t; yaw_only: turn in place first. Returns when reached.
+        look_at: where to turn to if the markers are lost (default: the markers' centroid)."""
         tx, ty, tz = target
         reached_t = [None]
+        look = look_at or self.centroid
 
         def step():
+            if self.pose_age() < 0.5:
+                self.last_xy = self.pose[1:3]
+            if self.pose_age() > 1.0 and not yaw_only:
+                self.search(look)
+                return None
             if yaw_only and self.pose_age() > 0.5:
                 # markers out of view during a turn: keep turning on the IMU heading (no translation)
                 yaw = self.yaw_estimate()
@@ -151,7 +178,7 @@ class MarkerTour(StepTest):
         cx, cy = np.mean([m.t[0] for m in self.markers.values()]), np.mean([m.t[1] for m in self.markers.values()])
         mid = math.atan2(cy - y, cx - x)
         lost = self.lost_max
-        self.lost_max = 7.0  # the IMU heading carries the turn while the markers are out of view
+        self.lost_max = max(lost, 7.0)  # the IMU heading carries the turn while the markers are out of view
         try:
             if abs(wrap(yaw_t - yaw)) > math.radians(100) and abs(wrap(mid - yaw)) < abs(wrap(yaw_t - yaw)):
                 self.goto((x, y, z), mid, timeout=10.0, yaw_only=True)
@@ -185,7 +212,8 @@ class MarkerTour(StepTest):
             self.turn(w["yaw"])
             self.say(f"[{i + 1}/{len(wps)}] marker {w['id']}: flying to ({w['p'][0]:+.2f}, {w['p'][1]:+.2f}, "
                      f"{w['p'][2]:.2f})")
-            self.goto(w["p"], w["yaw"])
+            m = self.markers[w["id"]]
+            self.goto(w["p"], w["yaw"], look_at=(m.t[0], m.t[1]))
             self.run(self.hold, lambda: self.send())
         self.say("Back to the start point")
         self.goto((x0, y0, max(z0, self.z_lo)), yaw0)

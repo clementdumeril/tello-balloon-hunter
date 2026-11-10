@@ -403,9 +403,9 @@ class TelloDriver(Node):
         if hgt is None:
             return 0 if now - self.climb_t0 < 10.0 else self.end_climb("no height measurement")
         err = self.climb_target - (hgt + 0.8 * vz)  # predicted ahead: the drone keeps moving ~1 s
-        if abs(self.climb_target - hgt) < 0.07 and abs(vz) < 0.08:
+        if abs(self.climb_target - hgt) < 0.10 and abs(vz) < 0.15:  # real sensors are noisier than the sim
             self.climb_stable = self.climb_stable or now
-            if now - self.climb_stable > 0.8:
+            if now - self.climb_stable > 0.5:
                 return self.end_climb(f"climb done at {hgt:.2f} m")
         else:
             self.climb_stable = None

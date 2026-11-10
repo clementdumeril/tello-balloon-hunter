@@ -5,6 +5,7 @@ So `real.launch.py mock:=true` exercises the whole chain (image -> ArUco pose ->
 flies the virtual drone in RViz exactly like the real one. Simple dynamics: first-order velocity response.
 """
 import math
+import os
 import time
 
 import cv2
@@ -98,6 +99,13 @@ class FakeWorld:
         self.step()
         img = np.empty((self.h, self.w, 3), np.uint8)
         img[:] = np.linspace(150, 110, self.h, dtype=np.uint8)[:, None, None]  # plain wall, a bit darker lower down
+        # tests: FAKE_BLACKOUT="a:b" -> no marker in the picture from a to b s after the takeoff (search behaviour)
+        bo = os.environ.get("FAKE_BLACKOUT")
+        if bo and self.flying:
+            self.t_fly = getattr(self, "t_fly", None) or time.time()
+            a, b = (float(v) for v in bo.split(":"))
+            if a <= time.time() - self.t_fly <= b:
+                return img
         c, s = math.cos(self.yaw), math.sin(self.yaw)
         R_map_base = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
         R_map_cam = R_map_base @ R_BASE_CAM

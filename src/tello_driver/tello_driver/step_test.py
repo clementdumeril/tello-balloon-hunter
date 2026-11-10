@@ -219,11 +219,32 @@ class StepTest(Node):
         self.run(timeout, step)
         self.run(1.0, lambda: self.send())
 
+    def hold_cmd(self):
+        """Body-frame command that pulls the drone back to its start point (the Tello drifts ~10 cm/s on its
+        own: 37 cm in 4 s of 'hover' on Nov 10, and the test left its box)."""
+        if self.pose_age() > 0.5:
+            return {"cx": 0.0, "cy": 0.0, "cz": 0.0, "cw": 0.0}
+        x0, y0, z0, yaw0 = self.p0
+        _, x, y, z, yaw = self.pose
+        ex, ey = x0 - x, y0 - y
+        c, s = math.cos(yaw), math.sin(yaw)
+        clip = lambda v, m: max(-m, min(m, v))  # noqa: E731
+        return {"cx": clip(0.6 * (c * ex + s * ey), 0.2), "cy": clip(0.6 * (-s * ex + c * ey), 0.2),
+                "cz": clip(0.6 * (z0 - z), 0.2), "cw": clip(0.8 * wrap(yaw0 - yaw), 0.3)}
+
     def doublet(self, segment, axis, sign):
+        """Hover (position held) - pulse +A - pulse -A - hover. During the pulses the tested axis is open loop
+        and the other axes keep holding the position; the logged u is what was really sent on the tested axis."""
         amp, dur = (self.yaw_amp, self.yaw_dur) if axis == "yaw" else (self.amp, self.dur)
         key = {"x": "cx", "y": "cy", "z": "cz", "yaw": "cw"}[axis]
-        for u, d in ((0.0, 2.0), (sign * amp, dur), (-sign * amp, dur), (0.0, 3.0)):
-            self.run(d, lambda u=u: self.send(**{key: u}, segment=segment, axis=axis, u=u))
+
+        def cmd(u):
+            c = self.hold_cmd()
+            if u is not None:
+                c[key] = u
+            self.send(**c, segment=segment, axis=axis, u=c[key])
+        for u, d in ((None, 2.0), (sign * amp, dur), (-sign * amp, dur), (None, 3.0)):
+            self.run(d, lambda u=u: cmd(u))
 
     def wait_ready(self):
         self.say("Waiting for the driver and the telemetry...")
