@@ -216,26 +216,36 @@ class TelloDriver(Node):
 
     def video_watchdog(self):
         """The Wi-Fi/WSL route to the drone can drop for a few seconds (Windows re-checks the network ~20 s
-        after joining the Tello's Wi-Fi). That kills djitellopy's decoder thread for good: restart the stream."""
+        after joining the Tello's Wi-Fi). djitellopy's reader blocks on its UDP port 11111 with no timeout: if
+        its thread is still alive it resumes by itself once packets come back, so only 'streamon' is re-sent.
+        A NEW reader while the old one holds the port fails with 'Address already in use' (Nov 9): a new one is
+        made only if the old thread is dead, after closing its container."""
         if self.mock or self.restarting or time.time() - self.last_frame_t < self.video_timeout:
             return
         self.restarting = True
-        self.get_logger().warn(f"No video for {time.time() - self.last_frame_t:.0f} s: restarting the stream")
+        r = self.tello.background_frame_read
+        alive = r is not None and r.worker.is_alive()
+        self.get_logger().warn(f"No video for {time.time() - self.last_frame_t:.0f} s: "
+                               + ("re-sending streamon (reader still waiting)" if alive else "restarting the reader"))
 
         def restart():
             try:
-                try:
-                    self.tello.streamoff()
-                except Exception:  # noqa: BLE001
+                self.tello.send_command_without_return("streamon")
+                if not alive:
+                    try:
+                        if r is not None:
+                            r.stopped = True
+                            r.container.close()  # frees UDP port 11111
+                    except Exception:  # noqa: BLE001
+                        pass
                     self.tello.background_frame_read = None
-                time.sleep(0.5)
-                self.tello.streamon()
-                self.reader = self.tello.get_frame_read()
-                self.get_logger().info("Video stream restarted")
+                    time.sleep(0.5)
+                    self.reader = self.tello.get_frame_read()
+                    self.get_logger().info("Video reader restarted")
             except Exception as e:  # noqa: BLE001
                 self.get_logger().warn(f"Video restart failed ({e}): retrying", throttle_duration_sec=5.0)
             finally:
-                self.last_frame_t = time.time()  # give the new stream time to start
+                self.last_frame_t = time.time()  # give the stream time to come back
                 self.restarting = False
         threading.Thread(target=restart, daemon=True).start()
 
@@ -392,6 +402,18 @@ class TelloDriver(Node):
         if delta >= 20:  # the SDK refuses moves under 20 cm
             self.get_logger().info(f"at {hgt:.2f} m: climbing {delta} cm towards {target:.2f} m (markers in view)")
             self.tello.move_up(delta)
+            # the 'ok' can come before the end of the move (seen Nov 9): stay busy until the height is stable
+            hist, t0 = [], time.time()
+            while time.time() - t0 < 6.0:
+                h = self.height_estimate()
+                if h is not None:
+                    hist.append((time.time(), h))
+                old = [x for t, x in hist if time.time() - t > 0.8]
+                if old and h is not None and abs(h - old[-1]) < 0.04:
+                    break
+                time.sleep(0.1)
+            h = self.height_estimate()
+            self.get_logger().info(f"climb done at {h:.2f} m" if h is not None else "climb done")
         else:
             self.get_logger().info(f"at {hgt:.2f} m after takeoff: no climb needed (target {target:.2f} m)")
 

@@ -27,6 +27,7 @@ import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
+from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
@@ -65,6 +66,8 @@ class StepTest(Node):
         self.cli = {n: self.create_client(Trigger, f"/tello_driver/{n}") for n in ("takeoff", "land")}
         self.create_subscription(PoseWithCovarianceStamped, "/aruco/pose", self.on_pose, 50)
         self.create_subscription(String, "/tello/telemetry", self.on_tel, 10)
+        self.create_subscription(CameraInfo, "/tello/camera_info", self.on_video, 2)
+        self.video_t = 0.0
         self.pose = None          # (t_received, x, y, z, yaw)
         self.tel, self.tel_t = {}, 0.0
         self.p0 = None
@@ -98,6 +101,9 @@ class StepTest(Node):
             self.w_tel = csv.DictWriter(self.f_tel, fieldnames=list(st.keys()), extrasaction="ignore")
             self.w_tel.writeheader()
         self.w_tel.writerow(st)
+
+    def on_video(self, m):
+        self.video_t = time.time()  # one camera_info per video frame
 
     def in_air(self):
         h = self.tel.get("h", 0)
@@ -204,6 +210,8 @@ class StepTest(Node):
                   if i.node_name != self.get_name()]
         if others:
             raise Abort(f"another node sends commands ({', '.join(others)}): close the teleop first")
+        if time.time() - self.video_t > 1.0:
+            raise Abort("no video from the drone: the PC lost the Tello Wi-Fi? Reconnect, wait 30 s, relaunch")
         bat = self.tel.get("bat", 0)
         if isinstance(bat, (int, float)) and bat < self.min_battery:
             raise Abort(f"battery {bat} % < {self.min_battery} %: charge it first")
@@ -233,13 +241,15 @@ class StepTest(Node):
         self.say("Hovering, measuring the start point...")
         samples = []
         t0 = time.time()
-        while time.time() - t0 < 4.0 and len(samples) < 15:
+        while time.time() - t0 < 8.0 and len(samples) < 15:
             self.check_keys()
             self.send()
             self.spin(0.05)
             if self.pose_age() < 0.2:
                 samples.append(self.pose[1:])
         if len(samples) < 5:
+            if time.time() - self.video_t > 1.0:
+                raise Abort("no video from the drone (Wi-Fi drop?): reconnect, wait 30 s, relaunch")
             raise Abort("no marker in view: place the drone facing the marker wall (2-3 markers in the picture)")
         S = np.array(samples)
         self.p0 = (float(np.median(S[:, 0])), float(np.median(S[:, 1])), float(np.median(S[:, 2])),
