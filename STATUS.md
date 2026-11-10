@@ -3,16 +3,16 @@
 > 🤖 Auto-generated from the GitHub issues by `tools/update_status.py` on every issue change. **Do not edit by hand**: update the issues instead.
 > 🔴 = critical path · ✨ = stretch
 
-## Overall: 1 / 55 tasks done (2%)
+## Overall: 2 / 55 tasks done (4%)
 
 `█░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░`
 
 ```mermaid
 pie showData title Tasks
-    "Done" : 1
+    "Done" : 2
     "In progress" : 0
     "Up for grabs" : 9
-    "Waiting on dependencies" : 45
+    "Waiting on dependencies" : 44
     "Blocked" : 0
 ```
 
@@ -20,7 +20,7 @@ pie showData title Tasks
 
 | Milestone | Due | Progress | Done |
 |---|---|---|---|
-| [M1: Infrastructure](https://github.com/clementdumeril/tello-balloon-hunter/milestone/1) | 2026-11-15 | `█░░░░░░░░░░░░░░░░░░░` 6% | 1/17 |
+| [M1: Infrastructure](https://github.com/clementdumeril/tello-balloon-hunter/milestone/1) | 2026-11-15 | `██░░░░░░░░░░░░░░░░░░` 12% | 2/17 |
 | [M2: TF chain validated (hand-held)](https://github.com/clementdumeril/tello-balloon-hunter/milestone/2) | 2026-11-22 | `░░░░░░░░░░░░░░░░░░░░` 0% | 0/12 |
 | [M3: Estimation & autonomous flight](https://github.com/clementdumeril/tello-balloon-hunter/milestone/3) | 2026-11-29 | `░░░░░░░░░░░░░░░░░░░░` 0% | 0/8 |
 | [M4: Balloon perception](https://github.com/clementdumeril/tello-balloon-hunter/milestone/4) | 2026-12-02 | `░░░░░░░░░░░░░░░░░░░░` 0% | 0/6 |
@@ -32,7 +32,7 @@ pie showData title Tasks
 | Workstream | Progress | Done | In progress |
 |---|---|---|---|
 | **A** · Drone & infrastructure | `░░░░░░░░░░░░` 0% | 0/8 | 0 |
-| **B** · Calibration & marker map | `░░░░░░░░░░░░` 0% | 0/8 | 0 |
+| **B** · Calibration & marker map | `██░░░░░░░░░░` 12% | 1/8 | 0 |
 | **C** · Localization & TF | `░░░░░░░░░░░░` 0% | 0/5 | 0 |
 | **D** · Simulation | `████░░░░░░░░` 33% | 1/3 | 0 |
 | **E** · State estimation (EKF) | `░░░░░░░░░░░░` 0% | 0/8 | 0 |
@@ -61,7 +61,7 @@ Dependencies are done and nobody is assigned. **Pick from the top.**
 | [**C1**](https://github.com/clementdumeril/tello-balloon-hunter/issues/17) TF tree definition and frame conventions | C | M1 |
 | [**I8**](https://github.com/clementdumeril/tello-balloon-hunter/issues/55) Media log: photos and videos at every stage | I | M6 |
 
-<details><summary>⏳ Waiting on dependencies (45)</summary>
+<details><summary>⏳ Waiting on dependencies (44)</summary>
 
 | Task | Waiting on | Milestone |
 |---|---|---|
@@ -71,12 +71,11 @@ Dependencies are done and nobody is assigned. **Pick from the top.**
 | [**A5**](https://github.com/clementdumeril/tello-balloon-hunter/issues/5) Measure Tello video latency and frame drops 🔴 | A2 | M1 |
 | [**A6**](https://github.com/clementdumeril/tello-balloon-hunter/issues/6) Characterize Tello telemetry (units, resolution, frame, rate) 🔴 | A2 | M1 |
 | [**A7**](https://github.com/clementdumeril/tello-balloon-hunter/issues/7) Rosbag recording scripts and test procedure | A2, A4 | M1 |
-| [**B1**](https://github.com/clementdumeril/tello-balloon-hunter/issues/9) Tello camera intrinsic calibration 🔴 | A2 | M1 |
 | [**B2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/10) Logitech C922 intrinsic calibration | A4 | M1 |
 | [**B5**](https://github.com/clementdumeril/tello-balloon-hunter/issues/13) Marker map v1: hand-measured markers.yaml 🔴 | B3, B4 | M2 |
 | [**B7**](https://github.com/clementdumeril/tello-balloon-hunter/issues/15) Logitech extrinsics: map -> logitech_cam | B2, B5 | M2 |
 | [**C2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/18) Static TF publishers | B5, B7, C1 | M2 |
-| [**C3**](https://github.com/clementdumeril/tello-balloon-hunter/issues/19) ArUco localizer: joint solvePnP over all visible markers 🔴 | B1, C2 | M2 |
+| [**C3**](https://github.com/clementdumeril/tello-balloon-hunter/issues/19) ArUco localizer: joint solvePnP over all visible markers 🔴 | C2 | M2 |
 | [**C4**](https://github.com/clementdumeril/tello-balloon-hunter/issues/20) Hand-held validation of the TF chain 🔴 | C3 | M2 |
 | [**D3**](https://github.com/clementdumeril/tello-balloon-hunter/issues/24) Simulated quadrotor with Tello-like interface, latency and H.264 | A5 | M2 |
 | [**E2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/26) EKF implementation validated on the toy simulator 🔴 | E1, D1 | M2 |
@@ -85,7 +84,7 @@ Dependencies are done and nobody is assigned. **Pick from the top.**
 | [**G1**](https://github.com/clementdumeril/tello-balloon-hunter/issues/36) Balloon dataset collection (Tello + C922) | A2, A4 | M2 |
 | [**G3**](https://github.com/clementdumeril/tello-balloon-hunter/issues/38) HSV color baseline detector | G1 | M2 |
 | [**I2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/49) Ground-truth and evaluation protocol | C4 | M2 |
-| [**B6**](https://github.com/clementdumeril/tello-balloon-hunter/issues/14) Marker map v2: automatic estimation and optimization | B1, B5 | M3 |
+| [**B6**](https://github.com/clementdumeril/tello-balloon-hunter/issues/14) Marker map v2: automatic estimation and optimization | B5 | M3 |
 | [**E4**](https://github.com/clementdumeril/tello-balloon-hunter/issues/28) Delayed-measurement handling | E2, A5 | M3 |
 | [**E5**](https://github.com/clementdumeril/tello-balloon-hunter/issues/29) drone_ekf ROS 2 node 🔴 | E3, C3, A6 | M3 |
 | [**E6**](https://github.com/clementdumeril/tello-balloon-hunter/issues/30) Tune Q and R on real data | E5, A7 | M3 |
@@ -96,7 +95,7 @@ Dependencies are done and nobody is assigned. **Pick from the top.**
 | [**C5**](https://github.com/clementdumeril/tello-balloon-hunter/issues/21) Logitech drone tracking (background subtraction) ✨ | B7 | M4 |
 | [**E7**](https://github.com/clementdumeril/tello-balloon-hunter/issues/31) Balloon EKF (Tello + Logitech detections) | E2, G5, G6 | M4 |
 | [**G4**](https://github.com/clementdumeril/tello-balloon-hunter/issues/39) Fine-tune YOLOv8n / YOLO11n | G2, G3 | M4 |
-| [**G5**](https://github.com/clementdumeril/tello-balloon-hunter/issues/40) balloon_detector node on the Tello stream 🔴 | G4, B1 | M4 |
+| [**G5**](https://github.com/clementdumeril/tello-balloon-hunter/issues/40) balloon_detector node on the Tello stream 🔴 | G4 | M4 |
 | [**G6**](https://github.com/clementdumeril/tello-balloon-hunter/issues/41) Balloon detection on the Logitech image | G3, B7 | M4 |
 | [**H1**](https://github.com/clementdumeril/tello-balloon-hunter/issues/42) Pin mount design and attachment | A8 | M4 |
 | [**B8**](https://github.com/clementdumeril/tello-balloon-hunter/issues/16) Portable marker setup for the demo + confirm demo logistics 🔴 | B5 | M5 |
@@ -115,4 +114,5 @@ Dependencies are done and nobody is assigned. **Pick from the top.**
 
 ## ✅ Recently done
 
+- 2026-11-10: [**B1**](https://github.com/clementdumeril/tello-balloon-hunter/issues/9) Tello camera intrinsic calibration 🔴
 - 2026-11-07: [**D2**](https://github.com/clementdumeril/tello-balloon-hunter/issues/23) Gazebo Harmonic world (room, markers, fixed camera, balloon)
