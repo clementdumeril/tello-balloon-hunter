@@ -77,9 +77,12 @@ class MarkerTour(StepTest):
             n = m.R[:, 2].copy()
             n[2] = 0.0
             n /= np.linalg.norm(n)
-            x = min(max(m.t[0] + self.standoff * n[0], f[0]), f[1])
-            y = min(max(m.t[1] + self.standoff * n[1], f[2]), f[3])
             z = min(max(m.t[2], self.z_lo), self.z_hi)
+            # a marker higher/lower than the drone can go: back off until it sits in the middle 60 % of the
+            # vertical field of view (43 deg); e.g. the west markers at 2.5-2.7 m were cut at the image top
+            d = max(self.standoff, abs(m.t[2] - z) / (0.6 * math.tan(math.radians(21.5))))
+            x = min(max(m.t[0] + d * n[0], f[0]), f[1])
+            y = min(max(m.t[1] + d * n[1], f[2]), f[3])
             yaw = math.atan2(m.t[1] - y, m.t[0] - x)  # facing the marker
             wall = round(math.degrees(math.atan2(n[1], n[0])) / 90) % 4  # which wall (normal direction)
             wps.append({"id": m.id, "p": (x, y, z), "yaw": yaw, "wall": wall,
