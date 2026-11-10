@@ -318,18 +318,27 @@ class TelloDriver(Node):
         if self.busy.locked():
             return  # a takeoff / climb / land command is running: rc would interfere with it
         rc = self.rc_target if time.time() - self.last_cmd < self.cmd_timeout else (0, 0, 0, 0)
-        # ceiling guard, whatever program sends the commands: no climbing in the last 20 cm, descend above
+        # ceiling guard, whatever program sends the commands. The drone needs ~1 s to stop (tau ~0.8 s + delay),
+        # so the guard works on the height predicted 1 s ahead, not on the current one.
         hgt = self.height_estimate() if self.tello.is_flying else None
         if hgt is not None:
+            now = time.time()
+            self.h_hist = [(t, h) for t, h in getattr(self, "h_hist", []) if now - t < 0.6] + [(now, hgt)]
+            t_old, h_old = self.h_hist[0]
+            vz = (hgt - h_old) / (now - t_old) if now - t_old > 0.2 else 0.0
+            h_pred = hgt + max(vz, 0.0) * 1.0
+            limit = self.max_height - 0.15
             lr, fb, ud, yw = rc
             if hgt > self.max_height:
-                ud = -25
+                ud = -30
                 self.get_logger().warn(f"height {hgt:.2f} m > {self.max_height:.2f} m: descending",
                                        throttle_duration_sec=1.0)
-            elif hgt > self.max_height - 0.2 and ud > 0:
-                ud = 0
-                self.get_logger().warn(f"height {hgt:.2f} m: close to the {self.max_height:.2f} m limit, no climbing",
-                                       throttle_duration_sec=2.0)
+            elif h_pred > limit:
+                ud = min(ud, -20)  # brake now, or it overshoots
+                self.get_logger().warn(f"height {hgt:.2f} m rising {vz:+.2f} m/s: braking before the "
+                                       f"{self.max_height:.2f} m limit", throttle_duration_sec=1.0)
+            else:
+                ud = min(ud, int((limit - h_pred) / self.lin_gain))  # slower and slower towards the limit
             rc = (lr, fb, ud, yw)
         try:
             self.tello.send_rc_control(*rc)  # also keeps the link alive (the Tello lands after 15 s of silence)
