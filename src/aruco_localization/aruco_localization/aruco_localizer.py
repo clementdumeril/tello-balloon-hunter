@@ -61,6 +61,7 @@ class ArucoLocalizer(Node):
         self.K = self.D = None
         self.T_base_cam = None
         self.n = 0
+        self.ambiguous = 0
         self.saved = 0
 
         self.tf_buffer = Buffer()
@@ -125,10 +126,27 @@ class ArucoLocalizer(Node):
                 T_map_base = T_map_cam @ np.linalg.inv(self.T_base_cam)
                 dist = float(np.mean(np.linalg.norm(obj_pts - T_map_cam[:3, 3], axis=1)))
                 ok = err <= self.max_reproj
+                if ok and len(used) == 1 and not self.single_marker_unambiguous(imgp[0], self.markers[used[0]].size):
+                    ok = False  # one small/far marker: two mirror poses fit almost equally well -> skip
+                    self.ambiguous += 1
         if ok:
             self.publish(msg.header.stamp, T_map_base, err, dist, len(used))
         if self.debug_every and self.n % self.debug_every == 0:
             self.publish_debug(msg, img, corners, ids, ok, err, used)
+
+    def single_marker_unambiguous(self, corners, size, min_ratio=3.0):
+        """A single planar marker has two candidate poses (IPPE); keep it only if one is clearly better."""
+        h = size / 2.0
+        local = np.array([[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]], dtype=np.float64)
+        try:
+            n, _, _, errs = cv2.solvePnPGeneric(local, corners.astype(np.float64), self.K, self.D,
+                                                flags=cv2.SOLVEPNP_IPPE_SQUARE)
+        except cv2.error:
+            return False
+        if n < 2 or errs is None:
+            return True
+        e = np.sort(np.ravel(errs))
+        return e[1] / max(e[0], 1e-6) >= min_ratio
 
     def publish(self, stamp, T, err, dist, n_markers):
         fx = self.K[0, 0]
