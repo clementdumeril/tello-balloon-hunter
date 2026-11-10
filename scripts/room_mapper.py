@@ -34,7 +34,16 @@ sys.path.insert(0, str(ROOT / "scripts"))
 CALIB = ROOT / "config" / "tello_camera.yaml"
 MARKERS = ROOT / "config" / "markers.yaml"
 CAPTURES = ROOT / "logs" / "room_captures"
-DICT = "DICT_4X4_50"
+def map_settings():
+    """Marker family and printed size, read from config/markers.yaml (the ones actually on the walls)."""
+    try:
+        cfg = yaml.safe_load(open(MARKERS, encoding="utf-8")) or {}
+    except OSError:
+        cfg = {}
+    return cfg.get("dictionary", "DICT_6X6_50"), float(cfg.get("marker_size", 0.15))
+
+
+DICT, MARKER_SIZE = map_settings()
 FLOOR_CAM_HEIGHT = 0.035  # camera centre above the floor when the Tello sits on the ground [m]
 
 
@@ -497,7 +506,7 @@ def main():
     c = sub.add_parser("solve")
     c.add_argument("--dir", help="capture folder (default: latest)")
     c.add_argument("--origin", type=int, help="origin marker id (default: the best connected)")
-    c.add_argument("--size", type=float, default=0.15, help="marker black square [m]")
+    c.add_argument("--size", type=float, default=MARKER_SIZE, help="side of the black square [m] (default: marker_size in markers.yaml)")
     c.add_argument("--origin-height", type=float, default=1.0, help="used only without floor frames")
     c.add_argument("--stride", type=int, default=1)
     c.add_argument("--min-pairs", type=int, default=2, help="views needed to place a new marker")
