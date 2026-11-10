@@ -7,6 +7,7 @@ import math
 
 import numpy as np
 import rclpy
+from builtin_interfaces.msg import Time as TimeMsg
 from geometry_msgs.msg import Point, TransformStamped
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
@@ -53,7 +54,10 @@ class MarkerMapPublisher(Node):
         # as soon as the localizer publishes map -> base_link. Separate topic so that the marker display
         # never shows a "no transform" warning before the first pose.
         self.pub_body = self.create_publisher(MarkerArray, "/tello/body_markers", qos)
-        self.pub_body.publish(self.body_markers(stamp))
+        # stamp 0 = "use the latest transform": the drone frame moves, an old stamp would be looked up in the past
+        self.body = self.body_markers(TimeMsg())
+        self.pub_body.publish(self.body)
+        self.create_timer(1.0, lambda: self.pub_body.publish(self.body))
         self.get_logger().info(f"Published {len(self.markers)} marker frames from {path}")
 
     def map_markers(self, stamp):

@@ -122,8 +122,15 @@ class ArucoLocalizer(Node):
         if used:
             obj_pts = np.concatenate(obj).astype(np.float64)
             img_pts = np.concatenate(imgp).astype(np.float64)
-            flag = cv2.SOLVEPNP_SQPNP if hasattr(cv2, "SOLVEPNP_SQPNP") else cv2.SOLVEPNP_ITERATIVE
-            ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, self.K, self.D, flags=flag)
+            if len(used) == 1:
+                # one marker: two mirror poses fit; take IPPE's best one, and only if it is clearly the best
+                # (SQPnP may converge to the mirror pose: 1.4 m errors seen with the fake drone)
+                ok, rvec, tvec = self.single_marker_pose(imgp[0], self.markers[used[0]])
+                if not ok:
+                    self.ambiguous += 1
+            else:
+                flag = cv2.SOLVEPNP_SQPNP if hasattr(cv2, "SOLVEPNP_SQPNP") else cv2.SOLVEPNP_ITERATIVE
+                ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, self.K, self.D, flags=flag)
             if ok:
                 rvec, tvec = cv2.solvePnPRefineLM(obj_pts, img_pts, self.K, self.D, rvec, tvec)
                 proj, _ = cv2.projectPoints(obj_pts, rvec, tvec, self.K, self.D)
@@ -134,29 +141,46 @@ class ArucoLocalizer(Node):
                 T_map_cam[:3, 3] = (-R_cm.T @ tvec).ravel()
                 T_map_base = T_map_cam @ np.linalg.inv(self.T_base_cam)
                 dist = float(np.mean(np.linalg.norm(obj_pts - T_map_cam[:3, 3], axis=1)))
-                ok = err <= self.max_reproj
-                if ok and len(used) == 1 and not self.single_marker_unambiguous(imgp[0], self.markers[used[0]].size):
-                    ok = False  # one small/far marker: two mirror poses fit almost equally well -> skip
-                    self.ambiguous += 1
+                ok = err <= self.max_reproj and self.plausible(T_map_base[:3, 3], len(used))
         if ok:
             self.publish(msg.header.stamp, T_map_base, err, dist, len(used))
             self.publish_viz(msg.header.stamp, T_map_cam[:3, 3], used)
         if self.debug_every and self.n % self.debug_every == 0:
             self.publish_debug(msg, img, corners, ids, ok, err, used)
 
-    def single_marker_unambiguous(self, corners, size, min_ratio=3.0):
-        """A single planar marker has two candidate poses (IPPE); keep it only if one is clearly better."""
-        h = size / 2.0
+    def single_marker_pose(self, corners, mk, min_ratio=3.0):
+        """Best IPPE pose of one marker, expressed as map -> camera (rvec, tvec). ok=False if ambiguous."""
+        h = mk.size / 2.0
         local = np.array([[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]], dtype=np.float64)
         try:
-            n, _, _, errs = cv2.solvePnPGeneric(local, corners.astype(np.float64), self.K, self.D,
-                                                flags=cv2.SOLVEPNP_IPPE_SQUARE)
+            n, rvecs, tvecs, errs = cv2.solvePnPGeneric(local, corners.astype(np.float64), self.K, self.D,
+                                                        flags=cv2.SOLVEPNP_IPPE_SQUARE)
         except cv2.error:
+            return False, None, None
+        if n == 0:
+            return False, None, None
+        e = np.ravel(errs) if errs is not None else np.zeros(n)
+        k = int(np.argmin(e))
+        if n >= 2:
+            e2 = np.sort(e)
+            if e2[1] / max(e2[0], 1e-6) < min_ratio:
+                return False, None, None
+        R_mc, _ = cv2.Rodrigues(rvecs[k])          # marker -> camera
+        R_cmap = R_mc @ mk.R.T                      # map -> camera
+        t = np.asarray(tvecs[k], float).reshape(3, 1) - R_cmap @ mk.t.reshape(3, 1)
+        rvec, _ = cv2.Rodrigues(R_cmap)
+        return True, rvec, t
+
+    def plausible(self, pos, n_markers, max_jump=0.5, window=0.5):
+        """Reject a single-marker pose that jumps far from the previous one (a flip the ratio test missed).
+        Poses from 2+ markers are trusted and always accepted (they re-anchor the gate)."""
+        now = self.get_clock().now().nanoseconds * 1e-9
+        last = getattr(self, "_last_ok", None)
+        if n_markers == 1 and last is not None and now - last[0] < window and np.linalg.norm(pos - last[1]) > max_jump:
+            self.ambiguous += 1
             return False
-        if n < 2 or errs is None:
-            return True
-        e = np.sort(np.ravel(errs))
-        return e[1] / max(e[0], 1e-6) >= min_ratio
+        self._last_ok = (now, np.array(pos, float))
+        return True
 
     def publish(self, stamp, T, err, dist, n_markers):
         fx = self.K[0, 0]
