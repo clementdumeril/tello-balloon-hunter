@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Guided camera calibration for the Tello with the printed checkerboard (docs/print/checkerboard_A4.pdf).
+"""Camera calibration for the Tello with the printed checkerboard (docs/print/checkerboard_A4.pdf).
 
     python scripts/calibrate_camera.py            (or double-click calibrer_camera.bat)
 
-The screen shows, step by step, WHERE to hold the board (blue zone + arrow) and HOW to tilt it.
-A photo is taken automatically when the board is in place, sharp and still. At the end the script
-computes the calibration, says whether it is good, and saves config/tello_camera.yaml.
+No target to aim at: move the board freely in front of the camera. The image is split into 9 cells
+that turn green as the board passes over them, and a checklist shows what is still missing (near, far,
+tilted left/right/up/down, rotated). A photo is taken automatically whenever the board is sharp, still
+for a moment and brings something new. When everything is green, the calibration is computed, rated,
+and saved to config/tello_camera.yaml.
 
-Keys: Space = take the photo now · S = skip this step · Esc = quit without saving.
+Keys: C = compute now (10+ photos) · Esc = quit without saving.
 Start it first after switching the drone on (the Tello answers only its first client).
 """
-import argparse
 import math
 import sys
 import time
@@ -24,44 +25,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from room_mapper import CALIB, save_calib, tello_stream  # noqa: E402
 
 COLS, ROWS, SQUARE = 9, 6, 0.025  # inner corners, square size [m] (docs/print/checkerboard_A4.pdf)
+GRID = 3                          # image split in GRID x GRID cells
+TILT = 20.0                       # degrees for a "tilted" view
+STILL_PX = 3.0                    # mean corner motion between frames still counted as "still"
+STILL_TIME = 0.3                  # seconds still before the photo
+SHARP_MIN = 30.0                  # Laplacian variance on the board (below = blurry)
+MIN_VIEWS, MAX_VIEWS = 15, 40
 
-# where to hold the board: centre (fraction of the image), width of the board (fraction of the image width)
-STEPS = [
-    dict(title="Au centre, PRÈS", hint="Damier face à la caméra, à ~40 cm, bien au centre", cx=.5, cy=.5, w=(.45, .95)),
-    dict(title="Au centre, LOIN", hint="Recule à ~1 m, toujours au centre", cx=.5, cy=.5, w=(.15, .38)),
-    dict(title="Coin haut-gauche de l'image", hint="Mets le damier dans la zone bleue", cx=.27, cy=.28, w=(.2, .5)),
-    dict(title="Coin haut-droit de l'image", hint="Mets le damier dans la zone bleue", cx=.73, cy=.28, w=(.2, .5)),
-    dict(title="Coin bas-gauche de l'image", hint="Mets le damier dans la zone bleue", cx=.27, cy=.72, w=(.2, .5)),
-    dict(title="Coin bas-droit de l'image", hint="Mets le damier dans la zone bleue", cx=.73, cy=.72, w=(.2, .5)),
-    dict(title="Bord gauche de l'image", hint="Damier collé au bord gauche de l'image", cx=.2, cy=.5, w=(.2, .45)),
-    dict(title="Bord droit de l'image", hint="Damier collé au bord droit de l'image", cx=.8, cy=.5, w=(.2, .45)),
-    dict(title="Bord haut de l'image", hint="Damier collé au bord haut de l'image", cx=.5, cy=.22, w=(.2, .45)),
-    dict(title="Bord bas de l'image", hint="Damier collé au bord bas de l'image", cx=.5, cy=.78, w=(.2, .45)),
-    dict(title="Penché sur le côté (1)", hint="Au centre, tourne le damier d'environ 35° autour d'un axe VERTICAL", cx=.5, cy=.5, w=(.2, .7), tilt="h"),
-    dict(title="Penché sur le côté (2)", hint="Même chose, mais de l'AUTRE côté", cx=.5, cy=.5, w=(.2, .7), tilt="h2"),
-    dict(title="Penché en avant/arrière (1)", hint="Au centre, bascule le haut du damier d'environ 35° (axe HORIZONTAL)", cx=.5, cy=.5, w=(.2, .7), tilt="v"),
-    dict(title="Penché en avant/arrière (2)", hint="Même chose, dans l'AUTRE sens", cx=.5, cy=.5, w=(.2, .7), tilt="v2"),
-    dict(title="Tourné de 45°", hint="Au centre, tourne le damier dans son plan, comme un losange", cx=.5, cy=.5, w=(.25, .75), roll=True),
+CHECKS = [  # key, label, test on the measurement
+    ("near", "Près (damier grand dans l'image)", lambda m: m["w"] > 0.45),
+    ("far", "Loin (damier petit, ~1 m)", lambda m: m["w"] < 0.28),
+    ("left", "Penché : tourné vers un côté", lambda m: m["th"] < -TILT),
+    ("right", "Penché : tourné vers l'autre côté", lambda m: m["th"] > TILT),
+    ("up", "Basculé : haut vers l'arrière", lambda m: m["tv"] < -TILT),
+    ("down", "Basculé : haut vers l'avant", lambda m: m["tv"] > TILT),
+    ("roll", "Tourné en losange (~45°)", lambda m: 25 <= abs(m["roll"]) <= 65),
 ]
-TOL = 0.13          # position tolerance (fraction of the image)
-TILT_MIN = 22.0     # degrees
-STILL_PX = 2.0      # corner motion allowed between frames to count as "still"
-STILL_TIME = 0.5    # seconds still before the photo
-SHARP_MIN = 40.0    # Laplacian variance on the board (below = blurry)
 
-FONT = "C:/Windows/Fonts/segoeui.ttf"
-FONT_B = "C:/Windows/Fonts/segoeuib.ttf"
-
-
-def fonts():
-    try:
-        return ImageFont.truetype(FONT_B, 26), ImageFont.truetype(FONT, 19), ImageFont.truetype(FONT_B, 21)
-    except OSError:
-        d = ImageFont.load_default()
-        return d, d, d
-
-
-F_BIG, F_TXT, F_STATUS = fonts()
+try:
+    F_BIG = ImageFont.truetype("C:/Windows/Fonts/segoeuib.ttf", 24)
+    F_TXT = ImageFont.truetype("C:/Windows/Fonts/segoeui.ttf", 17)
+    F_ST = ImageFont.truetype("C:/Windows/Fonts/segoeuib.ttf", 20)
+except OSError:
+    F_BIG = F_TXT = F_ST = ImageFont.load_default()
 
 
 def board_points():
@@ -70,84 +56,61 @@ def board_points():
     return objp
 
 
-def measure(corners, size, K0):
-    """Position, size, tilts (deg) and in-plane rotation of the board in the image."""
+def measure(pts, size, K0):
+    """Size, tilts (deg), in-plane rotation and covered cells of a detected board."""
     W, H = size
-    pts = corners.reshape(-1, 2)
-    cx, cy = pts[:, 0].mean() / W, pts[:, 1].mean() / H
     width = (pts[:, 0].max() - pts[:, 0].min()) / W
-    ok, r, t = cv2.solvePnP(board_points(), pts, K0, None)
-    R = cv2.Rodrigues(r)[0] if ok else np.eye(3)
-    n = R[:, 2]  # board normal in the camera frame
-    tilt_h = math.degrees(math.atan2(n[0], abs(n[2])))
-    tilt_v = math.degrees(math.atan2(n[1], abs(n[2])))
+    ok, r, _ = cv2.solvePnP(board_points(), pts, K0, None)
+    n = cv2.Rodrigues(r)[0][:, 2] if ok else np.array([0, 0, 1.0])
     row = pts[COLS - 1] - pts[0]
-    roll = math.degrees(math.atan2(row[1], row[0]))
-    roll = ((roll + 90) % 180) - 90  # a board turned by 180 deg looks the same
-    return dict(cx=cx, cy=cy, w=width, th=tilt_h, tv=tilt_v, roll=roll)
+    roll = ((math.degrees(math.atan2(row[1], row[0])) + 90) % 180) - 90
+    cells = set()
+    for x, y in pts:
+        cells.add((min(GRID - 1, int(y / H * GRID)), min(GRID - 1, int(x / W * GRID))))
+    return dict(w=width, th=math.degrees(math.atan2(n[0], abs(n[2]))), tv=math.degrees(math.atan2(n[1], abs(n[2]))),
+                roll=roll, cells=cells, c=pts.mean(0) / np.array([W, H]))
 
 
-def check(step, m, done):
-    """(ok, advice) for the current measurement against the step's target."""
-    adv = []
-    if abs(m["cx"] - step["cx"]) > TOL or abs(m["cy"] - step["cy"]) > TOL:
-        adv.append("déplace le damier vers la zone bleue (suis la flèche)")
-    lo, hi = step["w"]
-    if m["w"] < lo:
-        adv.append("rapproche-le de la caméra")
-    elif m["w"] > hi:
-        adv.append("éloigne-le de la caméra")
-    tilt = step.get("tilt")
-    if tilt in ("h", "h2"):
-        sign_ok = True
-        if tilt == "h2" and "h" in done:
-            sign_ok = np.sign(m["th"]) != np.sign(done["h"])
-        if abs(m["th"]) < TILT_MIN:
-            adv.append(f"tourne-le davantage autour de l'axe vertical ({abs(m['th']):.0f}°, il faut {TILT_MIN:.0f}°+)")
-        elif not sign_ok:
-            adv.append("tourne-le de l'AUTRE côté que la photo précédente")
-    if tilt in ("v", "v2"):
-        sign_ok = True
-        if tilt == "v2" and "v" in done:
-            sign_ok = np.sign(m["tv"]) != np.sign(done["v"])
-        if abs(m["tv"]) < TILT_MIN:
-            adv.append(f"bascule-le davantage autour de l'axe horizontal ({abs(m['tv']):.0f}°, il faut {TILT_MIN:.0f}°+)")
-        elif not sign_ok:
-            adv.append("bascule-le dans l'AUTRE sens que la photo précédente")
-    if step.get("roll") and not 25 <= abs(m["roll"]) <= 65:
-        adv.append(f"tourne-le dans son plan, vers 45° (là : {abs(m['roll']):.0f}°)")
-    if not step.get("tilt") and not step.get("roll") and max(abs(m["th"]), abs(m["tv"])) > 25:
-        adv.append("tiens-le bien face à la caméra (pas penché)")
-    return not adv, adv
+def novelty(m, cov_cells, cov_checks, views):
+    """What this view would add (new cells / new checks), and whether it differs from every photo taken."""
+    new_cells = m["cells"] - cov_cells
+    new_checks = {k for k, _, f in CHECKS if f(m) and k not in cov_checks}
+    different = all(np.linalg.norm(m["c"] - v["c"]) > 0.12 or abs(m["w"] - v["w"]) > 0.1
+                    or abs(m["th"] - v["th"]) > 12 or abs(m["tv"] - v["tv"]) > 12 for v in views)
+    return new_cells, new_checks, different
 
 
-def draw_ui(frame, step_i, steps, status, color, advice, zone, arrow, corners, found, n_ok, flash):
+def draw(frame, cov_cells, cov_checks, n_views, status, color, corners, flash, hint=""):
     H, W = frame.shape[:2]
     view = frame.copy()
-    st = steps[step_i] if step_i < len(steps) else None
-    if zone is not None:
-        overlay = view.copy()
-        cv2.rectangle(overlay, zone[0], zone[1], (255, 170, 60), -1)
-        view = cv2.addWeighted(overlay, 0.18, view, 0.82, 0)
-        cv2.rectangle(view, zone[0], zone[1], (255, 170, 60), 2)
-    if found:
+    overlay = view.copy()
+    for r in range(GRID):
+        for c in range(GRID):
+            if (r, c) in cov_cells:
+                cv2.rectangle(overlay, (c * W // GRID, r * H // GRID), ((c + 1) * W // GRID, (r + 1) * H // GRID), (80, 200, 90), -1)
+    view = cv2.addWeighted(overlay, 0.22, view, 0.78, 0)
+    for k in range(1, GRID):
+        cv2.line(view, (k * W // GRID, 0), (k * W // GRID, H), (220, 220, 220), 1)
+        cv2.line(view, (0, k * H // GRID), (W, k * H // GRID), (220, 220, 220), 1)
+    if corners is not None:
         cv2.drawChessboardCorners(view, (COLS, ROWS), corners, True)
-    if arrow is not None:
-        cv2.arrowedLine(view, arrow[0], arrow[1], (255, 170, 60), 4, cv2.LINE_AA, tipLength=0.15)
     if flash:
-        view = cv2.addWeighted(view, 0.6, np.full_like(view, 255), 0.4, 0)
+        view = cv2.addWeighted(view, 0.55, np.full_like(view, 255), 0.45, 0)
     img = Image.fromarray(cv2.cvtColor(view, cv2.COLOR_BGR2RGB))
     d = ImageDraw.Draw(img, "RGBA")
-    d.rectangle((0, 0, W, 92), fill=(15, 20, 25, 210))
-    if st:
-        d.text((14, 8), f"Étape {step_i + 1}/{len(steps)} : {st['title']}", font=F_BIG, fill=(240, 245, 245))
-        d.text((14, 44), st["hint"], font=F_TXT, fill=(200, 215, 220))
-    d.text((W - 230, 12), f"Photos : {n_ok}/{len(steps)}", font=F_TXT, fill=(150, 220, 160))
-    d.rectangle((0, H - 66, W, H), fill=(15, 20, 25, 210))
-    d.text((14, H - 62), status, font=F_STATUS, fill=color)
-    if advice:
-        d.text((14, H - 32), " · ".join(advice)[:110], font=F_TXT, fill=(255, 205, 120))
-    d.text((W - 410, H - 30), "Espace = photo · S = passer · Échap = quitter", font=F_TXT, fill=(160, 170, 175))
+    d.rectangle((0, 0, W, 40), fill=(15, 20, 25, 215))
+    n_cells = len(cov_cells)
+    d.text((12, 6), f"Calibration · photos {n_views} · cases vertes {n_cells}/{GRID * GRID}", font=F_BIG, fill=(240, 245, 245))
+    # checklist
+    x0, y0 = W - 330, 52
+    d.rectangle((x0 - 10, y0 - 8, W - 8, y0 + 26 * len(CHECKS) + 4), fill=(15, 20, 25, 190))
+    for i, (k, label, _) in enumerate(CHECKS):
+        done = k in cov_checks
+        d.text((x0, y0 + 26 * i), ("● " if done else "○ ") + label, font=F_TXT, fill=(130, 230, 140) if done else (235, 235, 235))
+    d.rectangle((0, H - 62, W, H), fill=(15, 20, 25, 215))
+    d.text((12, H - 58), status, font=F_ST, fill=color)
+    d.text((12, H - 28), hint or "Bouge le damier partout dans l'image, puis penche-le · C = calculer · Échap = quitter",
+           font=F_TXT, fill=(255, 205, 120) if hint else (170, 180, 185))
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
 
@@ -158,96 +121,105 @@ def verdict(rms):
         return "BONNE", (120, 230, 140)
     if rms < 1.0:
         return "MOYENNE : à refaire si possible", (255, 205, 120)
-    return "MAUVAISE : recommence (damier pas plat ? flou ? mal imprimé ?)", (255, 120, 120)
+    return "MAUVAISE : recommence (damier pas plat ? flou ?)", (255, 120, 120)
+
+
+def missing_hint(cov_cells, cov_checks):
+    names = {(0, 0): "en haut à gauche", (0, 1): "en haut", (0, 2): "en haut à droite", (1, 0): "à gauche",
+             (1, 1): "au centre", (1, 2): "à droite", (2, 0): "en bas à gauche", (2, 1): "en bas", (2, 2): "en bas à droite"}
+    cells = [names[c] for c in sorted(set(names) - cov_cells)]
+    checks = [label.split(" (")[0].lower() for k, label, _ in CHECKS if k not in cov_checks]
+    parts = []
+    if cells:
+        parts.append("il manque l'image " + ", ".join(cells[:3]) + ("…" if len(cells) > 3 else ""))
+    if checks:
+        parts.append("à faire : " + checks[0])
+    return " · ".join(parts)
 
 
 def run(frames_iter, save=True, show=True):
-    obj, img_pts, done, still_since, last_pts = [], [], {}, None, None
-    step_i, size, flash_until, K0 = 0, None, 0.0, None
+    obj, img_pts, views = [], [], []
+    cov_cells, cov_checks = set(), set()
+    size = K0 = None
+    still_since, last_pts, flash_until, frame = None, None, 0.0, None
     crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
     for frame in frames_iter:
         if size is None:
             size = (frame.shape[1], frame.shape[0])
             f0 = math.hypot(*size) / 2 / math.tan(math.radians(82.6) / 2)
             K0 = np.array([[f0, 0, size[0] / 2], [0, f0, size[1] / 2], [0, 0, 1]])
-        if step_i >= len(STEPS):
+        complete = len(cov_cells) == GRID * GRID and len(cov_checks) == len(CHECKS) and len(obj) >= MIN_VIEWS
+        if complete or len(obj) >= MAX_VIEWS:
             break
-        st = STEPS[step_i]
-        W, H = size
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         found, corners = cv2.findChessboardCorners(gray, (COLS, ROWS),
                                                    cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE | cv2.CALIB_CB_FAST_CHECK)
-        zw = (st["w"][0] + st["w"][1]) / 2
-        zone = ((int((st["cx"] - zw / 2) * W), int((st["cy"] - zw / 2 * W / H * 0.67) * H)),
-                (int((st["cx"] + zw / 2) * W), int((st["cy"] + zw / 2 * W / H * 0.67) * H)))
-        arrow, advice, take = None, [], False
+        take = False
         if not found:
-            status, color = "Damier non détecté : montre-le en entier à la caméra", (255, 150, 120)
-            still_since, last_pts = None, None
+            status, color = "Damier non détecté : montre-le EN ENTIER à la caméra", (255, 150, 120)
+            still_since, last_pts, corners = None, None, None
         else:
             corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), crit)
-            m = measure(corners, size, K0)
-            ok, advice = check(st, m, done)
             pts = corners.reshape(-1, 2)
-            if abs(m["cx"] - st["cx"]) > TOL or abs(m["cy"] - st["cy"]) > TOL:
-                arrow = ((int(m["cx"] * W), int(m["cy"] * H)), (int(st["cx"] * W), int(st["cy"] * H)))
+            m = measure(pts, size, K0)
             x0, y0 = pts.min(0).astype(int)
             x1, y1 = pts.max(0).astype(int)
             sharp = cv2.Laplacian(gray[max(0, y0):y1, max(0, x0):x1], cv2.CV_64F).var() if x1 > x0 and y1 > y0 else 0
             moving = last_pts is not None and np.abs(pts - last_pts).mean() > STILL_PX
             last_pts = pts
-            if ok and sharp < SHARP_MIN:
-                ok, advice = False, ["image floue : bouge moins vite, éclaire mieux la pièce"]
-            if ok and not moving:
-                still_since = still_since or time.time()
-                left = STILL_TIME - (time.time() - still_since)
-                status, color = (f"Parfait, ne bouge plus… {max(left, 0):.1f} s", (120, 230, 140))
-                take = left <= 0
+            new_cells, new_checks, different = novelty(m, cov_cells, cov_checks, views)
+            useful = bool(new_cells or new_checks) or (different and len(obj) < MIN_VIEWS)
+            if sharp < SHARP_MIN:
+                status, color, still_since = "Image floue : bouge plus doucement, éclaire la pièce", (255, 150, 120), None
+            elif not useful:
+                status, color, still_since = "Déjà en photo : change de position", (255, 205, 120), None
+            elif moving:
+                status, color, still_since = "Nouveau : tiens-le immobile un instant…", (255, 205, 120), None
             else:
-                still_since = None
-                status, color = ("Bien placé, mais tiens-le immobile", (255, 205, 120)) if ok else ("Pas encore", (255, 205, 120))
+                still_since = still_since or time.time()
+                status, color = "Ne bouge plus…", (120, 230, 140)
+                take = time.time() - still_since >= STILL_TIME
+        k = 255
         if show:
-            view = draw_ui(frame, step_i, STEPS, status, color, advice, zone, arrow, corners, found, len(obj), time.time() < flash_until)
-            cv2.imshow("Calibration de la camera", view)
+            cv2.imshow("Calibration de la camera", draw(frame, cov_cells, cov_checks, len(obj), status, color,
+                                                        corners if found else None, time.time() < flash_until,
+                                                        missing_hint(cov_cells, cov_checks)))
             k = cv2.waitKey(1) & 0xFF
-        else:
-            k = 255
         if k == 27:
             print("Abandon : rien n'est enregistré.")
             return None
-        if k in (ord("s"), ord("S")):
-            step_i, still_since = step_i + 1, None
-            continue
-        if found and (take or k == 32):
+        if k in (ord("c"), ord("C")) and len(obj) >= 10:
+            break
+        if take:
             obj.append(board_points())
             img_pts.append(corners)
-            if st.get("tilt"):
-                done[st["tilt"]] = m["th"] if st["tilt"].startswith("h") else m["tv"]
-            step_i, still_since, flash_until = step_i + 1, None, time.time() + 0.25
-            print(f"photo {len(obj)} : {st['title']}")
-    if len(obj) < 8:
-        print(f"Seulement {len(obj)} photos : il en faut au moins 8. Relance le script.")
+            views.append(m)
+            cov_cells |= m["cells"]
+            cov_checks |= {key for key, _, f in CHECKS if f(m)}
+            still_since, flash_until = None, time.time() + 0.25
+            print(f"photo {len(obj)} : cases {len(cov_cells)}/{GRID * GRID}, coché {sorted(cov_checks)}")
+    if len(obj) < 10:
+        print(f"Seulement {len(obj)} photos : il en faut au moins 10. Relance le script.")
         return None
-    # calibration, then drop the worst views if they are clear outliers
     rms, K, D, rv, tv = cv2.calibrateCamera(obj, img_pts, size, None, None)
     errs = [float(np.sqrt(np.mean(np.sum((cv2.projectPoints(o, r, t, K, D)[0].reshape(-1, 2) - p.reshape(-1, 2)) ** 2, 1))))
             for o, r, t, p in zip(obj, rv, tv, img_pts)]
     keep = [i for i, e in enumerate(errs) if e < 2.5 * np.median(errs)]
-    if len(keep) < len(obj) and len(keep) >= 8:
+    if len(keep) < len(obj) and len(keep) >= 10:
         rms, K, D, _, _ = cv2.calibrateCamera([obj[i] for i in keep], [img_pts[i] for i in keep], size, None, None)
     word, color = verdict(rms)
-    f_expected = math.hypot(*size) / 2 / math.tan(math.radians(82.6) / 2)
-    f_note = "" if abs(K[0, 0] / f_expected - 1) < 0.2 else f"  ATTENTION : focale {K[0, 0]:.0f} px loin des ~{f_expected:.0f} attendus (damier mal imprimé ?)"
-    msg = (f"Calibration {word} : erreur {rms:.2f} px ({len(keep)} photos utilisées sur {len(obj)})\n"
-           f"fx {K[0, 0]:.1f}  fy {K[1, 1]:.1f}  cx {K[0, 2]:.1f}  cy {K[1, 2]:.1f}  distorsion {np.round(np.ravel(D)[:5], 3).tolist()}{f_note}")
-    print(msg)
+    f_exp = math.hypot(*size) / 2 / math.tan(math.radians(82.6) / 2)
+    f_note = "" if abs(K[0, 0] / f_exp - 1) < 0.2 else f"  ATTENTION : focale {K[0, 0]:.0f} px loin des ~{f_exp:.0f} attendus (damier mal imprimé ?)"
+    missing = [label for key, label, _ in CHECKS if key not in cov_checks]
+    print(f"Calibration {word} : erreur {rms:.2f} px ({len(keep)} photos utilisées sur {len(obj)})\n"
+          f"fx {K[0, 0]:.1f}  fy {K[1, 1]:.1f}  cx {K[0, 2]:.1f}  cy {K[1, 2]:.1f}  distorsion {np.round(np.ravel(D)[:5], 3).tolist()}{f_note}"
+          + (f"\nNon couvert : {', '.join(missing)}" if missing else ""))
     if save:
         save_calib(CALIB, K, D, size, rms)
         print(f"Enregistrée dans {CALIB}")
-    if show:
-        end = draw_ui(cv2.undistort(frame, K, D), len(STEPS), STEPS, f"Calibration {word} : erreur {rms:.2f} px", color,
-                      ["image corrigée de la distorsion affichée : les lignes droites doivent être droites",
-                       "appuie sur une touche pour fermer"], None, None, None, False, len(obj), False)
+    if show and frame is not None:
+        end = draw(cv2.undistort(frame, K, D), cov_cells, cov_checks, len(obj), f"Calibration {word} : erreur {rms:.2f} px",
+                   color, None, False, "Image corrigée : les lignes droites doivent être droites · une touche pour fermer")
         cv2.imshow("Calibration de la camera", end)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
@@ -255,8 +227,6 @@ def run(frames_iter, save=True, show=True):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.parse_args()
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:  # noqa: BLE001
