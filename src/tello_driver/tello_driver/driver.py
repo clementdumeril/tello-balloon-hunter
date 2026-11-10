@@ -17,7 +17,7 @@ import time
 import numpy as np
 import rclpy
 import yaml
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
@@ -155,6 +155,9 @@ class TelloDriver(Node):
         # after the takeoff (~0.8 m), climb to this height (m above the takeoff point, 0 = stay) so that the
         # camera sees the markers; real.launch.py computes it from the marker map
         self.takeoff_height = p("takeoff_height", 0.0).value
+        # highest allowed height above the floor (m): ceiling 2.80 m in the room, 2.60 m max (user, Nov 9)
+        self.max_height = p("max_height", 2.6).value
+        self.pose_z, self.pose_t = 0.0, 0.0
 
         # Refuse to run next to another driver (e.g. a forgotten fake drone): two sources of /tello/image_raw
         # make the camera view flicker and the pose jump between them.
@@ -171,6 +174,7 @@ class TelloDriver(Node):
         self.pub_info = self.create_publisher(CameraInfo, "/tello/camera_info", 5)
         self.pub_tel = self.create_publisher(String, "/tello/telemetry", 10)
         self.create_subscription(Twist, "/tello/cmd_vel_safe", self.on_cmd, 10)
+        self.create_subscription(PoseWithCovarianceStamped, "/aruco/pose", self.on_pose, 10)
         self.create_service(Trigger, "~/takeoff", self.srv_takeoff)
         self.create_service(Trigger, "~/land", self.srv_land)
         self.create_service(Trigger, "~/emergency", self.srv_emergency)
@@ -314,6 +318,19 @@ class TelloDriver(Node):
         if self.busy.locked():
             return  # a takeoff / climb / land command is running: rc would interfere with it
         rc = self.rc_target if time.time() - self.last_cmd < self.cmd_timeout else (0, 0, 0, 0)
+        # ceiling guard, whatever program sends the commands: no climbing in the last 20 cm, descend above
+        hgt = self.height_estimate() if self.tello.is_flying else None
+        if hgt is not None:
+            lr, fb, ud, yw = rc
+            if hgt > self.max_height:
+                ud = -25
+                self.get_logger().warn(f"height {hgt:.2f} m > {self.max_height:.2f} m: descending",
+                                       throttle_duration_sec=1.0)
+            elif hgt > self.max_height - 0.2 and ud > 0:
+                ud = 0
+                self.get_logger().warn(f"height {hgt:.2f} m: close to the {self.max_height:.2f} m limit, no climbing",
+                                       throttle_duration_sec=2.0)
+            rc = (lr, fb, ud, yw)
         try:
             self.tello.send_rc_control(*rc)  # also keeps the link alive (the Tello lands after 15 s of silence)
         except Exception as e:  # noqa: BLE001
@@ -344,13 +361,44 @@ class TelloDriver(Node):
 
     def takeoff_and_climb(self):
         self.tello.takeoff()
+        target = min(self.takeoff_height, self.max_height - 0.6)
         if self.takeoff_height <= 0:
             return
-        h = self.tello.get_height()  # cm above the takeoff point
-        delta = int(round(self.takeoff_height * 100 - h))
+        # Measure the real height, NOT the 'h' field: right after takeoff 'h' (barometer) read 20 cm while the
+        # drone was at 80 cm (Nov 9), and the climb went up to the ceiling. Distance sensor + ArUco pose instead.
+        time.sleep(1.0)
+        samples = []
+        t0 = time.time()
+        while time.time() - t0 < 1.0:
+            hgt = self.height_estimate()
+            if hgt is not None:
+                samples.append(hgt)
+            time.sleep(0.1)
+        if not samples:
+            self.get_logger().warn("no valid height measurement after takeoff: not climbing")
+            return
+        hgt = float(np.median(samples))
+        delta = int(round((target - hgt) * 100))
+        delta = min(delta, 100)  # never more than 1 m in one go
         if delta >= 20:  # the SDK refuses moves under 20 cm
-            self.get_logger().info(f"climbing {delta} cm to {self.takeoff_height:.2f} m (markers in view)")
-            self.tello.move_up(min(delta, 200))
+            self.get_logger().info(f"at {hgt:.2f} m: climbing {delta} cm towards {target:.2f} m (markers in view)")
+            self.tello.move_up(delta)
+        else:
+            self.get_logger().info(f"at {hgt:.2f} m after takeoff: no climb needed (target {target:.2f} m)")
+
+    def on_pose(self, m):
+        self.pose_z, self.pose_t = m.pose.pose.position.z, time.time()
+
+    def height_estimate(self):
+        """Height above the floor (m): the larger of the distance sensor and a fresh ArUco pose (conservative
+        for the ceiling; the sensor reads less over the bed). None if neither is valid."""
+        c = []
+        tof = self.state.get("tof")
+        if isinstance(tof, (int, float)) and 15 <= tof <= 400:
+            c.append(tof / 100.0)
+        if time.time() - self.pose_t < 0.5:
+            c.append(self.pose_z)
+        return max(c) if c else None
 
     def srv_land(self, req, res):
         self.rc_target = (0, 0, 0, 0)

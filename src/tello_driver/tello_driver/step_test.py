@@ -244,6 +244,8 @@ class StepTest(Node):
         S = np.array(samples)
         self.p0 = (float(np.median(S[:, 0])), float(np.median(S[:, 1])), float(np.median(S[:, 2])),
                    float(np.median(S[:, 3])))
+        if not self.z_min + 0.3 <= self.p0[2] <= self.z_max - 0.3:
+            raise Abort(f"start height {self.p0[2]:.2f} m too close to the limits [{self.z_min}, {self.z_max}]")
         self.say(f"Start point ({self.p0[0]:+.2f}, {self.p0[1]:+.2f}, {self.p0[2]:.2f}) m, "
                  f"yaw {math.degrees(self.p0[3]):.0f} deg. Safety box +-{self.box} m.")
         names = {"x": "forward/back", "y": "left/right", "z": "up/down", "yaw": "turn"}
