@@ -175,7 +175,9 @@ class MarkerTour(StepTest):
                 wall = w["wall"]
                 _, x, y, z, yaw = self.pose
                 self.say(f"[{i + 1}/{len(wps)}] next wall: back to the room centre ({centre[0]:+.2f}, {centre[1]:+.2f})")
-                self.goto((centre[0], centre[1], z), yaw)
+                # ...at the height of the next marker: the west markers (2.5-2.7 m) are above the field of view
+                # from 1.9 m (seen in the simulation)
+                self.goto((centre[0], centre[1], w["p"][2]), yaw)
             self.say(f"[{i + 1}/{len(wps)}] marker {w['id']}: turning to face it")
             self.turn(w["yaw"])
             self.say(f"[{i + 1}/{len(wps)}] marker {w['id']}: flying to ({w['p'][0]:+.2f}, {w['p'][1]:+.2f}, "
