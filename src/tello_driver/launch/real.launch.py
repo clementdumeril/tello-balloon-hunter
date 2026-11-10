@@ -43,6 +43,8 @@ def setup(context):
              parameters=[{"markers_file": lc("markers"), "child_frame": "base_link",
                           "debug_every_n": 3, "debug_scale": 0.5}]),
     ]
+    if lc("record") == "true":
+        nodes.append(Node(package="tello_driver", executable="session_recorder", output="screen"))
     if lc("rviz") == "true":
         nodes.append(Node(package="rviz2", executable="rviz2", output="log",
                           arguments=["-d", rviz_config_centred_on_markers(os.path.join(share, "config", "real.rviz"), lc("markers"))]))
@@ -75,6 +77,7 @@ def generate_launch_description():
         *[SetEnvironmentVariable(k, v) for k, v in LOCAL_ROS_ENV.items()],
         DeclareLaunchArgument("mock", default_value="false"),
         DeclareLaunchArgument("rviz", default_value="true"),
+        DeclareLaunchArgument("record", default_value="true", description="save images, poses, telemetry in ~/tello_ws/sessions"),
         DeclareLaunchArgument("markers", default_value=os.path.join(REPO, "config", "markers.yaml")),
         DeclareLaunchArgument("camera_info_file", default_value="auto",
                               description="calibration YAML; auto = config/tello_camera.yaml if it exists"),

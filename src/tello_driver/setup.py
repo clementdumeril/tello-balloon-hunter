@@ -16,5 +16,6 @@ setup(
     entry_points={"console_scripts": [
         "tello_driver = tello_driver.driver:main",
         "tello_teleop = tello_driver.teleop:main",
+        "session_recorder = tello_driver.session_recorder:main",
     ]},
 )
