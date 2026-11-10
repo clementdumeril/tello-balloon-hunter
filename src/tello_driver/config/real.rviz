@@ -22,7 +22,7 @@ Visualization Manager:
       Topic:
         Value: /aruco/map_markers
         Durability Policy: Transient Local
-    - Class: rviz_default_plugins/Pose
+    - Class: rviz_default_plugins/PoseWithCovariance
       Name: ArUco pose
       Enabled: true
       Topic:
