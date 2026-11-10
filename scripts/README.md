@@ -20,7 +20,7 @@ You can also run one test directly from any terminal: `tello_tests.bat 2`.
 
 The printed size of the markers (15 cm) is the only measurement needed. Every image that shows two markers gives their relative pose; a bundle adjustment then refines all marker and camera poses together. The origin is a marker, not a room corner.
 
-1. **Calibrate** (menu 6): show the printed checkerboard (glued flat on cardboard) near, far, tilted and in every corner of the image until 25+ views, then press `C`. Writes `config/tello_camera.yaml`.
+1. **Calibrate** (double-click `calibrer_camera.bat`, or menu 6): a guided wizard. For each of the 15 steps the screen shows where to hold the checkerboard (blue zone + arrow) and how to tilt it; the photo is taken automatically when the board is in place, sharp and still. At the end it rates the calibration (excellent < 0.35 px, good < 0.6 px) and writes `config/tello_camera.yaml`. Commit that file so the ROS driver (`git pull` in WSL) uses it too. Tested on synthetic video with a known camera: focal length and centre recovered within 0.1 px.
 2. **Film** (menu 7), motors off:
    - put the drone **on the floor about 2 m from a wall, facing markers**, then press `F` (floor reference; the camera is 3.5 cm above the floor);
    - pick it up and walk slowly along the walls, 1-2 m away, at several heights, **always with 2+ markers in view**, until every marker is listed and "linked groups: 1".

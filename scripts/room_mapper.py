@@ -30,6 +30,7 @@ import numpy as np
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
 CALIB = ROOT / "config" / "tello_camera.yaml"
 MARKERS = ROOT / "config" / "markers.yaml"
 CAPTURES = ROOT / "logs" / "room_captures"
@@ -80,9 +81,14 @@ def save_calib(path, K, D, size, rms):
 
 def tello_stream():
     """Generator of BGR frames from the drone (djitellopy), with a clean shutdown."""
+    from first_flight import check_tello_network  # fails fast with a clear message if not on the Tello Wi-Fi
+    check_tello_network()
     from djitellopy import Tello
     t = Tello()
-    t.connect()
+    try:
+        t.connect()
+    except Exception as e:  # noqa: BLE001
+        sys.exit(f"No answer from the Tello ({e}). Switch it OFF and on, then start this program FIRST.")
     print(f"Connected, battery {t.get_battery()} %")
     t.streamon()
     reader = t.get_frame_read()
