@@ -295,15 +295,28 @@ class TelloDriver(Node):
         return res
 
     def shutdown(self):
+        """Stop quickly, even when the PC already left the Tello Wi-Fi (no 7 s retries per command)."""
         try:
             if self.tello.is_flying:
                 self.get_logger().info("Shutting down: landing")
                 self.tello.send_rc_control(0, 0, 0, 0)
                 self.tello.land()
-            self.tello.streamoff()
-            self.tello.end()
         except Exception:  # noqa: BLE001
             pass
+        if self.mock:
+            return
+        try:
+            self.tello.send_command_without_return("streamoff")  # fire and forget
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if self.tello.background_frame_read is not None:
+                self.tello.background_frame_read.stop()
+                self.tello.background_frame_read = None
+        except Exception:  # noqa: BLE001
+            pass
+        # djitellopy's __del__ calls end() -> streamoff with retries: skip it, everything is already stopped
+        type(self.tello).__del__ = lambda _self: None
 
 
 def main():
