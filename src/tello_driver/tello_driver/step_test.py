@@ -90,6 +90,9 @@ class StepTest(Node):
         yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
         now = time.time()
         self.pose = (now, p.x, p.y, p.z, yaw)
+        imu = self.imu_yaw()
+        if imu is not None:
+            self.yaw_offset = wrap(yaw - imu)
         t_img = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
         self.w_pose.writerow([f"{now:.4f}", f"{p.x:.4f}", f"{p.y:.4f}", f"{p.z:.4f}", f"{yaw:.5f}", f"{t_img:.4f}"])
 
@@ -107,6 +110,22 @@ class StepTest(Node):
 
     def on_video(self, m):
         self.video_t = time.time()  # one camera_info per video frame
+
+    def imu_yaw(self):
+        """Tello IMU heading in the map convention (rad): its 'yaw' is clockwise-positive degrees
+        (checked on 4 real sessions: ArUco yaw = -IMU yaw + offset, slope -0.93 to -1.08)."""
+        y = self.tel.get("yaw")
+        if not isinstance(y, (int, float)) or time.time() - self.tel_t > 0.5:
+            return None
+        return -math.radians(y)
+
+    def yaw_estimate(self):
+        """ArUco yaw when fresh, else IMU yaw + the offset learnt from the last pose (markers out of view)."""
+        if self.pose_age() < 0.5:
+            return self.pose[4]
+        imu = self.imu_yaw()
+        off = getattr(self, "yaw_offset", None)
+        return None if imu is None or off is None else wrap(imu + off)
 
     def in_air(self):
         h = self.tel.get("h", 0)
@@ -156,10 +175,10 @@ class StepTest(Node):
         if self.pose_age() > self.lost_max:
             raise Abort(f"no marker seen for {self.pose_age():.1f} s")
 
-    def send(self, cx=0.0, cy=0.0, cz=0.0, cw=0.0, segment=-1, axis="", u=0.0):
+    def send(self, cx=0.0, cy=0.0, cz=0.0, cw=0.0, segment=-1, axis="", u=0.0, blind=False):
         t = Twist()
-        # no fresh pose: hover instead of continuing a test blind
-        if self.pose_age() > 0.7:
+        # no fresh pose: hover instead of continuing a test blind (blind=True: a turn guided by the IMU)
+        if self.pose_age() > 0.7 and not blind:
             cx = cy = cz = cw = u = 0.0
         t.linear.x, t.linear.y, t.linear.z, t.angular.z = cx, cy, cz, cw
         self.pub.publish(t)

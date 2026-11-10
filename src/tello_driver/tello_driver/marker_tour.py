@@ -83,8 +83,10 @@ class MarkerTour(StepTest):
             yaw = math.atan2(m.t[1] - y, m.t[0] - x)  # facing the marker
             wps.append({"id": m.id, "p": (x, y, z), "yaw": yaw, "ang": math.atan2(m.t[1] - cy, m.t[0] - cx)})
         wps.sort(key=lambda w: w["ang"])
-        x0, y0 = self.p0[0], self.p0[1]
-        k = min(range(len(wps)), key=lambda i: math.hypot(wps[i]["p"][0] - x0, wps[i]["p"][1] - y0))
+        # start with the wall the drone is facing (no blind turn first), then go round the room
+        x0, y0, yaw0 = self.p0[0], self.p0[1], self.p0[3]
+        k = min(range(len(wps)), key=lambda i: (round(abs(wrap(wps[i]["yaw"] - yaw0)) / 0.5),
+                                                  math.hypot(wps[i]["p"][0] - x0, wps[i]["p"][1] - y0)))
         return wps[k:] + wps[:k]
 
     # ---------------------------------------------------------------- control
@@ -94,6 +96,18 @@ class MarkerTour(StepTest):
         reached_t = [None]
 
         def step():
+            if yaw_only and self.pose_age() > 0.5:
+                # markers out of view during a turn: keep turning on the IMU heading (no translation)
+                yaw = self.yaw_estimate()
+                if yaw is None:
+                    self.send()
+                    return None
+                eyaw = wrap(yaw_t - yaw)
+                if abs(eyaw) < math.radians(10):
+                    self.send()
+                    return None  # wait for the markers to confirm the heading
+                self.send(cw=clip(self.kp_yaw * eyaw, self.w_max), blind=True)
+                return None
             if self.pose_age() > 0.5:
                 self.send()  # no fresh pose: hover (the driver/Tello hold position)
                 return None
