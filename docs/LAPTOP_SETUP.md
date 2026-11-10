@@ -66,6 +66,14 @@ currently sees. Same chain as the real drone, no hardware needed.
    No green line = no marker in view: the drone stays at its last known pose (hold it 1.5-2.5 m from the wall,
    1.3-1.8 m high, so that 2-3 markers are in the picture).
 
+**Room scan in RViz:** checkbox *Room (3D scan)* in the Displays panel (untick it if RViz gets slow). The launch
+loads `~/tello_ws/room_scan/room_map.obj`, made from a Scaniverse OBJ + its marker alignment with
+`python tools/room_mesh_to_map.py <scan.obj> <alignment.npz> <out_dir>` (ceiling removed so RViz sees inside).
+
+**Height safety (driver):** after takeoff the drone climbs to about 1.8 m (where the markers are visible), measured with
+its distance sensor and the ArUco pose. Ceiling guard for every program: `max_height` 2.6 m (launch argument), it
+brakes ahead of the limit and descends if above it.
+
 ## Identification flight (the drone's model, for the position controller)
 
 Drone facing the marker wall at about 2 m, 2-3 markers in the picture, nothing within 1 m, battery > 30 %.
