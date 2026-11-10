@@ -78,13 +78,15 @@ class FakeWorld:
         rc = self.rc_queue[0][1] if self.rc_queue[0][0] <= now - DELAY else (0, 0, 0, 0)
         lr, fb, ud, yw = rc if self.flying else (0, 0, 0, 0)
         v_target = np.array([fb, -lr, ud], float) * LIN_GAIN
-        if self.z_target is not None:  # takeoff / land: vertical move like the real drone
-            dz = self.z_target - self.p[2]
-            v_target[2] = max(-0.6, min(0.6, 2.0 * dz))
-            if abs(dz) < 0.02:
-                self.z_target = None
         a = min(1.0, dt / TAU)
         self.v += (v_target - self.v) * a
+        if self.z_target is not None:
+            # takeoff / 'up' / land: the Tello's own position loop, it stops on the target (no lag, no overshoot)
+            dz = self.z_target - self.p[2]
+            self.v[2] = max(-0.6, min(0.6, 2.0 * dz))
+            if abs(dz) < 0.02:
+                self.z_target = None
+                self.v[2] = 0.0
         self.yaw_rate += (-yw * YAW_GAIN - self.yaw_rate) * a
         c, s = math.cos(self.yaw), math.sin(self.yaw)
         self.p += np.array([c * self.v[0] - s * self.v[1], s * self.v[0] + c * self.v[1], self.v[2]]) * dt
