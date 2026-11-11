@@ -44,7 +44,10 @@ class Strike(StepTest):
         self.legs = int(p("legs", 4).value)
         self.v_max, self.a_max = p("v_max", 0.8).value, p("a_max", 1.0).value
         self.kp, self.kp_z, self.kp_yaw = p("kp", 0.8).value, p("kp_z", 0.8).value, p("kp_yaw", 1.0).value
-        self.K, self.tau, self.L_u = p("model_K", 1.15).value, p("model_tau", 0.40).value, p("model_L_u", 0.25).value
+        # model of the identification flight (Nov 11): K ~1.15, tau 0.55 s; ~0.3 s of the 0.5 s delay is the command
+        self.K, self.tau, self.L_u = p("model_K", 1.15).value, p("model_tau", 0.55).value, p("model_L_u", 0.30).value
+        self.ki = p("ki", 0.3).value  # integral: cancels the drift (the Tello's own hold does not work here)
+        self.integ = np.zeros(2)
         self.strike_d, self.retreat_d = p("strike_distance", 0.9).value, p("retreat_distance", 1.6).value
         self.z_fly = p("height", 2.0).value
         self.z_lim = (1.2, 2.1)
@@ -81,8 +84,10 @@ class Strike(StepTest):
             _, vff, aff = traj.at(t + self.L_u)
             _, x, y, z, yaw = self.pose
             ex, ey, ez = pd[0] - x, pd[1] - y, pd[2] - z
-            ux = (vff[0] + self.tau * aff[0]) / self.K + self.kp * ex
-            uy = (vff[1] + self.tau * aff[1]) / self.K + self.kp * ey
+            if abs(ex) < 0.3 and abs(ey) < 0.3:
+                self.integ = np.clip(self.integ + self.ki * np.array([ex, ey]) / RATE, -0.15, 0.15)
+            ux = (vff[0] + self.tau * aff[0]) / self.K + self.kp * ex + self.integ[0]
+            uy = (vff[1] + self.tau * aff[1]) / self.K + self.kp * ey + self.integ[1]
             n = math.hypot(ux, uy)
             if n > 1.3 * self.v_max:
                 ux, uy = ux * 1.3 * self.v_max / n, uy * 1.3 * self.v_max / n
@@ -122,16 +127,26 @@ class Strike(StepTest):
         self.run(timeout, step, search_on_loss=False)
 
     def here(self):
+        """Current position, height brought back inside the limits (a small overshoot above 2.1 m must not make
+        every next trajectory 'unsafe')."""
         _, x, y, z, _ = self.pose
-        return np.array([x, y, z])
+        return np.array([x, y, min(max(z, self.z_lim[0]), self.z_lim[1])])
+
+    def roomy(self, x, y, extra):
+        return not self.zone or "grid" not in self.zone or clearance(self.zone, x, y)[0] >= self.zone["margin"] + extra
 
     # ---------------------------------------------------------------- missions
     def patrol(self):
         f = self.zone
         yc = (f["y_min"] + f["y_max"]) / 2
         z = min(max(self.z_fly, self.z_lim[0]), self.z_lim[1])
-        a = np.array([f["x_min"] + 0.25, yc, z])
-        b = np.array([f["x_max"] - 0.25, yc, z])
+        # leg ends with room around them (margin + 35 cm): at 0.8 m/s the driver's guard, which looks ~1 s ahead,
+        # would otherwise brake before the end of every leg (seen in the simulation)
+        xc = (f["x_min"] + f["x_max"]) / 2
+        xa = next((x for x in np.arange(xc, f["x_min"] - 0.5, -0.05) if not self.roomy(x, yc, 0.35)), f["x_min"]) + 0.05
+        xb = next((x for x in np.arange(xc, f["x_max"] + 0.5, 0.05) if not self.roomy(x, yc, 0.35)), f["x_max"]) - 0.05
+        a = np.array([xa, yc, z])
+        b = np.array([xb, yc, z])
         yaw = self.p0[3]
         self.say(f"Patrol: {self.legs} legs between x {a[0]:+.2f} and {b[0]:+.2f} m (y {yc:+.2f}), "
                  f"v_max {self.v_max} m/s, a_max {self.a_max} m/s2")
@@ -151,7 +166,7 @@ class Strike(StepTest):
         z = min(max(m.t[2], self.z_lim[0]), self.z_lim[1])
         for k in range(40):
             q = np.array([m.t[0] + (d + 0.05 * k) * n[0], m.t[1] + (d + 0.05 * k) * n[1], z])
-            if not self.zone or "grid" not in self.zone or clearance(self.zone, q[0], q[1])[0] >= self.zone["margin"] + 0.05:
+            if self.roomy(q[0], q[1], 0.15):
                 return q, n
         return None, n
 
