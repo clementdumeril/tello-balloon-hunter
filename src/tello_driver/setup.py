@@ -21,6 +21,7 @@ setup(
         "tello_step_fit = tello_driver.step_fit:main",
         "tello_marker_tour = tello_driver.marker_tour:main",
         "tello_ekf = tello_driver.ekf_node:main",
+        "tello_strike = tello_driver.strike:main",
         "session_recorder = tello_driver.session_recorder:main",
     ]},
 )

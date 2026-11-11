@@ -45,7 +45,7 @@ class MarkerTour(StepTest):
         self.a_max = p("max_accel", 0.6).value            # m/s2, braking profile
         self.survey = p("survey", True).value
         self.margin = p("wall_margin", 0.6).value         # m from the walls
-        self.z_lo, self.z_hi = p("tour_z_min", 1.2).value, p("tour_z_max", 2.2).value
+        self.z_lo, self.z_hi = p("tour_z_min", 1.2).value, p("tour_z_max", 2.1).value  # 2.2 overshot to 2.40 (Nov 11)
         self.v_max = p("max_speed", 0.5).value            # m/s horizontal
         self.vz_max = p("max_vertical_speed", 0.25).value
         self.w_max = p("max_yaw_rate", 0.5).value         # rad/s

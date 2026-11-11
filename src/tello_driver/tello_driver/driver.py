@@ -239,6 +239,7 @@ class TelloDriver(Node):
         from std_msgs.msg import Float32
         self.near_d, self.near_t = 9.0, 0.0
         self.min_wall = p("min_wall_distance", 0.7).value
+        self.wall_band = p("wall_slow_band", 0.15).value  # forward speed shrinks over this band above min_wall
         self.create_subscription(Float32, "/aruco/nearest_marker", self.on_near, 5)
         self.create_service(Trigger, "~/takeoff", self.srv_takeoff)
         self.create_service(Trigger, "~/land", self.srv_land)
@@ -542,8 +543,8 @@ class TelloDriver(Node):
         if d < self.min_wall:
             fb = min(fb, -12)
             self.get_logger().warn(f"wall {d:.2f} m ahead (marker size): backing off", throttle_duration_sec=1.0)
-        elif d < self.min_wall + 0.3 and fb > 0:
-            fb = int(fb * (d - self.min_wall) / 0.3)
+        elif d < self.min_wall + self.wall_band and fb > 0:
+            fb = int(fb * (d - self.min_wall) / self.wall_band)
         return (lr, fb, ud, yw)
 
     def pose_valid(self, max_age, max_sigma):
