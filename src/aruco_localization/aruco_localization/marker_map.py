@@ -44,7 +44,9 @@ def load_marker_map(path):
             id=int(m["id"]),
             size=float(m.get("size", default)),
             t=np.array([m["x"], m["y"], m["z"]], dtype=float),
-            R=rotation_from_yaw(math.radians(float(m["yaw_deg"]))),
+            # full orientation when the map has it (q = quaternion x, y, z, w measured by room_mapper.py: a marker
+            # stuck slightly rotated or leaning is then exact); else upright, facing yaw_deg
+            R=(matrix_from_quat(*m["q"]) if "q" in m else rotation_from_yaw(math.radians(float(m["yaw_deg"])))),
         )
         if mk.id in markers:
             raise ValueError(f"duplicate marker id {mk.id} in {path}")

@@ -34,6 +34,25 @@ sys.path.insert(0, str(ROOT / "scripts"))
 CALIB = ROOT / "config" / "tello_camera.yaml"
 MARKERS = ROOT / "config" / "markers.yaml"
 CAPTURES = ROOT / "logs" / "room_captures"
+def quat_xyzw(R):
+    """Rotation matrix -> quaternion [x, y, z, w]."""
+    tr = R[0, 0] + R[1, 1] + R[2, 2]
+    if tr > 0:
+        s = math.sqrt(tr + 1.0) * 2
+        q = [(R[2, 1] - R[1, 2]) / s, (R[0, 2] - R[2, 0]) / s, (R[1, 0] - R[0, 1]) / s, 0.25 * s]
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
+        q = [0.25 * s, (R[0, 1] + R[1, 0]) / s, (R[0, 2] + R[2, 0]) / s, (R[2, 1] - R[1, 2]) / s]
+    elif R[1, 1] > R[2, 2]:
+        s = math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
+        q = [(R[0, 1] + R[1, 0]) / s, 0.25 * s, (R[1, 2] + R[2, 1]) / s, (R[0, 2] - R[2, 0]) / s]
+    else:
+        s = math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
+        q = [(R[0, 2] + R[2, 0]) / s, (R[1, 2] + R[2, 1]) / s, 0.25 * s, (R[1, 0] - R[0, 1]) / s]
+    q = np.array(q)
+    return (q / np.linalg.norm(q)).tolist()
+
+
 def map_settings():
     """Marker family and printed size, read from config/markers.yaml (the ones actually on the walls)."""
     try:
@@ -461,7 +480,8 @@ def cmd_solve(a):
         pos = to_map(M[i][:3, 3])
         res_i = np.array([np.linalg.norm(sol.fun[8 * k: 8 * k + 8].reshape(4, 2), axis=1).mean()
                           for k, o in enumerate(obs) if o[1] == i])
-        out.append({"id": i, "x": pos[0], "y": pos[1], "z": pos[2], "yaw": yaw, "tilt": tilt,
+        q = quat_xyzw(R)
+        out.append({"id": i, "x": pos[0], "y": pos[1], "z": pos[2], "yaw": yaw, "tilt": tilt, "q": q,
                     "views": counts[i], "reproj": float(np.median(res_i))})
 
     # ---- report + yaml
@@ -480,7 +500,8 @@ def cmd_solve(a):
         f"# Measured by scripts/room_mapper.py on {datetime.now():%Y-%m-%d %H:%M} from {cap.name}",
         f"# ({len(cams)} images, bundle adjustment RMS {np.sqrt(np.mean(np.sum(r1 ** 2, 1))):.2f} px; {floor_note}).",
         f"# Frame map: origin on the floor below marker {origin}, y out of its wall into the room, z up.",
-        "# Each marker: centre (m) and yaw_deg = direction the marker faces.",
+        "# Each marker: centre (m), yaw_deg = direction the marker faces, q = full orientation (quaternion x y z w,",
+        "# used by the localizer: a marker stuck slightly rotated or leaning is not an error any more).",
         "",
         f"dictionary: {DICT}",
         f"marker_size: {size}",
@@ -492,7 +513,8 @@ def cmd_solve(a):
         "",
         "markers:",
     ]
-    lines += [f"  - {{id: {m['id']:2d}, x: {m['x']:.3f}, y: {m['y']:.3f}, z: {m['z']:.3f}, yaw_deg: {m['yaw']:6.1f}}}"
+    lines += [f"  - {{id: {m['id']:2d}, x: {m['x']:.3f}, y: {m['y']:.3f}, z: {m['z']:.3f}, yaw_deg: {m['yaw']:6.1f}, "
+              f"q: [{m['q'][0]:.4f}, {m['q'][1]:.4f}, {m['q'][2]:.4f}, {m['q'][3]:.4f}]}}"
               f"   # views {m['views']}, tilt {m['tilt']:.1f} deg" for m in out]
     MARKERS.write_text("\n".join(lines) + "\n", encoding="utf-8")
     (cap / "solve_report.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
