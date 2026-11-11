@@ -62,11 +62,11 @@ class ArucoLocalizer(Node):
         # TF child frame for the ArUco pose. base_link_aruco by default (base_link belongs to the EKF);
         # the real-drone launch sets base_link until the EKF exists, so RViz shows the camera on the drone.
         self.child_frame = p("child_frame", "base_link_aruco").value
-        self.detector = Detector(self.cfg.get("dictionary", "DICT_4X4_50"))
+        self.detector = Detector(self.cfg.get("dictionary", "DICT_6X6_50")) # TODO: REVIEW WHETHER THIS SHOULD BE 6x6_50 - MY
         self.bridge = CvBridge()
         self.K = self.D = None
         self.T_base_cam = None
-        self.n = 0
+        self.n = 0 # Image count - MY
         self.ambiguous = 0
         self.saved = 0
 
@@ -93,8 +93,8 @@ class ArucoLocalizer(Node):
             Path(self.debug_dir).mkdir(parents=True, exist_ok=True)
 
     def on_info(self, m):
-        self.K = np.array(m.k, dtype=float).reshape(3, 3)
-        self.D = np.array(m.d, dtype=float) if len(m.d) else np.zeros(5)
+        self.K = np.array(m.k, dtype=float).reshape(3, 3) # m.K is intrinsic camera matrix published on tello/camera_info topic - MY
+        self.D = np.array(m.d, dtype=float) if len(m.d) else np.zeros(5) # m.D is list of distortion coefficients published on /tello/camera_info topic - MY
 
     def camera_mount(self):
         if self.T_base_cam is None:
@@ -112,10 +112,10 @@ class ArucoLocalizer(Node):
     def on_image(self, msg):
         if self.K is None or self.camera_mount() is None:
             return
-        self.n += 1
-        img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        corners, ids = self.detector.detect(gray)
+        self.n += 1 # increment valid image count - MY
+        img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8") # Convert image to CV2 blue-green-red format - MY
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) # Convert CV2 BGR to grayscale - MY
+        corners, ids = self.detector.detect(gray) # Detect corners and IDs of AR tags - MY
 
         obj, imgp, used = [], [], []
         if ids is not None:
