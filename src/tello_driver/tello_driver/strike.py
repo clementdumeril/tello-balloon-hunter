@@ -50,6 +50,7 @@ class Strike(StepTest):
         self.z_lim = (1.2, 2.1)
         _, self.markers = load_marker_map(p("markers_file", os.path.join(REPO, "config", "markers.yaml")).value)
         self.lost_max = p("strike_lost_timeout", 15.0).value
+        self.box = 99.0  # no box around the start point: the free space of the room scan is the limit
         self.log_f = open(self.out / "tracking.csv", "w", newline="")
         self.log = csv.writer(self.log_f)
         self.log.writerow(["t", "phase", "xd", "yd", "zd", "x", "y", "z", "vxd", "vyd"])
