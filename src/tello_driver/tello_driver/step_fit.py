@@ -33,12 +33,12 @@ def load(folder):
     return cmds, poses
 
 
-def segments(cmds):
+def segments(cmds, skip=()):
     """{segment id: dict(axis, t (n,), u (n,))} with u the commanded velocity along the tested axis."""
     out = {}
     for r in cmds:
         sid = int(r["segment"])
-        if sid < 0:
+        if sid < 0 or sid in skip:
             continue
         s = out.setdefault(sid, {"axis": r["axis"], "t": [], "u": []})
         s["t"].append(float(r["t"]))
@@ -119,7 +119,9 @@ def fit_axis(segs, poses):
 
 def fit(folder, verbose=True):
     cmds, poses = load(folder)
-    segs = segments(cmds)
+    failed = Path(folder) / "failed_segments.txt"
+    skip = {int(v) for v in failed.read_text().split()} if failed.exists() else set()
+    segs = segments(cmds, skip)
     res = {}
     for ax in AXES:
         r = fit_axis([s for s in segs.values() if s["axis"] == ax], poses)

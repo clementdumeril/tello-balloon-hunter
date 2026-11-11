@@ -109,14 +109,7 @@ class MarkerTour(StepTest):
         if yaw is None or self.last_xy is None:
             self.send()
             return
-        lost = self.pose_age()
-        base = math.atan2(look_at[1] - self.last_xy[1], look_at[0] - self.last_xy[0])
-        if lost > 3.0:
-            base += math.radians(40) * math.sin(2 * math.pi * (lost - 3.0) / 6.0)
-        if int(lost) != getattr(self, "_said", -1) and lost > 1.0 and int(lost) % 3 == 1:
-            self._said = int(lost)
-            self.say(f"  markers lost for {lost:.0f} s: searching (turning)")
-        self.send(cw=clip(self.kp_yaw * wrap(base - yaw), self.w_max), blind=True)
+        self.search_heading(math.atan2(look_at[1] - self.last_xy[1], look_at[0] - self.last_xy[0]))
 
     def goto(self, target, yaw_t, timeout=25.0, tol=0.12, yaw_only=False, look_at=None):
         """Fly to target (x, y, z) with heading yaw_t; yaw_only: turn in place first. Returns when reached.
@@ -170,7 +163,7 @@ class MarkerTour(StepTest):
                       clip(self.kp_yaw * eyaw, self.w_max))
             return None
         t0 = time.time()
-        self.run(timeout, step)
+        self.run(timeout, step, search_on_loss=False)  # goto handles the losses itself (turns, look_at)
         if time.time() - t0 >= timeout - 0.05:
             self.say("  (not reached in time, going on)")
 

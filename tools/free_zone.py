@@ -6,7 +6,9 @@
 1. Obstacles = every scan point between z_lo - 0.2 and z_hi + 0.2 (the drone flies in [z_lo, z_hi]), on a
    5 cm grid, plus everything outside the room (flood fill from the room centre).
 2. Grown by --margin (drone half-size ~0.1 m + pose error + braking).
-3. The largest obstacle-free axis-aligned rectangle -> config/flight_zone.yaml (+ a PNG to check it).
+3. The largest obstacle-free axis-aligned rectangle -> config/flight_zone.yaml (+ a PNG to check it), used by
+   the missions to plan; and the whole free space: distance to the nearest obstacle on the 5 cm grid ->
+   config/flight_zone_grid.npz, used by the driver's guard (the drone may use all the free space).
 Furniture lower than z_lo - 0.2 (bed, desk) is ignored: the drone flies above it (but takes off/lands on
 the floor: start from a free spot of the floor inside the zone).
 """
@@ -66,8 +68,8 @@ def largest_rectangle(free):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("obj")
-    ap.add_argument("--z", type=float, nargs=2, default=[1.2, 2.4], help="flight heights (m)")
-    ap.add_argument("--margin", type=float, default=0.5, help="clearance from any obstacle (m)")
+    ap.add_argument("--z", type=float, nargs=2, default=[1.4, 2.4], help="flight heights (m)")
+    ap.add_argument("--margin", type=float, default=0.35, help="clearance from any obstacle (m)")
     ap.add_argument("--out", default=str(Path(__file__).resolve().parent.parent / "config" / "flight_zone.yaml"))
     a = ap.parse_args()
     V, F = load_obj(a.obj)
@@ -93,6 +95,8 @@ def main():
     cv2.floodFill(ff, mask, seed, 2)
     inside = ff == 2
     blocked = occ | ~inside
+    # distance (m) from every cell to the nearest obstacle or to the outside of the room
+    clearance = cv2.distanceTransform((~blocked).astype(np.uint8), cv2.DIST_L2, 5).astype(np.float32) * CELL
     r = int(np.ceil(a.margin / CELL))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
     blocked = cv2.dilate(blocked.astype(np.uint8), kernel) > 0
@@ -103,11 +107,13 @@ def main():
     zx0, zx1 = x0 + j0 * CELL, x0 + j1 * CELL
     zy0, zy1 = y0 + i0 * CELL, y0 + i1 * CELL
     out = Path(a.out)
+    grid = out.with_name(out.stem + "_grid.npz")
+    np.savez_compressed(grid, clearance=clearance, x0=x0, y0=y0, cell=CELL, z_lo=z_lo, z_hi=z_hi)
     out.write_text(
         "# Flight zone with no obstacle (tools/free_zone.py, from the room scan): largest free rectangle at\n"
         f"# flight heights, {a.margin} m from any scanned surface between z {z_lo - 0.2:.1f} and {z_hi + 0.2:.1f} m.\n"
         f"x_min: {zx0:.2f}\nx_max: {zx1:.2f}\ny_min: {zy0:.2f}\ny_max: {zy1:.2f}\nz_min: {z_lo:.2f}\nz_max: {z_hi:.2f}\n"
-        f"margin: {a.margin}\n", encoding="utf-8")
+        f"margin: {a.margin}\ngrid_file: {grid.name}\n", encoding="utf-8")
     print(f"free zone x [{zx0:.2f}, {zx1:.2f}] y [{zy0:.2f}, {zy1:.2f}] ({zx1 - zx0:.2f} x {zy1 - zy0:.2f} m), "
           f"z [{z_lo}, {z_hi}] -> {out}")
     # picture: top view, scan in grey, obstacles at flight height red, margin orange, zone green

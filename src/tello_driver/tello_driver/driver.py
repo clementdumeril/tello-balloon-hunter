@@ -113,16 +113,44 @@ class FakeTello:
                 "baro": 80.0, "time": 0, "agx": 0.0, "agy": 0.0, "agz": -1000.0}
 
 
+def wrap(a):
+    return math.atan2(math.sin(a), math.cos(a))
+
+
 def load_zone(path):
-    """config/flight_zone.yaml -> dict (x_min, x_max, y_min, y_max, z_min, z_max) or None."""
+    """config/flight_zone.yaml -> dict: the mission rectangle (x_min ... z_max), the margin, and when present the
+    free-space grid (distance to the nearest obstacle, tools/free_zone.py). None if no file."""
     if not path:
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
             z = yaml.safe_load(f)
-        return {k: float(z[k]) for k in ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")}
+        zone = {k: float(z[k]) for k in ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")}
+        zone["margin"] = float(z.get("margin", 0.35))
+        if z.get("grid_file"):
+            from pathlib import Path
+            g = np.load(Path(path).parent / z["grid_file"])
+            c = g["clearance"].astype(float)
+            gy, gx = np.gradient(c)
+            zone["grid"] = {"d": c, "gx": gx, "gy": gy, "x0": float(g["x0"]), "y0": float(g["y0"]),
+                            "cell": float(g["cell"])}
+        return zone
     except Exception:  # noqa: BLE001
         return None
+
+
+def clearance(zone, x, y):
+    """(distance to the nearest obstacle in m, unit vector pointing away from it) at (x, y); None without grid."""
+    g = zone.get("grid") if zone else None
+    if g is None:
+        return None
+    j = int(round((x - g["x0"]) / g["cell"]))
+    i = int(round((y - g["y0"]) / g["cell"]))
+    if not (0 <= i < g["d"].shape[0] and 0 <= j < g["d"].shape[1]):
+        return 0.0, (0.0, 0.0)
+    gx, gy = g["gx"][i, j], g["gy"][i, j]
+    n = math.hypot(gx, gy)
+    return float(g["d"][i, j]), ((gx / n, gy / n) if n > 1e-6 else (0.0, 0.0))
 
 
 # ---------------------------------------------------------------- camera info
@@ -171,6 +199,14 @@ class TelloDriver(Node):
         self.max_height = p("max_height", 2.6).value
         self.pose_z, self.pose_t = 0.0, 0.0
         self.pose_xy, self.pose_yaw = None, 0.0
+        # position hold: when no horizontal move is commanded, hold the position (and heading) with a PI loop on
+        # the ArUco pose. The Tello's own optical-flow hold does not work in this room (vgx = vgy = 0 while it
+        # drifted 0.4 m in 8 s, Nov 11: dim light / plain floor).
+        self.hold_enabled = p("position_hold", True).value
+        self.hold_kp, self.hold_ki = p("hold_kp", 0.6).value, p("hold_ki", 0.15).value
+        self.hold_target = None
+        self.hold_i = [0.0, 0.0]
+        self.hold_t = 0.0
         # obstacle-free flight zone from the room scan (tools/free_zone.py): commands that would take the drone
         # out of it are cut, whatever program sends them (Nov 10: a test drifted 1 m back towards furniture)
         self.zone = load_zone(p("flight_zone_file", "").value)
@@ -369,7 +405,8 @@ class TelloDriver(Node):
         if self.climb_target is not None and self.tello.is_flying:
             ud = self.climb_rc(hgt, vz)
             if ud is not None:
-                rc = (0, 0, ud, 0)  # climbing: other commands wait
+                rc = (0, 0, ud, 0)  # climbing: other commands wait (the position hold keeps it in place)
+        rc = self.position_hold(rc)
         # ceiling guard, whatever program sends the commands. The drone needs ~1 s to stop (tau ~0.8 s + delay),
         # so the guard works on the height predicted 1 s ahead, not on the current one.
         if hgt is not None:
@@ -448,6 +485,35 @@ class TelloDriver(Node):
         self.get_logger().info(msg)
         return None
 
+    def grid_guard(self, x, y, vx, vy, wx, wy):
+        """Free-space guard: distance to the nearest scanned obstacle at the current and the predicted (1 s)
+        position. Closer than the margin: the velocity towards the obstacle is removed and the drone is pushed
+        away; approaching it: that velocity shrinks to zero at the margin."""
+        mg = self.zone["margin"]
+        d, (gx, gy) = clearance(self.zone, x, y)
+        dp, (gpx, gpy) = clearance(self.zone, x + vx, y + vy)
+        if dp < d:
+            d_use, (ux, uy) = dp, (gpx, gpy)
+        else:
+            d_use, (ux, uy) = d, (gx, gy)
+        if ux == 0.0 and uy == 0.0:
+            return wx, wy
+        toward = -(wx * ux + wy * uy)  # > 0: moving towards the obstacle
+        if d < mg:
+            if toward > -0.25:
+                wx, wy = wx + (toward + 0.25) * ux, wy + (toward + 0.25) * uy
+            self.get_logger().warn(f"flight zone: {d:.2f} m from an obstacle at ({x:+.2f}, {y:+.2f}): pushing away",
+                                   throttle_duration_sec=1.0)
+        elif d_use < mg + 0.1:
+            if toward > -0.15:
+                wx, wy = wx + (toward + 0.15) * ux, wy + (toward + 0.15) * uy
+            self.get_logger().warn(f"flight zone: braking ({d_use:.2f} m from an obstacle)", throttle_duration_sec=1.0)
+        else:
+            allowed = (d_use - mg) * 1.0
+            if toward > allowed:
+                wx, wy = wx + (toward - allowed) * ux, wy + (toward - allowed) * uy
+        return wx, wy
+
     def on_pose(self, m):
         p, q = m.pose.pose.position, m.pose.pose.orientation
         self.pose_z, self.pose_t = p.z, time.time()
@@ -455,6 +521,48 @@ class TelloDriver(Node):
         self.pose_yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
         now = time.time()
         self.xy_hist = [(t, xy) for t, xy in getattr(self, "xy_hist", []) if now - t < 0.6] + [(now, (p.x, p.y))]
+
+    def velocity_xy(self):
+        hist = getattr(self, "xy_hist", [])
+        if len(hist) < 2:
+            return 0.0, 0.0
+        (t0, (x0, y0)), (t1, (x1, y1)) = hist[0], hist[-1]
+        dt = t1 - t0
+        return ((x1 - x0) / dt, (y1 - y0) / dt) if dt > 0.2 else (0.0, 0.0)
+
+    def position_hold(self, rc):
+        """No horizontal/yaw command -> hold where the drone stops (PI on the ArUco pose, integral for the drift).
+        A command releases the hold; no fresh pose -> nothing to hold on (the integral is kept)."""
+        now = time.time()
+        dt = min(0.1, now - self.hold_t) if self.hold_t else 0.05
+        self.hold_t = now
+        if not (self.hold_enabled and self.tello.is_flying) or self.busy.locked():
+            self.hold_target = None
+            return rc
+        if rc[0] or rc[1] or rc[3]:
+            self.hold_target = None  # the pilot / the mission is moving the drone
+            self.hold_i = [0.0, 0.0]
+            return rc
+        if time.time() - self.pose_t > 0.4 or self.pose_xy is None:
+            return rc
+        x, y = self.pose_xy
+        if self.hold_target is None:
+            vx, vy = self.velocity_xy()
+            # hold where it will stop (it keeps moving ~0.8 s), not where it was when the keys were released
+            self.hold_target = (x + 0.8 * vx, y + 0.8 * vy, self.pose_yaw)
+            self.hold_i = [0.0, 0.0]
+        tx, ty, tyaw = self.hold_target
+        ex, ey = tx - x, ty - y
+        for k, e in enumerate((ex, ey)):
+            if abs(e) < 0.4:
+                self.hold_i[k] = max(-0.15, min(0.15, self.hold_i[k] + self.hold_ki * e * dt))
+        wx = max(-0.25, min(0.25, self.hold_kp * ex + self.hold_i[0]))
+        wy = max(-0.25, min(0.25, self.hold_kp * ey + self.hold_i[1]))
+        c, s = math.cos(self.pose_yaw), math.sin(self.pose_yaw)
+        bx, by = c * wx + s * wy, -s * wx + c * wy
+        wz = max(-0.3, min(0.3, 0.8 * wrap(tyaw - self.pose_yaw)))
+        clip = lambda v: int(max(-self.max_rc, min(self.max_rc, round(v))))  # noqa: E731
+        return (clip(-by / self.lin_gain), clip(bx / self.lin_gain), rc[2], clip(-wz / self.yaw_gain))
 
     def zone_guard(self, rc):
         """Keep the drone inside the flight zone: like the ceiling guard, on the position predicted 1 s ahead
@@ -471,13 +579,16 @@ class TelloDriver(Node):
                                        throttle_duration_sec=2.0)
             return (0, 0, rc[2], rc[3])
         x, y = self.pose_xy
-        t_old, (x_old, y_old) = self.xy_hist[0]
-        dt = time.time() - t_old
-        vx, vy = ((x - x_old) / dt, (y - y_old) / dt) if dt > 0.2 else (0.0, 0.0)
+        vx, vy = self.velocity_xy()
         lr, fb, ud, yw = rc
         c, s = math.cos(self.pose_yaw), math.sin(self.pose_yaw)
         bx, by = fb * self.lin_gain, -lr * self.lin_gain          # body velocity command
         wx, wy = c * bx - s * by, s * bx + c * by                 # world
+        if "grid" in z:
+            wx, wy = self.grid_guard(x, y, vx, vy, wx, wy)
+            bx, by = c * wx + s * wy, -s * wx + c * wy
+            clip = lambda v: int(max(-self.max_rc, min(self.max_rc, round(v))))  # noqa: E731
+            return (clip(-by / self.lin_gain), clip(bx / self.lin_gain), ud, yw)
         m = 0.15
         hit = []
         for name, pos, vel, lo, hi in (("x", x, vx, z["x_min"], z["x_max"]), ("y", y, vy, z["y_min"], z["y_max"])):

@@ -40,6 +40,10 @@ class Abort(Exception):
     pass
 
 
+class Lost(Exception):
+    """Markers lost during a test segment: search, then repeat the segment."""
+
+
 def wrap(a):
     return math.atan2(math.sin(a), math.cos(a))
 
@@ -59,7 +63,9 @@ class StepTest(Node):
         self.axes = [a.strip() for a in p("axes", "x,y,z,yaw").value.split(",") if a.strip()]
         self.box = p("box", 0.8).value                  # m, horizontal half-size around the start point
         self.z_min, self.z_max = p("z_min", 0.4).value, p("z_max", 2.4).value
-        self.lost_max = p("lost_timeout", 3.0).value
+        # no marker for that long (searching all the time) -> land; shorter losses: the drone stays up and searches
+        self.lost_max = p("lost_timeout", 15.0).value
+        self.failed_segments = []
         zf = p("flight_zone_file", os.path.join(os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter")),
                                                  "config", "flight_zone.yaml")).value
         from tello_driver.driver import load_zone
@@ -168,7 +174,12 @@ class StepTest(Node):
         if self.pose and self.p0 is not None and self.pose_age() < 0.5:
             _, x, y, z, _ = self.pose
             zn = self.zone
-            if zn and not (zn["x_min"] - 0.2 <= x <= zn["x_max"] + 0.2 and zn["y_min"] - 0.2 <= y <= zn["y_max"] + 0.2):
+            if zn and "grid" in zn:
+                from tello_driver.driver import clearance
+                d, _ = clearance(zn, x, y)
+                if d < zn["margin"] - 0.2:
+                    raise Abort(f"{d:.2f} m from an obstacle at ({x:+.2f}, {y:+.2f}) m")
+            elif zn and not (zn["x_min"] - 0.2 <= x <= zn["x_max"] + 0.2 and zn["y_min"] - 0.2 <= y <= zn["y_max"] + 0.2):
                 raise Abort(f"left the obstacle-free flight zone at ({x:+.2f}, {y:+.2f}) m")
             f = getattr(self, "fence", None)  # (xmin, xmax, ymin, ymax) for missions; else a box around the start
             if f is not None:
@@ -192,12 +203,43 @@ class StepTest(Node):
         self.w_cmd.writerow([f"{time.time():.4f}", segment, axis, f"{u:.4f}",
                              f"{cx:.3f}", f"{cy:.3f}", f"{cz:.3f}", f"{cw:.3f}"])
 
-    def run(self, seconds, fn):
-        """Call fn() at RATE for `seconds` (fn sends the command), with the safety checks."""
+    def search_heading(self, base_yaw):
+        """Markers out of view: turn (IMU heading) to base_yaw, then sweep +-40 deg around it. No translation:
+        the driver blocks horizontal moves without a pose anyway."""
+        yaw = self.yaw_estimate()
+        lost = self.pose_age()
+        if yaw is None:
+            self.send()
+            return
+        target = base_yaw + (math.radians(40) * math.sin(2 * math.pi * (lost - 3.0) / 6.0) if lost > 3.0 else 0.0)
+        if int(lost) != getattr(self, "_said", -1) and int(lost) % 3 == 1:
+            self._said = int(lost)
+            self.say(f"  markers lost for {lost:.0f} s: turning to find them")
+        self.send(cw=max(-0.5, min(0.5, 0.9 * wrap(target - yaw))), blind=True)
+
+    def search_until_found(self, base_yaw, timeout=None):
+        t0 = time.time()
+        while self.pose_age() > 0.3:
+            self.safety()
+            self.search_heading(base_yaw)
+            self.spin(1.0 / RATE)
+            if timeout and time.time() - t0 > timeout:
+                return False
+        return True
+
+    def run(self, seconds, fn, restart_on_loss=False, search_on_loss=True):
+        """Call fn() at RATE for `seconds` (fn sends the command), with the safety checks. Markers lost for more
+        than 1 s: Lost (the segment will be repeated) or, outside the tests, a search on the spot."""
         end = time.time() + seconds
         nxt = time.time()
         while time.time() < end:
             self.safety()
+            if self.pose_age() > 1.0 and self.p0 is not None and (restart_on_loss or search_on_loss):
+                if restart_on_loss:
+                    raise Lost()
+                self.search_until_found(self.p0[3])
+                nxt = time.time()
+                continue
             if fn() is False:
                 return
             nxt += 1.0 / RATE
@@ -205,9 +247,9 @@ class StepTest(Node):
                 rclpy.spin_once(self, timeout_sec=max(0.0, nxt - time.time()))
 
     # ---------------------------------------------------------------- phases
-    def recentre(self, timeout=6.0):
-        """Simple proportional return to the start point (and heading)."""
-        x0, y0, z0, yaw0 = self.p0
+    def recentre(self, timeout=6.0, target=None):
+        """Simple proportional return to the start point (and heading), or to target (x, y, z, yaw)."""
+        x0, y0, z0, yaw0 = target or self.p0
 
         def step():
             if self.pose_age() > 0.5:
@@ -251,7 +293,7 @@ class StepTest(Node):
                 c[key] = u
             self.send(**c, segment=segment, axis=axis, u=c[key])
         for u, d in ((None, 2.0), (sign * amp, dur), (-sign * amp, dur), (None, 3.0)):
-            self.run(d, lambda u=u: cmd(u))
+            self.run(d, lambda u=u: cmd(u), restart_on_loss=True)
 
     def wait_ready(self):
         self.say("Waiting for the driver and the telemetry...")
@@ -301,25 +343,40 @@ class StepTest(Node):
         self.say("Hovering, measuring the start point...")
         samples = []
         t0 = time.time()
-        while time.time() - t0 < 8.0 and len(samples) < 15:
+        imu0 = self.imu_yaw()
+        while time.time() - t0 < 20.0 and len(samples) < 15:
             self.check_keys()
-            self.send()
-            self.spin(0.05)
+            if time.time() - self.video_t > 1.0 and time.time() - t0 > 3.0:
+                raise Abort("no video from the drone (Wi-Fi drop?): reconnect, wait 30 s, relaunch")
             if self.pose_age() < 0.2:
                 samples.append(self.pose[1:])
+                self.send()
+            elif imu0 is not None and time.time() - t0 > 2.0:
+                # no marker yet: sweep +-40 deg around the takeoff heading (IMU) to find them
+                imu = self.imu_yaw()
+                tgt = imu0 + math.radians(40) * math.sin(2 * math.pi * (time.time() - t0 - 2.0) / 6.0)
+                if imu is not None:
+                    self.send(cw=max(-0.5, min(0.5, 0.9 * wrap(tgt - imu))), blind=True)
+                if int(time.time() - t0) % 4 == 0 and int(time.time() - t0) != getattr(self, "_said0", -1):
+                    self._said0 = int(time.time() - t0)
+                    self.say("  no marker yet: turning to find them")
+            else:
+                self.send()
+            self.spin(0.05)
         if len(samples) < 5:
-            if time.time() - self.video_t > 1.0:
-                raise Abort("no video from the drone (Wi-Fi drop?): reconnect, wait 30 s, relaunch")
-            raise Abort("no marker in view: place the drone facing the marker wall (2-3 markers in the picture)")
+            raise Abort("no marker found in 20 s: place the drone facing the marker wall")
         S = np.array(samples)
         self.p0 = (float(np.median(S[:, 0])), float(np.median(S[:, 1])), float(np.median(S[:, 2])),
                    float(np.median(S[:, 3])))
         zn = self.zone
-        if zn and not (zn["x_min"] <= self.p0[0] <= zn["x_max"] and zn["y_min"] <= self.p0[1] <= zn["y_max"]):
-            cx, cy = (zn["x_min"] + zn["x_max"]) / 2, (zn["y_min"] + zn["y_max"]) / 2
-            raise Abort(f"start point ({self.p0[0]:+.2f}, {self.p0[1]:+.2f}) is outside the obstacle-free zone "
-                        f"x [{zn['x_min']:.2f}, {zn['x_max']:.2f}] y [{zn['y_min']:.2f}, {zn['y_max']:.2f}]: "
-                        f"take off from about ({cx:+.2f}, {cy:+.2f})")
+        if zn and not (zn["x_min"] + 0.1 <= self.p0[0] <= zn["x_max"] - 0.1 and zn["y_min"] + 0.1 <= self.p0[1] <= zn["y_max"] - 0.1):
+            # the takeoff drifted (or the drone was put a bit off): fly back into the mission rectangle
+            tx = min(max(self.p0[0], zn["x_min"] + 0.2), zn["x_max"] - 0.2)
+            ty = min(max(self.p0[1], zn["y_min"] + 0.2), zn["y_max"] - 0.2)
+            self.say(f"Start point ({self.p0[0]:+.2f}, {self.p0[1]:+.2f}) outside the flight zone: moving to ({tx:+.2f}, {ty:+.2f})")
+            self.recentre(timeout=12.0, target=(tx, ty, self.p0[2], self.p0[3]))
+            _, x, y, z, yaw = self.pose
+            self.p0 = (x, y, z, self.p0[3])
         if not self.z_min + 0.3 <= self.p0[2] <= self.z_max - 0.3:
             raise Abort(f"start height {self.p0[2]:.2f} m too close to the limits [{self.z_min}, {self.z_max}]")
         self.say(f"Start point ({self.p0[0]:+.2f}, {self.p0[1]:+.2f}, {self.p0[2]:.2f}) m, "
@@ -328,18 +385,29 @@ class StepTest(Node):
     def run_tests(self):
         names = {"x": "forward/back", "y": "left/right", "z": "up/down", "yaw": "turn"}
         seg = 0
+        n_tot = len(self.axes) * self.repeats
         for axis in self.axes:
             for rep in range(self.repeats):
-                self.say(f"[{seg + 1}/{len(self.axes) * self.repeats}] {names[axis]} doublet {rep + 1}")
-                self.recentre()
-                self.doublet(seg, axis, 1 if rep % 2 == 0 else -1)
-                seg += 1
+                for attempt in range(3):
+                    self.say(f"[{rep + 1 + self.repeats * self.axes.index(axis)}/{n_tot}] {names[axis]} doublet {rep + 1}"
+                             + (f" (retry {attempt})" if attempt else ""))
+                    self.recentre()
+                    try:
+                        self.doublet(seg, axis, 1 if rep % 2 == 0 else -1)
+                        seg += 1
+                        break
+                    except Lost:
+                        self.failed_segments.append(seg)
+                        seg += 1
+                        self.say("  markers lost during the test: searching, then repeating it")
+                        self.search_until_found(self.p0[3])
         self.recentre()
         self.say("Done: landing.")
 
     def close(self):
         for f in (self.f_pose, self.f_cmd, self.f_tel):
             f.close()
+        (self.out / "failed_segments.txt").write_text(" ".join(map(str, self.failed_segments)))
 
 
 def main():

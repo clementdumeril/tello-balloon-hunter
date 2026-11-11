@@ -4,6 +4,7 @@ Also publishes, for RViz: the markers (/aruco/map_markers) and a drone body + ca
 attached to base_link (/tello/body_markers).
 """
 import math
+from pathlib import Path
 
 import numpy as np
 import rclpy
@@ -72,6 +73,8 @@ class MarkerMapPublisher(Node):
                 self.pub_zone.publish(box)
                 self.zone_marker = box
                 self.create_timer(2.0, lambda: self.pub_zone.publish(self.zone_marker))
+                if z.get("grid_file"):
+                    self.publish_free_space(Path(zf).parent / z["grid_file"], float(z.get("margin", 0.35)), qos)
             except Exception as e:  # noqa: BLE001
                 self.get_logger().warn(f"flight zone {zf}: {e}")
         mesh = self.declare_parameter("room_mesh", "").value
@@ -83,6 +86,12 @@ class MarkerMapPublisher(Node):
             self.pub_room.publish(m)
             self.get_logger().info(f"Room mesh: {mesh}")
         self.get_logger().info(f"Published {len(self.markers)} marker frames from {path}")
+
+    def publish_free_space(self, npz, margin, qos):
+        from nav_msgs.msg import OccupancyGrid
+        self.pub_free = self.create_publisher(OccupancyGrid, "/room/free_space", qos)
+        self.free_msg = free_space_grid(npz, margin)
+        self.pub_free.publish(self.free_msg)
 
     def map_markers(self, stamp):
         arr = MarkerArray()
@@ -120,6 +129,21 @@ class MarkerMapPublisher(Node):
             fov.points += [point(0, 0, 0), point(*c[i]), point(*c[i]), point(*c[(i + 1) % 4])]
         add(fov)
         return arr
+
+
+def free_space_grid(npz, margin):
+    """OccupancyGrid: 100 = obstacle or closer than the margin (no-fly), 0 = free."""
+    from nav_msgs.msg import OccupancyGrid
+    g = np.load(npz)
+    d = g["clearance"]
+    m = OccupancyGrid()
+    m.header.frame_id = "map"
+    m.info.resolution = float(g["cell"])
+    m.info.width, m.info.height = int(d.shape[1]), int(d.shape[0])
+    m.info.origin.position.x, m.info.origin.position.y = float(g["x0"]), float(g["y0"])
+    m.info.origin.orientation.w = 1.0
+    m.data = np.where(d < margin, 100, 0).astype(np.int8).ravel().tolist()
+    return m
 
 
 def point(x, y, z):

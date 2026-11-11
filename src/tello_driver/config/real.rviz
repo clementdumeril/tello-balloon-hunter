@@ -23,8 +23,16 @@ Visualization Manager:
       Topic:
         Value: /room/mesh
         Durability Policy: Transient Local
+    - Class: rviz_default_plugins/Map
+      Name: Free space (black = no-fly)
+      Enabled: true
+      Alpha: 0.35
+      Color Scheme: map
+      Topic:
+        Value: /room/free_space
+        Durability Policy: Transient Local
     - Class: rviz_default_plugins/Marker
-      Name: Flight zone (no obstacle)
+      Name: Mission zone
       Enabled: true
       Topic:
         Value: /room/flight_zone

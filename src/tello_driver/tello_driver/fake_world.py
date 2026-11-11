@@ -91,6 +91,9 @@ class FakeWorld:
         self.yaw_rate += (-yw * YAW_GAIN - self.yaw_rate) * a
         c, s = math.cos(self.yaw), math.sin(self.yaw)
         self.p += np.array([c * self.v[0] - s * self.v[1], s * self.v[0] + c * self.v[1], self.v[2]]) * dt
+        drift = os.environ.get("FAKE_DRIFT")  # tests: "vx,vy" m/s in the map, like the real Tello without its VPS
+        if drift and self.flying:
+            self.p[:2] += np.array([float(v) for v in drift.split(",")]) * dt
         self.p[2] = max(0.05, self.p[2])
         self.yaw = math.atan2(math.sin(self.yaw + self.yaw_rate * dt), math.cos(self.yaw + self.yaw_rate * dt))
 
