@@ -245,6 +245,8 @@ class TelloDriver(Node):
         # wall ahead, from the size of the closest marker in view (works without map and without pose)
         from std_msgs.msg import Float32
         self.near_d, self.near_t = 9.0, 0.0
+        # identified model (Nov 11), for the guards' predictions
+        self.model_K, self.model_tau, self.model_Lu = p("model_K", 1.15).value, p("model_tau", 0.55).value, p("model_L_u", 0.30).value
         self.min_wall = p("min_wall_distance", 0.7).value
         self.wall_band = p("wall_slow_band", 0.15).value  # forward speed shrinks over this band above min_wall
         self.create_subscription(Float32, "/aruco/nearest_marker", self.on_near, 5)
@@ -514,7 +516,14 @@ class TelloDriver(Node):
         away; approaching it: that velocity shrinks to zero at the margin."""
         mg = self.zone["margin"]
         d, (gx, gy) = clearance(self.zone, x, y)
-        dp, (gpx, gpy) = clearance(self.zone, x + vx, y + vy)
+        # where the drone will be in 1 s if this command is kept (identified model: delay L_u, then first-order
+        # response): a planned deceleration is not taken for a run at the wall (the old 'p + v * 1 s' braked
+        # before the end of every fast leg)
+        K, tau, Lu, H = self.model_K, self.model_tau, self.model_Lu, 1.0
+        f = tau * (1 - math.exp(-(H - Lu) / tau))
+        px = x + vx * Lu + K * wx * (H - Lu) + (vx - K * wx) * f
+        py = y + vy * Lu + K * wy * (H - Lu) + (vy - K * wy) * f
+        dp, (gpx, gpy) = clearance(self.zone, px, py)
         if dp < d:
             d_use, (ux, uy) = dp, (gpx, gpy)
         else:
