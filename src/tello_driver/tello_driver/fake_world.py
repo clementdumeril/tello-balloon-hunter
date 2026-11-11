@@ -19,7 +19,8 @@ YAW_GAIN = math.radians(18) / 30  # rad/s per rc point
 # command -> ArUco pose 0.48-0.52 s. The fake splits it: DELAY on the command, the rest is the image pipeline.
 TAU = 0.55                        # s, velocity response time constant
 K_XY = 1.15                       # real speed / commanded speed (horizontal)
-DELAY = 0.35                      # s, command -> motion delay (radio + flight controller)
+DELAY = 0.30                      # s, command -> motion delay (radio + flight controller)
+VIDEO_DELAY = 0.20                # s, image taken -> image received (the real Tello's video latency)
 CAM_OFFSET = np.array([0.05, 0.0, 0.0])
 R_BASE_CAM = np.column_stack([[0, -1, 0], [0, 0, -1], [1, 0, 0]]).astype(float)  # optical frame in body frame
 

@@ -26,11 +26,13 @@ from std_srvs.srv import Trigger
 
 # ---------------------------------------------------------------- fake drone (tests without hardware)
 class FakeFrameRead:
-    """Without a marker map: a plain moving test pattern. With one: the virtual camera view of the markers."""
+    """Without a marker map: a plain moving test pattern. With one: the virtual camera view of the markers,
+    delivered VIDEO_DELAY late like the real video (the EKF assumes that latency)."""
     def __init__(self, world=None):
         self.world = world
         self._t = -1
         self._frame = None
+        self._queue = []
 
     @property
     def frame(self):
@@ -38,7 +40,12 @@ class FakeFrameRead:
         if k != self._t:
             self._t = k
             if self.world is not None:
-                self._frame = self.world.render()
+                from tello_driver.fake_world import VIDEO_DELAY
+                now = time.time()
+                self._queue.append((now, self.world.render()))
+                while len(self._queue) > 1 and self._queue[1][0] <= now - VIDEO_DELAY:
+                    self._queue.pop(0)
+                self._frame = self._queue[0][1]
             else:
                 img = np.full((720, 960, 3), 90, np.uint8)
                 img[:, :, 0] = (np.arange(960) * 255 // 960).astype(np.uint8)
