@@ -141,6 +141,8 @@ command limit, checked against the free space before flying; tracked with the mo
 | `tools/make_print_sheets.py` | Printable markers (any ID range, US Letter or A4) and checkerboard |
 | `tools/room_mesh_to_map.py` | Puts the phone scan (Scaniverse OBJ) in the `map` frame for RViz |
 | `tools/free_zone.py` | Obstacle-free flight space from the scan |
+| `tools/measure_latency.py` | Perception latency of a recorded flight: ArUco heading vs IMU heading during turns (first reliable value: ~190 ms) |
+| `tools/video_latency_bench.py` | Video reader latency bench on a fake H.264 Tello stream (no drone): decoding on the PC costs ~45-50 ms; the main latency is in the drone and the Wi-Fi |
 | `tools/ekf_replay.py` | Replays a recorded flight through the EKF with markers hidden: dead-reckoning error |
 
 ## Simulation

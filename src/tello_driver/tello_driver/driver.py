@@ -282,7 +282,16 @@ class TelloDriver(Node):
         self.get_logger().info(f"Connected, battery {self.tello.get_battery()} %")
         self.tello.streamon()
         self.get_logger().info("Video stream on, waiting for the first frames...")
-        self.reader = self.tello.get_frame_read()
+        # Video reader. Bench (tools/video_latency_bench.py, fake Tello stream on localhost): the low-latency reader
+        # gains only ~4 ms median / ~10 ms p90 but lost ~10 % of the images, so djitellopy's reader stays the
+        # default; low_latency_video:=true to try the other one on the real drone.
+        self.low_latency_video = p("low_latency_video", False).value and not self.mock
+        if self.low_latency_video:
+            from tello_driver.video_reader import LowLatencyReader
+            self.reader = LowLatencyReader(log=lambda m: self.get_logger().warn(m, throttle_duration_sec=2.0))
+        else:
+            self.reader = self.tello.get_frame_read()
+        self.video_count, self.video_fps, self.video_t0 = 0, 0.0, time.time()
 
         self.info = None
         self.last_frame = None
@@ -293,7 +302,7 @@ class TelloDriver(Node):
         self.last_frame_t = time.time()
         self.video_timeout = p("video_timeout", 3.0).value
         self.restarting = False
-        self.create_timer(1 / 60, self.poll_video)
+        self.create_timer(1 / 100, self.poll_video)
         self.create_timer(0.1, self.poll_state)
         self.create_timer(0.05, self.send_rc)
         self.create_timer(1.0, self.video_watchdog)
@@ -305,6 +314,16 @@ class TelloDriver(Node):
         A NEW reader while the old one holds the port fails with 'Address already in use' (Nov 9): a new one is
         made only if the old thread is dead, after closing its container."""
         if self.mock or self.restarting or time.time() - self.last_frame_t < self.video_timeout:
+            return
+        if self.low_latency_video:
+            # the reader reopens the stream by itself; the drone may only need to be told to stream again
+            self.get_logger().warn(f"No video for {time.time() - self.last_frame_t:.0f} s: re-sending streamon",
+                                   throttle_duration_sec=2.0)
+            try:
+                self.tello.send_command_without_return("streamon")
+            except Exception:  # noqa: BLE001
+                pass
+            self.last_frame_t = time.time()
             return
         self.restarting = True
         r = self.tello.background_frame_read
@@ -367,6 +386,10 @@ class TelloDriver(Node):
             return
         self.last_frame = frame
         self.last_frame_t = time.time()
+        self.video_count += 1
+        if self.last_frame_t - self.video_t0 >= 2.0:
+            self.video_fps = self.video_count / (self.last_frame_t - self.video_t0)
+            self.video_count, self.video_t0 = 0, self.last_frame_t
         h, w = frame.shape[:2]
         if self.info is None or (self.info.width, self.info.height) != (w, h):
             self.info, calibrated = load_camera_info(self.calib_file, w, h, self.frame_id)
@@ -396,6 +419,7 @@ class TelloDriver(Node):
         st["flying"] = bool(self.tello.is_flying)
         # takeoff / climb / land running: not ready for velocity commands
         st["busy"] = self.busy.locked() or self.climb_target is not None
+        st["video_fps"] = round(self.video_fps, 1)  # images published per second (the Tello sends 30 at most)
         self.pub_tel.publish(String(data=json.dumps(st)))
         bat = self.state.get("bat")
         if self.tello.is_flying and isinstance(bat, (int, float)) and bat <= self.low_battery:
@@ -722,7 +746,9 @@ class TelloDriver(Node):
         except Exception:  # noqa: BLE001
             pass
         try:
-            if self.tello.background_frame_read is not None:
+            if self.low_latency_video:
+                self.reader.stop()
+            elif self.tello.background_frame_read is not None:
                 self.tello.background_frame_read.stop()
                 self.tello.background_frame_read = None
         except Exception:  # noqa: BLE001
