@@ -201,9 +201,15 @@ class TelloDriver(Node):
         if self.mock:
             # with a marker map, the fake drone renders the markers and flies with the rc commands
             self.tello = FakeTello(p("mock_markers_file", "").value)
-            if self.zone and self.tello.world is not None:  # start where the real one should: zone centre, on the floor
-                self.tello.world.p[0] = (self.zone["x_min"] + self.zone["x_max"]) / 2
-                self.tello.world.p[1] = (self.zone["y_min"] + self.zone["y_max"]) / 2
+            if self.zone and self.tello.world is not None:
+                # start where the real one should: in the zone, 0.3 m from its edge furthest from the main marker
+                # wall (the drone faces that wall; from the zone centre the markers were cut at the image edges)
+                w = self.tello.world
+                cx, cy = (self.zone["x_min"] + self.zone["x_max"]) / 2, (self.zone["y_min"] + self.zone["y_max"]) / 2
+                n = (-math.cos(w.yaw), -math.sin(w.yaw))  # away from the wall
+                hx, hy = (self.zone["x_max"] - self.zone["x_min"]) / 2, (self.zone["y_max"] - self.zone["y_min"]) / 2
+                d = max(0.0, abs(n[0]) * hx + abs(n[1]) * hy - 0.3)
+                w.p[0], w.p[1] = cx + n[0] * d, cy + n[1] * d
         else:
             self.wait_for_tello_network(p("network_timeout", 30.0).value)
             import logging

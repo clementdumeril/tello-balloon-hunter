@@ -88,7 +88,9 @@ def takeoff_height(markers_file, arg):
         zs = sorted(float(m["z"]) for m in yaml.safe_load(open(markers_file, encoding="utf-8"))["markers"])
     except Exception:  # noqa: BLE001
         return 0.0
-    return round(min(2.0, max(1.0, zs[len(zs) // 2] - 0.5)), 2)
+    # median - 0.3 m: from the back of the flight zone (~1.6 m from the wall) the markers sit in the middle of the
+    # picture (at median - 0.5 they were cut at the image edges, Nov 11)
+    return round(min(2.0, max(1.0, zs[len(zs) // 2] - 0.3)), 2)
 
 
 def rviz_config_centred_on_markers(template, markers_file):
