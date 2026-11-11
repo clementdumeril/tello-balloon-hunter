@@ -1,12 +1,13 @@
-"""Marker tour: the drone visits every marker of the map (stops 1.2 m in front of it, facing it), then comes
-back to its start point and lands. First autonomous mission, with a simple position controller.
+"""Marker tour: survey, then the drone visits every marker of the map: quick approach to ~0.9 m in front of it,
+a short stop, back off to ~1.6 m for the overview, next one. Then back to the start point and landing.
 
     ros2 launch tello_driver real.launch.py          (terminal 1, drone on the floor 2 m from the marker wall)
     ros2 run tello_driver tello_marker_tour           (terminal 2, NO teleop running; you stay next to the drone)
 
-For each marker: turn in place to face it, fly to 1.2 m in front of it at its height (kept between 1.2 and
-2.2 m: above the bed and the desk), hold 2 s. Speed at most 0.3 m/s. Flight zone: 0.6 m from every wall that
-holds markers, and inside the room scan on the other sides.
+Survey: a full turn in place after the climb (sees every wall, fixes the position, the EKF learns the drift).
+For each marker: turn to face it, approach at up to 0.5 m/s with a braking profile (stops without overshoot),
+stop 1 s, back off. Heights 1.2-2.2 m (above the bed and the desk). Waypoints only in the obstacle-free space
+of the room scan; the driver also stops before any marker closer than 0.7 m (its size in the image).
 
 SAFETY: ANY KEY = stop and land. Ctrl+C = land. Automatic landing if the drone leaves the flight zone
 (+0.3 m tolerance), if no marker is seen for 12 s, or on low battery. Markers lost for more than 1 s:
@@ -39,14 +40,17 @@ class MarkerTour(StepTest):
         super().__init__()
         p = self.declare_parameter
         self.markers_file = p("markers_file", os.path.join(REPO, "config", "markers.yaml")).value
-        self.standoff = p("standoff", 1.2).value          # m in front of each marker
+        self.standoff = p("standoff", 1.6).value          # m in front of each marker: overview (back off)
+        self.approach = p("approach", 0.9).value          # m in front of each marker: the visit
+        self.a_max = p("max_accel", 0.6).value            # m/s2, braking profile
+        self.survey = p("survey", True).value
         self.margin = p("wall_margin", 0.6).value         # m from the walls
         self.z_lo, self.z_hi = p("tour_z_min", 1.2).value, p("tour_z_max", 2.2).value
-        self.v_max = p("max_speed", 0.3).value            # m/s horizontal
+        self.v_max = p("max_speed", 0.5).value            # m/s horizontal
         self.vz_max = p("max_vertical_speed", 0.25).value
         self.w_max = p("max_yaw_rate", 0.5).value         # rad/s
         self.kp, self.kp_yaw = p("kp", 0.6).value, p("kp_yaw", 0.9).value
-        self.hold = p("hold", 2.0).value
+        self.hold = p("hold", 1.0).value
         # room scan extents in the map frame (x min, x max, y min, y max), for the sides without markers
         self.room = list(p("room_box", [-2.99, 1.46, -0.02, 3.12]).value)
         self.lost_max = p("tour_lost_timeout", 12.0).value  # searching before giving up and landing
@@ -89,12 +93,12 @@ class MarkerTour(StepTest):
             z = min(max(m.t[2], self.z_lo), self.z_hi)
             # a marker higher/lower than the drone can go: back off until it sits in the middle 60 % of the
             # vertical field of view (43 deg); e.g. the west markers at 2.5-2.7 m were cut at the image top
-            d = max(self.standoff, abs(m.t[2] - z) / (0.6 * math.tan(math.radians(21.5))))
-            x = min(max(m.t[0] + d * n[0], f[0]), f[1])
-            y = min(max(m.t[1] + d * n[1], f[2]), f[3])
+            d_min = abs(m.t[2] - z) / (0.6 * math.tan(math.radians(21.5)))
+            near = self.feasible(m, n, max(self.approach, d_min))
+            x, y = self.feasible(m, n, max(self.standoff, d_min, math.hypot(near[0] - m.t[0], near[1] - m.t[1])))
             yaw = math.atan2(m.t[1] - y, m.t[0] - x)  # facing the marker
             wall = round(math.degrees(math.atan2(n[1], n[0])) / 90) % 4  # which wall (normal direction)
-            wps.append({"id": m.id, "p": (x, y, z), "yaw": yaw, "wall": wall,
+            wps.append({"id": m.id, "p": (x, y, z), "near": (near[0], near[1], z), "yaw": yaw, "wall": wall,
                         "ang": math.atan2(m.t[1] - cy, m.t[0] - cx)})
         wps.sort(key=lambda w: w["ang"])
         # start with the wall the drone is facing (no blind turn first), then go round the room
@@ -102,6 +106,43 @@ class MarkerTour(StepTest):
         k = min(range(len(wps)), key=lambda i: (round(abs(wrap(wps[i]["yaw"] - yaw0)) / 0.5),
                                                   math.hypot(wps[i]["p"][0] - x0, wps[i]["p"][1] - y0)))
         return wps[k:] + wps[:k]
+
+    def feasible(self, m, n, d):
+        """Point d m in front of marker m (normal n), moved further back until it is in the obstacle-free space
+        (room scan grid, margin + 10 cm); without grid, clamped into the mission rectangle."""
+        f = self.fence
+        if self.zone and "grid" in self.zone:
+            from tello_driver.driver import clearance
+            for k in range(40):
+                x, y = m.t[0] + (d + 0.05 * k) * n[0], m.t[1] + (d + 0.05 * k) * n[1]
+                if clearance(self.zone, x, y)[0] >= self.zone["margin"] + 0.1:
+                    return x, y
+        x = min(max(m.t[0] + d * n[0], f[0]), f[1])
+        y = min(max(m.t[1] + d * n[1], f[2]), f[3])
+        return x, y
+
+    def survey_turn(self):
+        """A full turn in place at ~0.45 rad/s (IMU heading): every wall seen from the start point."""
+        self.say("Survey: one full turn to see every wall")
+        total, last = 0.0, self.yaw_estimate()
+        lost = self.lost_max
+        self.lost_max = max(lost, 15.0)
+
+        def step():
+            nonlocal total, last
+            yaw = self.yaw_estimate()
+            if yaw is not None and last is not None:
+                total += abs(wrap(yaw - last))
+            last = yaw
+            if total >= 2 * math.pi - 0.1:
+                self.send()
+                return False
+            self.send(cw=0.45, blind=True)
+            return None
+        try:
+            self.run(25.0, step, search_on_loss=False)
+        finally:
+            self.lost_max = lost
 
     # ---------------------------------------------------------------- control
     def search(self, look_at):
@@ -156,10 +197,11 @@ class MarkerTour(StepTest):
                     return False
             else:
                 reached_t[0] = None
-            vx, vy = self.kp * ex, self.kp * ey
-            v = math.hypot(vx, vy)
-            if v > self.v_max:
-                vx, vy = vx * self.v_max / v, vy * self.v_max / v
+            # speed: v_max, but brake in time: v <= sqrt(2 a d) (the drone needs ~0.5 s to react, the EKF
+            # already compensates the delay) and v <= kp d near the target
+            d = math.hypot(ex, ey)
+            v = min(self.v_max, self.kp * d, math.sqrt(2 * self.a_max * max(d - 0.5 * tol, 0.0)))
+            vx, vy = (ex / d * v, ey / d * v) if d > 1e-3 else (0.0, 0.0)
             c, s = math.cos(yaw), math.sin(yaw)
             self.send(c * vx + s * vy, -s * vx + c * vy, clip(self.kp * ez, self.vz_max),
                       clip(self.kp_yaw * eyaw, self.w_max))
@@ -192,6 +234,9 @@ class MarkerTour(StepTest):
         x0, y0, z0, yaw0 = self.p0
         if not (f[0] <= x0 <= f[1] and f[2] <= y0 <= f[3]):
             raise Abort(f"start point ({x0:+.2f}, {y0:+.2f}) outside the flight zone: start closer to the room centre")
+        if self.survey:
+            self.survey_turn()
+            self.turn(yaw0)
         wps = self.waypoints()
         self.say("Tour: " + " -> ".join(str(w["id"]) for w in wps))
         centre = ((f[0] + f[1]) / 2, (f[2] + f[3]) / 2)
@@ -208,11 +253,12 @@ class MarkerTour(StepTest):
                 self.goto((centre[0], centre[1], w["p"][2]), yaw)
             self.say(f"[{i + 1}/{len(wps)}] marker {w['id']}: turning to face it")
             self.turn(w["yaw"])
-            self.say(f"[{i + 1}/{len(wps)}] marker {w['id']}: flying to ({w['p'][0]:+.2f}, {w['p'][1]:+.2f}, "
-                     f"{w['p'][2]:.2f})")
             m = self.markers[w["id"]]
-            self.goto(w["p"], w["yaw"], look_at=(m.t[0], m.t[1]))
+            self.say(f"[{i + 1}/{len(wps)}] marker {w['id']}: approach to {math.hypot(w['near'][0] - m.t[0], w['near'][1] - m.t[1]):.2f} m")
+            self.goto(w["near"], w["yaw"], look_at=(m.t[0], m.t[1]), tol=0.10)
             self.run(self.hold, lambda: self.send())
+            self.say(f"[{i + 1}/{len(wps)}] marker {w['id']}: back off to {math.hypot(w['p'][0] - m.t[0], w['p'][1] - m.t[1]):.2f} m")
+            self.goto(w["p"], w["yaw"], look_at=(m.t[0], m.t[1]), tol=0.15)
         self.say("Back to the start point")
         self.goto((x0, y0, max(z0, self.z_lo)), yaw0)
         self.say("Tour done: landing.")

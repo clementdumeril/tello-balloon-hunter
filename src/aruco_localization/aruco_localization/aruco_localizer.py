@@ -75,6 +75,11 @@ class ArucoLocalizer(Node):
         self.tf_pub = TransformBroadcaster(self)
         self.pub_pose = self.create_publisher(PoseWithCovarianceStamped, "/aruco/pose", 10)
         self.pub_dbg = self.create_publisher(Image, "/aruco/debug_image", 2)
+        # proximity sensor: distance to the closest marker in view, from its size in the image only (no map,
+        # no pose): f * size / longest edge. The marker is on the wall in front: the driver stops before it.
+        from std_msgs.msg import Float32
+        self.Float32 = Float32
+        self.pub_near = self.create_publisher(Float32, "/aruco/nearest_marker", 5)
         self.pub_path = self.create_publisher(PathMsg, "/aruco/path", 2)
         self.pub_sight = self.create_publisher(VizMarker, "/aruco/sight_lines", 5)
         self.path = PathMsg()
@@ -123,6 +128,10 @@ class ArucoLocalizer(Node):
                 used.append(int(i))
         ok, T_map_base, err, dist = False, None, float("nan"), float("nan")
         if used:
+            fx = self.K[0, 0]
+            near = min(fx * self.markers[i].size / max(np.max(np.linalg.norm(c - np.roll(c, 1, 0), axis=1)), 1.0)
+                       for i, c in zip(used, imgp))
+            self.pub_near.publish(self.Float32(data=float(near)))
             obj_pts = np.concatenate(obj).astype(np.float64)
             img_pts = np.concatenate(imgp).astype(np.float64)
             if len(used) == 1:

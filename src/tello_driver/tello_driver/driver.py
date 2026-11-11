@@ -235,6 +235,11 @@ class TelloDriver(Node):
         # or the raw ArUco pose; trusted while its uncertainty is small
         self.pose_sigma = 1.0
         self.create_subscription(PoseWithCovarianceStamped, p("pose_topic", "/ekf/pose").value, self.on_pose, 10)
+        # wall ahead, from the size of the closest marker in view (works without map and without pose)
+        from std_msgs.msg import Float32
+        self.near_d, self.near_t = 9.0, 0.0
+        self.min_wall = p("min_wall_distance", 0.7).value
+        self.create_subscription(Float32, "/aruco/nearest_marker", self.on_near, 5)
         self.create_service(Trigger, "~/takeoff", self.srv_takeoff)
         self.create_service(Trigger, "~/land", self.srv_land)
         self.create_service(Trigger, "~/emergency", self.srv_emergency)
@@ -430,6 +435,7 @@ class TelloDriver(Node):
                 ud = min(ud, int((limit - h_pred) / self.lin_gain))  # slower and slower towards the limit
             rc = (lr, fb, ud, yw)
         rc = self.zone_guard(rc)
+        rc = self.wall_guard(rc)
         try:
             self.tello.send_rc_control(*rc)  # also keeps the link alive (the Tello lands after 15 s of silence)
             t = Twist()
@@ -522,6 +528,23 @@ class TelloDriver(Node):
             if toward > allowed:
                 wx, wy = wx + (toward - allowed) * ux, wy + (toward - allowed) * uy
         return wx, wy
+
+    def on_near(self, m):
+        self.near_d, self.near_t = float(m.data), time.time()
+
+    def wall_guard(self, rc):
+        """A marker in view closer than min_wall_distance: no forward motion, back off. Between that and +0.3 m the
+        forward speed shrinks. Independent of the map and of the pose (camera = forward)."""
+        if not self.tello.is_flying or time.time() - self.near_t > 0.4:
+            return rc
+        lr, fb, ud, yw = rc
+        d = self.near_d
+        if d < self.min_wall:
+            fb = min(fb, -12)
+            self.get_logger().warn(f"wall {d:.2f} m ahead (marker size): backing off", throttle_duration_sec=1.0)
+        elif d < self.min_wall + 0.3 and fb > 0:
+            fb = int(fb * (d - self.min_wall) / 0.3)
+        return (lr, fb, ud, yw)
 
     def pose_valid(self, max_age, max_sigma):
         """A pose recent enough and certain enough (the EKF keeps publishing without markers, with a growing
