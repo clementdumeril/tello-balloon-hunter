@@ -51,6 +51,7 @@ def wrap(a):
 class StepTest(Node):
     NODE_NAME = "tello_step_test"
     PREFIX = "step"
+    MOVE_TO_ZONE_CENTRE = True
 
     def __init__(self):
         super().__init__(self.NODE_NAME)
@@ -369,11 +370,11 @@ class StepTest(Node):
         self.p0 = (float(np.median(S[:, 0])), float(np.median(S[:, 1])), float(np.median(S[:, 2])),
                    float(np.median(S[:, 3])))
         zn = self.zone
-        if zn and not (zn["x_min"] + 0.1 <= self.p0[0] <= zn["x_max"] - 0.1 and zn["y_min"] + 0.1 <= self.p0[1] <= zn["y_max"] - 0.1):
-            # the takeoff drifted (or the drone was put a bit off): fly back into the mission rectangle
-            tx = min(max(self.p0[0], zn["x_min"] + 0.2), zn["x_max"] - 0.2)
-            ty = min(max(self.p0[1], zn["y_min"] + 0.2), zn["y_max"] - 0.2)
-            self.say(f"Start point ({self.p0[0]:+.2f}, {self.p0[1]:+.2f}) outside the flight zone: moving to ({tx:+.2f}, {ty:+.2f})")
+        if zn and self.MOVE_TO_ZONE_CENTRE:
+            # the tests need room all around (pulses of ~0.3 m): go to the centre of the mission rectangle, the
+            # most open spot (near an edge the guard brakes the pulses and spoils the measurement)
+            tx, ty = (zn["x_min"] + zn["x_max"]) / 2, (zn["y_min"] + zn["y_max"]) / 2
+            self.say(f"Moving from ({self.p0[0]:+.2f}, {self.p0[1]:+.2f}) to the centre of the flight zone ({tx:+.2f}, {ty:+.2f})")
             self.recentre(timeout=12.0, target=(tx, ty, self.p0[2], self.p0[3]))
             _, x, y, z, yaw = self.pose
             self.p0 = (x, y, z, self.p0[3])
