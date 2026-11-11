@@ -44,9 +44,10 @@ def setup(context):
              parameters=[{"mock": lc("mock") == "true", "camera_info_file": calib,
                           "mock_markers_file": lc("markers"),
                           "takeoff_height": takeoff_height(lc("markers"), lc("takeoff_height")),
-                          "max_height": float(lc("max_height"))}]),
+                          "max_height": float(lc("max_height")), "flight_zone_file": zone_file(lc("flight_zone"))}]),
         Node(package="aruco_localization", executable="marker_map_publisher", output="screen",
-             parameters=[{"markers_file": lc("markers"), "room_mesh": room_mesh(lc("room_mesh"))}]),
+             parameters=[{"markers_file": lc("markers"), "room_mesh": room_mesh(lc("room_mesh")),
+                          "flight_zone_file": zone_file(lc("flight_zone"))}]),
         Node(package="aruco_localization", executable="aruco_localizer", output="screen",
              parameters=[{"markers_file": lc("markers"), "child_frame": "base_link",
                           "debug_every_n": 3, "debug_scale": 0.5}]),
@@ -57,6 +58,16 @@ def setup(context):
         nodes.append(Node(package="rviz2", executable="rviz2", output="log",
                           arguments=["-d", rviz_config_centred_on_markers(os.path.join(share, "config", "real.rviz"), lc("markers"))]))
     return nodes
+
+
+def zone_file(arg):
+    """Obstacle-free flight zone (tools/free_zone.py); 'auto' = config/flight_zone.yaml if it exists, 'none' = off."""
+    if arg == "none":
+        return ""
+    if arg != "auto":
+        return arg
+    p = Path(REPO) / "config" / "flight_zone.yaml"
+    return str(p) if p.exists() else ""
 
 
 def room_mesh(arg):
@@ -116,6 +127,8 @@ def generate_launch_description():
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("record", default_value="true", description="save images, poses, telemetry in ~/tello_ws/sessions"),
         DeclareLaunchArgument("markers", default_value=os.path.join(REPO, "config", "markers.yaml")),
+        DeclareLaunchArgument("flight_zone", default_value="auto",
+                              description="obstacle-free zone YAML; auto = config/flight_zone.yaml; none = no zone"),
         DeclareLaunchArgument("room_mesh", default_value="auto",
                               description="room scan OBJ in the map frame; auto = ~/tello_ws/room_scan/room_map.obj"),
         DeclareLaunchArgument("max_height", default_value="2.6",

@@ -59,6 +59,21 @@ class MarkerMapPublisher(Node):
         self.pub_body.publish(self.body)
         self.create_timer(1.0, lambda: self.pub_body.publish(self.body))
         # the scanned room (tools/room_mesh_to_map.py), shown/hidden with its checkbox in RViz
+        zf = self.declare_parameter("flight_zone_file", "").value
+        if zf:
+            import yaml
+            try:
+                z = yaml.safe_load(open(zf, encoding="utf-8"))
+                self.pub_zone = self.create_publisher(VizMarker, "/room/flight_zone", qos)
+                cx, cy, cz = (z["x_min"] + z["x_max"]) / 2, (z["y_min"] + z["y_max"]) / 2, (z["z_min"] + z["z_max"]) / 2
+                box = viz(TimeMsg(), "map", "flight_zone", 0, VizMarker.CUBE,
+                          (z["x_max"] - z["x_min"], z["y_max"] - z["y_min"], z["z_max"] - z["z_min"]),
+                          (0.2, 0.9, 0.3, 0.18), x=cx, y=cy, z=cz)
+                self.pub_zone.publish(box)
+                self.zone_marker = box
+                self.create_timer(2.0, lambda: self.pub_zone.publish(self.zone_marker))
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().warn(f"flight zone {zf}: {e}")
         mesh = self.declare_parameter("room_mesh", "").value
         if mesh:
             self.pub_room = self.create_publisher(VizMarker, "/room/mesh", qos)

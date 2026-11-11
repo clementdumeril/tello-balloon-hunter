@@ -113,6 +113,18 @@ class FakeTello:
                 "baro": 80.0, "time": 0, "agx": 0.0, "agy": 0.0, "agz": -1000.0}
 
 
+def load_zone(path):
+    """config/flight_zone.yaml -> dict (x_min, x_max, y_min, y_max, z_min, z_max) or None."""
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            z = yaml.safe_load(f)
+        return {k: float(z[k]) for k in ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")}
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ---------------------------------------------------------------- camera info
 def load_camera_info(path, width, height, frame_id):
     info = CameraInfo()
@@ -158,6 +170,12 @@ class TelloDriver(Node):
         # highest allowed height above the floor (m): ceiling 2.80 m in the room, 2.60 m max (user, Nov 9)
         self.max_height = p("max_height", 2.6).value
         self.pose_z, self.pose_t = 0.0, 0.0
+        self.pose_xy, self.pose_yaw = None, 0.0
+        # obstacle-free flight zone from the room scan (tools/free_zone.py): commands that would take the drone
+        # out of it are cut, whatever program sends them (Nov 10: a test drifted 1 m back towards furniture)
+        self.zone = load_zone(p("flight_zone_file", "").value)
+        if self.zone:
+            self.get_logger().info("flight zone x [{x_min:.2f}, {x_max:.2f}] y [{y_min:.2f}, {y_max:.2f}]".format(**self.zone))
         self.climb_target = None  # set after takeoff: send_rc climbs to it with joystick commands
 
         # Refuse to run next to another driver (e.g. a forgotten fake drone): two sources of /tello/image_raw
@@ -183,6 +201,9 @@ class TelloDriver(Node):
         if self.mock:
             # with a marker map, the fake drone renders the markers and flies with the rc commands
             self.tello = FakeTello(p("mock_markers_file", "").value)
+            if self.zone and self.tello.world is not None:  # start where the real one should: zone centre, on the floor
+                self.tello.world.p[0] = (self.zone["x_min"] + self.zone["x_max"]) / 2
+                self.tello.world.p[1] = (self.zone["y_min"] + self.zone["y_max"]) / 2
         else:
             self.wait_for_tello_network(p("network_timeout", 30.0).value)
             import logging
@@ -358,6 +379,7 @@ class TelloDriver(Node):
             else:
                 ud = min(ud, int((limit - h_pred) / self.lin_gain))  # slower and slower towards the limit
             rc = (lr, fb, ud, yw)
+        rc = self.zone_guard(rc)
         try:
             self.tello.send_rc_control(*rc)  # also keeps the link alive (the Tello lands after 15 s of silence)
         except Exception as e:  # noqa: BLE001
@@ -419,7 +441,57 @@ class TelloDriver(Node):
         return None
 
     def on_pose(self, m):
-        self.pose_z, self.pose_t = m.pose.pose.position.z, time.time()
+        p, q = m.pose.pose.position, m.pose.pose.orientation
+        self.pose_z, self.pose_t = p.z, time.time()
+        self.pose_xy = (p.x, p.y)
+        self.pose_yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        now = time.time()
+        self.xy_hist = [(t, xy) for t, xy in getattr(self, "xy_hist", []) if now - t < 0.6] + [(now, (p.x, p.y))]
+
+    def zone_guard(self, rc):
+        """Keep the drone inside the flight zone: like the ceiling guard, on the position predicted 1 s ahead
+        (the drone needs ~1 s to stop). Outward commands shrink near the edge, brake before it, push back in
+        beyond it. Needs a fresh ArUco pose; without one the zone cannot be enforced (the missions hover)."""
+        z = self.zone
+        if not z or not self.tello.is_flying or self.climb_target is not None:
+            return rc
+        if time.time() - self.pose_t > 0.5 or self.pose_xy is None:
+            return rc
+        x, y = self.pose_xy
+        t_old, (x_old, y_old) = self.xy_hist[0]
+        dt = time.time() - t_old
+        vx, vy = ((x - x_old) / dt, (y - y_old) / dt) if dt > 0.2 else (0.0, 0.0)
+        lr, fb, ud, yw = rc
+        c, s = math.cos(self.pose_yaw), math.sin(self.pose_yaw)
+        bx, by = fb * self.lin_gain, -lr * self.lin_gain          # body velocity command
+        wx, wy = c * bx - s * by, s * bx + c * by                 # world
+        m = 0.15
+        hit = []
+        for name, pos, vel, lo, hi in (("x", x, vx, z["x_min"], z["x_max"]), ("y", y, vy, z["y_min"], z["y_max"])):
+            pred = pos + vel * 1.0
+            w = wx if name == "x" else wy
+            if pos > hi:
+                w = min(w, -0.25); hit.append(f"{name}>{hi:.2f}")
+            elif pred > hi - m:
+                w = min(w, -0.15); hit.append(f"{name}->{hi:.2f}")
+            else:
+                w = min(w, (hi - m - pred) * 1.0)
+            if pos < lo:
+                w = max(w, 0.25); hit.append(f"{name}<{lo:.2f}")
+            elif pred < lo + m:
+                w = max(w, 0.15); hit.append(f"{name}->{lo:.2f}")
+            else:
+                w = max(w, (lo + m - pred) * 1.0)
+            if name == "x":
+                wx = w
+            else:
+                wy = w
+        if hit:
+            self.get_logger().warn(f"flight zone: braking/pushing back ({', '.join(hit)}) at ({x:+.2f}, {y:+.2f})",
+                                   throttle_duration_sec=1.0)
+        bx, by = c * wx + s * wy, -s * wx + c * wy
+        clip = lambda v: int(max(-self.max_rc, min(self.max_rc, round(v))))  # noqa: E731
+        return (clip(-by / self.lin_gain), clip(bx / self.lin_gain), ud, yw)
 
     def height_estimate(self):
         """Height above the floor (m): the larger of the distance sensor and a fresh ArUco pose (conservative

@@ -60,6 +60,10 @@ class StepTest(Node):
         self.box = p("box", 0.8).value                  # m, horizontal half-size around the start point
         self.z_min, self.z_max = p("z_min", 0.4).value, p("z_max", 2.4).value
         self.lost_max = p("lost_timeout", 3.0).value
+        zf = p("flight_zone_file", os.path.join(os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter")),
+                                                 "config", "flight_zone.yaml")).value
+        from tello_driver.driver import load_zone
+        self.zone = load_zone(zf)
         self.min_battery = p("min_battery", 30).value
         out = Path(p("out_dir", str(Path.home() / "tello_ws/sessions")).value) / datetime.now().strftime(f"{self.PREFIX}_%Y%m%d_%H%M%S")
         out.mkdir(parents=True, exist_ok=True)
@@ -163,6 +167,9 @@ class StepTest(Node):
             raise Abort(f"battery {bat} %")
         if self.pose and self.p0 is not None and self.pose_age() < 0.5:
             _, x, y, z, _ = self.pose
+            zn = self.zone
+            if zn and not (zn["x_min"] - 0.2 <= x <= zn["x_max"] + 0.2 and zn["y_min"] - 0.2 <= y <= zn["y_max"] + 0.2):
+                raise Abort(f"left the obstacle-free flight zone at ({x:+.2f}, {y:+.2f}) m")
             f = getattr(self, "fence", None)  # (xmin, xmax, ymin, ymax) for missions; else a box around the start
             if f is not None:
                 tol = 0.3
@@ -307,6 +314,12 @@ class StepTest(Node):
         S = np.array(samples)
         self.p0 = (float(np.median(S[:, 0])), float(np.median(S[:, 1])), float(np.median(S[:, 2])),
                    float(np.median(S[:, 3])))
+        zn = self.zone
+        if zn and not (zn["x_min"] <= self.p0[0] <= zn["x_max"] and zn["y_min"] <= self.p0[1] <= zn["y_max"]):
+            cx, cy = (zn["x_min"] + zn["x_max"]) / 2, (zn["y_min"] + zn["y_max"]) / 2
+            raise Abort(f"start point ({self.p0[0]:+.2f}, {self.p0[1]:+.2f}) is outside the obstacle-free zone "
+                        f"x [{zn['x_min']:.2f}, {zn['x_max']:.2f}] y [{zn['y_min']:.2f}, {zn['y_max']:.2f}]: "
+                        f"take off from about ({cx:+.2f}, {cy:+.2f})")
         if not self.z_min + 0.3 <= self.p0[2] <= self.z_max - 0.3:
             raise Abort(f"start height {self.p0[2]:.2f} m too close to the limits [{self.z_min}, {self.z_max}]")
         self.say(f"Start point ({self.p0[0]:+.2f}, {self.p0[1]:+.2f}, {self.p0[2]:.2f}) m, "

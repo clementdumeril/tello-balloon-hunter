@@ -23,6 +23,12 @@ Visualization Manager:
       Topic:
         Value: /room/mesh
         Durability Policy: Transient Local
+    - Class: rviz_default_plugins/Marker
+      Name: Flight zone (no obstacle)
+      Enabled: true
+      Topic:
+        Value: /room/flight_zone
+        Durability Policy: Transient Local
     - Class: rviz_default_plugins/MarkerArray
       Name: ArUco markers
       Enabled: true

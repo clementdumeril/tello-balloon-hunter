@@ -68,6 +68,9 @@ class MarkerTour(StepTest):
                 ymin = max(ymin, m.t[1] + self.margin)
             elif n[1] < -0.9:
                 ymax = min(ymax, m.t[1] - self.margin)
+        if self.zone:  # the obstacle-free zone from the room scan wins
+            xmin, xmax = max(xmin, self.zone["x_min"]), min(xmax, self.zone["x_max"])
+            ymin, ymax = max(ymin, self.zone["y_min"]), min(ymax, self.zone["y_max"])
         if xmin >= xmax or ymin >= ymax:
             raise Abort(f"empty flight zone x [{xmin:.2f}, {xmax:.2f}] y [{ymin:.2f}, {ymax:.2f}]")
         return (xmin, xmax, ymin, ymax)
