@@ -70,6 +70,8 @@ def main():
     ap.add_argument("obj")
     ap.add_argument("--z", type=float, nargs=2, default=[1.4, 2.4], help="flight heights (m)")
     ap.add_argument("--margin", type=float, default=0.35, help="clearance from any obstacle (m)")
+    ap.add_argument("--corridor", type=float, default=0.25,
+                    help="free passages narrower than ~2x this are cut (keeps the drone in the main region)")
     ap.add_argument("--out", default=str(Path(__file__).resolve().parent.parent / "config" / "flight_zone.yaml"))
     a = ap.parse_args()
     V, F = load_obj(a.obj)
@@ -106,6 +108,20 @@ def main():
     i0, i1, j0, j1 = box
     zx0, zx1 = x0 + j0 * CELL, x0 + j1 * CELL
     zy0, zy1 = y0 + i0 * CELL, y0 + i1 * CELL
+    # Keep only the MAIN free region: remove passages narrower than ~2 x --corridor (opening), then the connected
+    # part that contains the mission rectangle. Elsewhere (e.g. the alcove behind a narrow gap, where no marker is
+    # in view) becomes no-fly: its clearance decreases below the margin towards the outside.
+    free = ~blocked
+    rc = int(np.ceil(a.corridor / CELL))
+    k2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rc + 1, 2 * rc + 1))
+    opened = cv2.morphologyEx(free.astype(np.uint8), cv2.MORPH_OPEN, k2)
+    n_lab, lab = cv2.connectedComponents(opened)
+    main = lab == lab[(i0 + i1) // 2, (j0 + j1) // 2]
+    dist_in = cv2.distanceTransform(main.astype(np.uint8), cv2.DIST_L2, 5) * CELL      # inside main: to its edge
+    dist_out = cv2.distanceTransform((~main).astype(np.uint8), cv2.DIST_L2, 5) * CELL  # outside: to main
+    clearance = np.where(main, np.minimum(clearance, a.margin + dist_in),
+                         np.minimum(clearance, np.maximum(0.0, a.margin - dist_out))).astype(np.float32)
+    blocked = ~main
     out = Path(a.out)
     grid = out.with_name(out.stem + "_grid.npz")
     np.savez_compressed(grid, clearance=clearance, x0=x0, y0=y0, cell=CELL, z_lo=z_lo, z_hi=z_hi)
