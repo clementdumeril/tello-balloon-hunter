@@ -19,11 +19,19 @@ def s_profile(r):
 
 
 class Quintic:
-    def __init__(self, p0, p1, v_max=0.8, a_max=1.0, t_min=0.6):
+    def __init__(self, p0, p1, v_max=0.8, a_max=1.0, t_min=0.6, u_max=None, tau=0.55, K=1.15):
+        """u_max: the command the drone can be sent (m/s). With the model feedforward the command is
+        (v + tau a) / K, larger than v during the acceleration: T is stretched until it fits, otherwise the
+        command saturates and the drone falls behind (seen in the simulation: 24 cm of lag)."""
         self.p0, self.p1 = np.asarray(p0, float), np.asarray(p1, float)
         d = float(np.linalg.norm(self.p1 - self.p0))
         self.T = max(t_min, 15.0 / 8.0 * d / v_max, math.sqrt(10.0 / math.sqrt(3.0) * d / a_max)) if d > 1e-3 else t_min
         self.d = d
+        if u_max and d > 1e-3:
+            r = np.linspace(0, 1, 101)
+            ds, dds = 30 * r ** 2 - 60 * r ** 3 + 30 * r ** 4, 60 * r - 180 * r ** 2 + 120 * r ** 3
+            while np.max(np.abs(ds * d / self.T + tau * dds * d / self.T ** 2)) / K > u_max and self.T < 30:
+                self.T *= 1.05
 
     def at(self, t):
         """(position, velocity, acceleration) at time t (clamped to [0, T])."""

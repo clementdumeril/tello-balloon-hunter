@@ -43,6 +43,7 @@ class Strike(StepTest):
         self.targets = [int(v) for v in p("targets", "6,10,5").value.split(",") if v.strip()]
         self.legs = int(p("legs", 4).value)
         self.v_max, self.a_max = p("v_max", 0.8).value, p("a_max", 1.0).value
+        self.u_max = p("u_max", 0.9).value  # command limit used by the planner (driver max_rc 80 ~ 1.0 m/s)
         self.kp, self.kp_z, self.kp_yaw = p("kp", 0.8).value, p("kp_z", 0.8).value, p("kp_yaw", 1.0).value
         # model of the identification flight (Nov 11): K ~1.15, tau 0.55 s; ~0.3 s of the 0.5 s delay is the command
         self.K, self.tau, self.L_u = p("model_K", 1.15).value, p("model_tau", 0.55).value, p("model_L_u", 0.30).value
@@ -126,6 +127,9 @@ class Strike(StepTest):
             return None
         self.run(timeout, step, search_on_loss=False)
 
+    def qkw(self):
+        return {"u_max": self.u_max, "tau": self.tau, "K": self.K}
+
     def here(self):
         """Current position, height brought back inside the limits (a small overshoot above 2.1 m must not make
         every next trajectory 'unsafe')."""
@@ -150,10 +154,10 @@ class Strike(StepTest):
         yaw = self.p0[3]
         self.say(f"Patrol: {self.legs} legs between x {a[0]:+.2f} and {b[0]:+.2f} m (y {yc:+.2f}), "
                  f"v_max {self.v_max} m/s, a_max {self.a_max} m/s2")
-        self.track(Quintic(self.here(), a, 0.4, 0.5), yaw, "patrol-start")
+        self.track(Quintic(self.here(), a, 0.4, 0.5, **self.qkw()), yaw, "patrol-start")
         for k in range(self.legs):
             src, dst = (a, b) if k % 2 == 0 else (b, a)
-            r = self.track(Quintic(self.here(), dst, self.v_max, self.a_max), yaw, f"patrol-{k + 1}")
+            r = self.track(Quintic(self.here(), dst, self.v_max, self.a_max, **self.qkw()), yaw, f"patrol-{k + 1}")
             if r:
                 self.results.append(("patrol", k + 1, r))
                 self.say(f"  leg {k + 1}: {r['dist']:.2f} m in {r['T']:.1f} s planned ({r['elapsed']:.1f} s real), "
@@ -185,13 +189,13 @@ class Strike(StepTest):
             yaw = math.atan2(-n[1], -n[0])
             self.say(f"Strike marker {mid}: get ready at {self.retreat_d:.1f} m, dash to "
                      f"{np.linalg.norm(hit[:2] - m.t[:2]):.2f} m, retreat")
-            self.track(Quintic(self.here(), back, 0.5, 0.6), yaw, f"ready-{mid}")
+            self.track(Quintic(self.here(), back, 0.5, 0.6, **self.qkw()), yaw, f"ready-{mid}")
             self.turn_to(yaw)
             t_dash = time.time()
-            r = self.track(Quintic(self.here(), hit, self.v_max, self.a_max), yaw, f"dash-{mid}", settle=1.0, tol=0.10)
+            r = self.track(Quintic(self.here(), hit, self.v_max, self.a_max, **self.qkw()), yaw, f"dash-{mid}", settle=1.0, tol=0.10)
             closest = self.closest_since(t_dash, m, n)
             self.run(0.3, lambda: self.send())
-            r2 = self.track(Quintic(self.here(), back, self.v_max, self.a_max), yaw, f"retreat-{mid}")
+            r2 = self.track(Quintic(self.here(), back, self.v_max, self.a_max, **self.qkw()), yaw, f"retreat-{mid}")
             if r:
                 r["closest"] = closest
                 r["overshoot"] = max(0.0, (np.linalg.norm(hit[:2] - m.t[:2])) - closest)
@@ -201,7 +205,7 @@ class Strike(StepTest):
                          f"tracking rms {r['rms'] * 100:.0f} cm")
             if r2 is None:
                 break
-        self.track(Quintic(self.here(), home, 0.5, 0.6), self.p0[3], "home")
+        self.track(Quintic(self.here(), home, 0.5, 0.6, **self.qkw()), self.p0[3], "home")
 
     def closest_since(self, t0, m, n):
         """Closest horizontal distance to the marker plane since t0 (from the tracking log of this flight)."""

@@ -189,7 +189,7 @@ class TelloDriver(Node):
         self.frame_id = p("camera_frame", "tello_camera_optical").value
         self.lin_gain = p("lin_gain", 0.38 / 30).value       # m/s per rc point (measured Nov 7)
         self.yaw_gain = p("yaw_gain", math.radians(18) / 30).value  # rad/s per rc point (measured Nov 7)
-        self.max_rc = int(p("max_rc", 60).value)
+        self.max_rc = int(p("max_rc", 80).value)  # ~1.0 m/s; the zone / ceiling / wall guards still apply
         self.cmd_timeout = p("cmd_timeout", 0.5).value
         self.low_battery = p("low_battery", 12).value
         # after the takeoff (~0.8 m), climb to this height (m above the takeoff point, 0 = stay) so that the
