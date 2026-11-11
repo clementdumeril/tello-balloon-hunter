@@ -315,7 +315,9 @@ class TelloDriver(Node):
         if self.info is None or (self.info.width, self.info.height) != (w, h):
             self.info, calibrated = load_camera_info(self.calib_file, w, h, self.frame_id)
             if self.mock and getattr(self.tello, "world", None) is not None:
-                self.tello.world.set_camera(self.info.k, self.info.d)  # render with the same intrinsics
+                # fake camera: ideal lens (the renderer cannot distort inside a marker), the same in camera_info
+                self.info.d = [0.0] * len(self.info.d)
+                self.tello.world.set_camera(self.info.k, self.info.d)
             self.get_logger().info(f"Video {w}x{h}, camera_info: " +
                                    (f"calibration {self.calib_file}" if calibrated else "UNCALIBRATED (ideal pinhole from the FOV)"))
         stamp = self.get_clock().now().to_msg()

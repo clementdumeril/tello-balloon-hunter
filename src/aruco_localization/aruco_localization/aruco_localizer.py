@@ -52,7 +52,10 @@ class ArucoLocalizer(Node):
         super().__init__("aruco_localizer")
         p = self.declare_parameter
         self.cfg, self.markers = load_marker_map(p("markers_file", "").value)
+        # reprojection error limit: strict for one marker (flips), looser for several (a 1 cm map error is already
+        # ~6 px at 1.6 m; a wrong multi-marker pose is tens of px off)
         self.max_reproj = p("max_reprojection_px", 3.0).value
+        self.max_reproj_multi = p("max_reprojection_px_multi", 8.0).value
         self.debug_every = p("debug_every_n", 5).value
         self.debug_scale = p("debug_scale", 1.0).value  # < 1 shrinks the debug image (lighter for RViz)
         self.debug_dir = p("debug_dir", "").value
@@ -141,7 +144,8 @@ class ArucoLocalizer(Node):
                 T_map_cam[:3, 3] = (-R_cm.T @ tvec).ravel()
                 T_map_base = T_map_cam @ np.linalg.inv(self.T_base_cam)
                 dist = float(np.mean(np.linalg.norm(obj_pts - T_map_cam[:3, 3], axis=1)))
-                ok = err <= self.max_reproj and self.plausible(T_map_base[:3, 3], len(used))
+                lim = self.max_reproj if len(used) == 1 else self.max_reproj_multi
+                ok = err <= lim and self.plausible(T_map_base[:3, 3], len(used))
         if ok:
             self._last_cam = (self.get_clock().now().nanoseconds * 1e-9, T_map_cam[:3, 3].copy())
             self.publish(msg.header.stamp, T_map_base, err, dist, len(used))
