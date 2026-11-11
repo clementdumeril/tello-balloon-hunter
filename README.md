@@ -77,6 +77,7 @@ No extensions on any project deadline. Full schedule: [docs/PLAN.md](docs/PLAN.m
 | Document | What's inside |
 |---|---|
 | [ROS graph + simulated flight](https://claude.ai/artifact/L9Mz7RZQoL94jwAVUmNYeQ) | Interactive ROS 2 graph (nodes, topics, TF), code of every node, video of the simulated test flight (ask Clément for access) |
+| **[docs/SYSTEM.md](docs/SYSTEM.md)** | **How the system works today**: pipeline diagram, every ROS 2 node, topic, frame, safety layer, model, tool and program, in tables |
 | [STATUS.md](STATUS.md) | Live progress per milestone and workstream, who is doing what (auto-generated) |
 | [docs/PLAN.md](docs/PLAN.md) | Full work plan: workstreams, every task with its definition of done, timeline, critical path, roles, risks |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | TF tree, ROS 2 nodes and topics, EKF design (state, models), controller, mission state machine |
