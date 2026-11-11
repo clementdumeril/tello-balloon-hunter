@@ -451,12 +451,17 @@ class TelloDriver(Node):
     def zone_guard(self, rc):
         """Keep the drone inside the flight zone: like the ceiling guard, on the position predicted 1 s ahead
         (the drone needs ~1 s to stop). Outward commands shrink near the edge, brake before it, push back in
-        beyond it. Needs a fresh ArUco pose; without one the zone cannot be enforced (the missions hover)."""
+        beyond it. Needs a fresh ArUco pose; without one, horizontal moves are blocked."""
         z = self.zone
         if not z or not self.tello.is_flying or self.climb_target is not None:
             return rc
         if time.time() - self.pose_t > 0.5 or self.pose_xy is None:
-            return rc
+            # position unknown: the zone cannot be enforced, so no horizontal move at all (turning and up/down stay
+            # allowed, to find the markers again). Without this the drone flew blind through the wall (sim, Nov 10).
+            if rc[0] or rc[1]:
+                self.get_logger().warn("no marker pose: horizontal moves blocked (turn to see the markers)",
+                                       throttle_duration_sec=2.0)
+            return (0, 0, rc[2], rc[3])
         x, y = self.pose_xy
         t_old, (x_old, y_old) = self.xy_hist[0]
         dt = time.time() - t_old
