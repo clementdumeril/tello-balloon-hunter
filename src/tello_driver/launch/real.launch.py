@@ -48,8 +48,10 @@ def setup(context):
         Node(package="aruco_localization", executable="marker_map_publisher", output="screen",
              parameters=[{"markers_file": lc("markers"), "room_mesh": room_mesh(lc("room_mesh")),
                           "flight_zone_file": zone_file(lc("flight_zone"))}]),
+        # the EKF owns base_link (smooth, predicted between detections); the raw ArUco pose is base_link_aruco
+        Node(package="tello_driver", executable="tello_ekf", output="screen"),
         Node(package="aruco_localization", executable="aruco_localizer", output="screen",
-             parameters=[{"markers_file": lc("markers"), "child_frame": "base_link",
+             parameters=[{"markers_file": lc("markers"), "child_frame": "base_link_aruco",
                           "debug_every_n": 3, "debug_scale": 0.5}]),
     ]
     if lc("record") == "true":

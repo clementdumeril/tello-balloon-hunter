@@ -15,8 +15,11 @@ from aruco_localization.marker_map import aruco_dictionary, load_marker_map
 
 LIN_GAIN = 0.38 / 30              # m/s per rc point (measured on the real Tello, Nov 7)
 YAW_GAIN = math.radians(18) / 30  # rad/s per rc point
-TAU = 0.8                         # s, velocity response time constant
-DELAY = 0.10                      # s, command -> motion delay (radio + flight controller)
+# Real Tello, identification flight of Nov 11 (step_20261111_010806): K 1.25 / 1.09, tau 0.55 s, total delay
+# command -> ArUco pose 0.48-0.52 s. The fake splits it: DELAY on the command, the rest is the image pipeline.
+TAU = 0.55                        # s, velocity response time constant
+K_XY = 1.15                       # real speed / commanded speed (horizontal)
+DELAY = 0.35                      # s, command -> motion delay (radio + flight controller)
 CAM_OFFSET = np.array([0.05, 0.0, 0.0])
 R_BASE_CAM = np.column_stack([[0, -1, 0], [0, 0, -1], [1, 0, 0]]).astype(float)  # optical frame in body frame
 
@@ -78,7 +81,7 @@ class FakeWorld:
             self.rc_queue.pop(0)
         rc = self.rc_queue[0][1] if self.rc_queue[0][0] <= now - DELAY else (0, 0, 0, 0)
         lr, fb, ud, yw = rc if self.flying else (0, 0, 0, 0)
-        v_target = np.array([fb, -lr, ud], float) * LIN_GAIN
+        v_target = np.array([fb * K_XY, -lr * K_XY, ud], float) * LIN_GAIN
         a = min(1.0, dt / TAU)
         self.v += (v_target - self.v) * a
         if self.z_target is not None:

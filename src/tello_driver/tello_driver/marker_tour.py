@@ -33,6 +33,7 @@ class MarkerTour(StepTest):
     NODE_NAME = "tello_marker_tour"
     PREFIX = "tour"
     MOVE_TO_ZONE_CENTRE = False  # the tour moves by itself
+    POSE_TOPIC = "/ekf/pose"     # smooth, delay-compensated, predicted for a few seconds without markers
 
     def __init__(self):
         super().__init__()

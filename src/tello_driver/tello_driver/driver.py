@@ -228,8 +228,13 @@ class TelloDriver(Node):
         self.pub_img = self.create_publisher(Image, "/tello/image_raw", 5)
         self.pub_info = self.create_publisher(CameraInfo, "/tello/camera_info", 5)
         self.pub_tel = self.create_publisher(String, "/tello/telemetry", 10)
+        # the command really sent (after hold / guards), in m/s and rad/s, body frame: the EKF's input
+        self.pub_sent = self.create_publisher(Twist, "/tello/rc_sent", 10)
         self.create_subscription(Twist, "/tello/cmd_vel_safe", self.on_cmd, 10)
-        self.create_subscription(PoseWithCovarianceStamped, "/aruco/pose", self.on_pose, 10)
+        # pose used by the hold and the guards: the EKF (smooth, predicted between detections, delay compensated)
+        # or the raw ArUco pose; trusted while its uncertainty is small
+        self.pose_sigma = 1.0
+        self.create_subscription(PoseWithCovarianceStamped, p("pose_topic", "/ekf/pose").value, self.on_pose, 10)
         self.create_service(Trigger, "~/takeoff", self.srv_takeoff)
         self.create_service(Trigger, "~/land", self.srv_land)
         self.create_service(Trigger, "~/emergency", self.srv_emergency)
@@ -427,6 +432,10 @@ class TelloDriver(Node):
         rc = self.zone_guard(rc)
         try:
             self.tello.send_rc_control(*rc)  # also keeps the link alive (the Tello lands after 15 s of silence)
+            t = Twist()
+            t.linear.x, t.linear.y, t.linear.z = rc[1] * self.lin_gain, -rc[0] * self.lin_gain, rc[2] * self.lin_gain
+            t.angular.z = -rc[3] * self.yaw_gain
+            self.pub_sent.publish(t)
         except Exception as e:  # noqa: BLE001
             self.get_logger().warn(f"rc failed: {e}", throttle_duration_sec=2.0)
 
@@ -514,8 +523,14 @@ class TelloDriver(Node):
                 wx, wy = wx + (toward - allowed) * ux, wy + (toward - allowed) * uy
         return wx, wy
 
+    def pose_valid(self, max_age, max_sigma):
+        """A pose recent enough and certain enough (the EKF keeps publishing without markers, with a growing
+        uncertainty: beyond max_sigma it is not trusted)."""
+        return (self.pose_xy is not None and time.time() - self.pose_t < max_age and self.pose_sigma < max_sigma)
+
     def on_pose(self, m):
         p, q = m.pose.pose.position, m.pose.pose.orientation
+        self.pose_sigma = math.sqrt(max(m.pose.covariance[0], m.pose.covariance[7], 0.0))
         self.pose_z, self.pose_t = p.z, time.time()
         self.pose_xy = (p.x, p.y)
         self.pose_yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
@@ -543,7 +558,7 @@ class TelloDriver(Node):
             self.hold_target = None  # the pilot / the mission is moving the drone
             self.hold_i = [0.0, 0.0]
             return rc
-        if time.time() - self.pose_t > 0.4 or self.pose_xy is None:
+        if not self.pose_valid(0.4, 0.12):
             return rc
         x, y = self.pose_xy
         if self.hold_target is None:
@@ -571,7 +586,7 @@ class TelloDriver(Node):
         z = self.zone
         if not z or not self.tello.is_flying or self.climb_target is not None:
             return rc
-        if time.time() - self.pose_t > 0.5 or self.pose_xy is None:
+        if not self.pose_valid(0.5, 0.25):
             # position unknown: the zone cannot be enforced, so no horizontal move at all (turning and up/down stay
             # allowed, to find the markers again). Without this the drone flew blind through the wall (sim, Nov 10).
             if rc[0] or rc[1]:
@@ -624,7 +639,7 @@ class TelloDriver(Node):
         tof = self.state.get("tof")
         if isinstance(tof, (int, float)) and 15 <= tof <= 400:
             c.append(tof / 100.0)
-        if time.time() - self.pose_t < 0.5:
+        if self.pose_valid(0.5, 0.15):
             c.append(self.pose_z)
         return max(c) if c else None
 

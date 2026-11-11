@@ -55,10 +55,10 @@ Visualization Manager:
       Topic:
         Value: /aruco/sight_lines
     - Class: rviz_default_plugins/Path
-      Name: Drone trajectory
+      Name: Drone trajectory (EKF)
       Enabled: true
       Topic:
-        Value: /aruco/path
+        Value: /ekf/path
       Color: 255; 170; 0
       Line Style: Billboards
       Line Width: 0.02

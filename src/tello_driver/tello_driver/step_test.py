@@ -52,6 +52,7 @@ class StepTest(Node):
     NODE_NAME = "tello_step_test"
     PREFIX = "step"
     MOVE_TO_ZONE_CENTRE = True
+    POSE_TOPIC = "/aruco/pose"
 
     def __init__(self):
         super().__init__(self.NODE_NAME)
@@ -78,7 +79,9 @@ class StepTest(Node):
 
         self.pub = self.create_publisher(Twist, "/tello/cmd_vel_safe", 10)
         self.cli = {n: self.create_client(Trigger, f"/tello_driver/{n}") for n in ("takeoff", "land")}
-        self.create_subscription(PoseWithCovarianceStamped, "/aruco/pose", self.on_pose, 50)
+        # identification: the raw ArUco pose (the EKF uses the model being identified); missions: the EKF
+        self.max_sigma = p("max_pose_sigma", 0.15).value
+        self.create_subscription(PoseWithCovarianceStamped, p("pose_topic", self.POSE_TOPIC).value, self.on_pose, 50)
         self.create_subscription(String, "/tello/telemetry", self.on_tel, 10)
         self.create_subscription(CameraInfo, "/tello/camera_info", self.on_video, 2)
         self.video_t = 0.0
@@ -98,6 +101,8 @@ class StepTest(Node):
     # ---------------------------------------------------------------- inputs
     def on_pose(self, m):
         p, q = m.pose.pose.position, m.pose.pose.orientation
+        if math.sqrt(max(m.pose.covariance[0], m.pose.covariance[7], 0.0)) > self.max_sigma:
+            return  # too uncertain (EKF without markers for a while): treated like no pose
         yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
         now = time.time()
         self.pose = (now, p.x, p.y, p.z, yaw)
