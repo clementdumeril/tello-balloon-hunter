@@ -33,8 +33,9 @@ def wrap(a):
 
 
 class DroneEKF:
-    def __init__(self, K_xy=1.15, tau_xy=0.55, K_z=0.9, tau_z=0.45, K_w=1.0, L_u=0.25, L_v=0.25,
-                 accel_noise=0.6, yaw_rate_noise=0.15, drift_noise=0.03, history_s=1.5):
+    # defaults: identification flight + EKF replay of the real flights of Nov 11 (tools/ekf_replay.py)
+    def __init__(self, K_xy=1.15, tau_xy=0.40, K_z=0.9, tau_z=0.45, K_w=1.0, L_u=0.25, L_v=0.25,
+                 accel_noise=0.6, yaw_rate_noise=0.15, drift_noise=0.01, history_s=1.5):
         self.K_xy, self.tau_xy, self.K_z, self.tau_z, self.K_w = K_xy, tau_xy, K_z, tau_z, K_w
         self.L_u, self.L_v = L_u, L_v
         self.qa, self.qw, self.qd = accel_noise, yaw_rate_noise, drift_noise

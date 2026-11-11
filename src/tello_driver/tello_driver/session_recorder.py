@@ -16,7 +16,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
@@ -42,6 +42,18 @@ class SessionRecorder(Node):
         self.create_subscription(Image, "/aruco/debug_image", self.on_img, 1)
         self.create_subscription(PoseWithCovarianceStamped, "/aruco/pose", self.on_pose, 20)
         self.create_subscription(String, "/tello/telemetry", self.on_tel, 10)
+        # for EKF replays: the commands really sent and the EKF estimate
+        self.sent_f = open(self.out / "rc_sent.csv", "w", newline="")
+        self.sent_w = csv.writer(self.sent_f)
+        self.sent_w.writerow(["t", "cx", "cy", "cz", "cw"])
+        self.create_subscription(Twist, "/tello/rc_sent", lambda m: self.sent_w.writerow(
+            [f"{time.time():.4f}", f"{m.linear.x:.3f}", f"{m.linear.y:.3f}", f"{m.linear.z:.3f}", f"{m.angular.z:.3f}"]), 50)
+        self.ekf_f = open(self.out / "ekf.csv", "w", newline="")
+        self.ekf_w = csv.writer(self.ekf_f)
+        self.ekf_w.writerow(["t", "x", "y", "z", "sigma_xy"])
+        self.create_subscription(PoseWithCovarianceStamped, "/ekf/pose", lambda m: self.ekf_w.writerow(
+            [f"{time.time():.4f}", f"{m.pose.pose.position.x:.4f}", f"{m.pose.pose.position.y:.4f}",
+             f"{m.pose.pose.position.z:.4f}", f"{max(m.pose.covariance[0], m.pose.covariance[7]) ** 0.5:.4f}"]), 50)
         self.get_logger().info(f"Recording the session in {self.out}")
 
     def on_img(self, m):
@@ -91,6 +103,8 @@ class SessionRecorder(Node):
         (self.out / "summary.json").write_text(json.dumps(s, indent=1))
         self.pose_f.close()
         self.tel_f.close()
+        self.sent_f.close()
+        self.ekf_f.close()
 
 
 def main():
