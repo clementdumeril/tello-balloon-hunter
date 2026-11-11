@@ -74,6 +74,22 @@ loads `~/tello_ws/room_scan/room_map.obj`, made from a Scaniverse OBJ + its mark
 its distance sensor and the ArUco pose. Ceiling guard for every program: `max_height` 2.6 m (launch argument), it
 brakes ahead of the limit and descends if above it.
 
+## Strike mission (planned trajectories: the balloon attack rehearsed on markers)
+
+```bash
+ros2 run tello_driver tello_strike                                  # patrol legs, then strikes on markers 6, 10, 5
+ros2 run tello_driver tello_strike --ros-args -p mode:=strike -p targets:=10,5 -p v_max:=0.6
+```
+
+Minimum-jerk trajectories planned with v_max / a_max, the command limit and checked against the free space of the
+room scan before flying; tracked with the identified model as feedforward, u = (v_d + tau a_d) / K taken
+L_u = 0.3 s ahead, plus PI feedback on the EKF. Simulation (fake drone with the real dynamics, drift and 0.5 s
+delay): patrol legs of 1.6 m in 3.8 s with 4-6 cm rms tracking error; 0.7 m strike dashes in ~2 s, no
+overshoot. Results in `~/tello_ws/sessions/strike_<time>/results.csv` and `tracking.csv`.
+
+Fast identification (larger, shorter pulses, in the free space):
+`ros2 run tello_driver tello_step_test --ros-args -p amplitude:=0.6 -p duration:=0.8 -p axes:=y,x`
+
 ## Marker tour (first autonomous mission)
 
 Same start as the identification flight (drone on the floor, 2 m from the marker wall, facing it, no teleop):
