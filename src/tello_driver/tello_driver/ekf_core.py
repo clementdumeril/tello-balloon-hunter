@@ -33,8 +33,9 @@ def wrap(a):
 
 
 class DroneEKF:
-    # defaults: identification flight + EKF replay of the real flights of Nov 11 (tools/ekf_replay.py)
-    def __init__(self, K_xy=1.15, tau_xy=0.40, K_z=0.9, tau_z=0.45, K_w=1.0, L_u=0.25, L_v=0.25,
+    # defaults: identification flight of Nov 11 (tau 0.55 s, total delay 0.5 s = 0.30 command + 0.20 video).
+    # tau 0.40 fitted the near-hover replays better but made the estimate run ~0.25 s AHEAD of the drone at speed.
+    def __init__(self, K_xy=1.15, tau_xy=0.55, K_z=0.9, tau_z=0.45, K_w=1.0, L_u=0.30, L_v=0.20,
                  accel_noise=0.6, yaw_rate_noise=0.15, drift_noise=0.01, history_s=1.5):
         self.K_xy, self.tau_xy, self.K_z, self.tau_z, self.K_w = K_xy, tau_xy, K_z, tau_z, K_w
         self.L_u, self.L_v = L_u, L_v
