@@ -18,7 +18,11 @@ from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 REPO = os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter"))
-LOCAL_ROS_ENV = {"ROS_AUTOMATIC_DISCOVERY_RANGE": "LOCALHOST", "FASTDDS_BUILTIN_TRANSPORTS": "LARGE_DATA"}
+LOCAL_ROS_ENV = {"ROS_AUTOMATIC_DISCOVERY_RANGE": "LOCALHOST", "FASTDDS_BUILTIN_TRANSPORTS": "LARGE_DATA",
+                 # UDP on 127.0.0.1 only, packets <= 1400 bytes: WSL mirrored networking drops fragmented UDP on
+                 # the loopback, and with Tailscale up no node could see the others (Nov 10)
+                 "FASTRTPS_DEFAULT_PROFILES_FILE": os.path.join(get_package_share_directory("tello_driver"),
+                                                                "config", "fastdds_local.xml")}
 
 
 def setup(context):

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- All ROS 2 nodes on this PC: shared memory for data, UDP on 127.0.0.1 only, packets <= 1400 bytes.
+     WSL mirrored networking drops fragmented UDP (> ~1500 bytes) on the loopback, and with Tailscale the
+     discovery messages grew past that (Nov 10): no node could see the others. -->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udp_lo</transport_id>
+      <type>UDPv4</type>
+      <maxMessageSize>1400</maxMessageSize>
+      <interfaceWhiteList><address>127.0.0.1</address></interfaceWhiteList>
+    </transport_descriptor>
+    <transport_descriptor>
+      <transport_id>shm</transport_id>
+      <type>SHM</type>
+      <segment_size>16777216</segment_size>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="local_only" is_default_profile="true">
+    <rtps>
+      <userTransports><transport_id>shm</transport_id><transport_id>udp_lo</transport_id></userTransports>
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <builtin>
+        <metatrafficUnicastLocatorList><locator><udpv4><address>127.0.0.1</address></udpv4></locator></metatrafficUnicastLocatorList>
+        <initialPeersList><locator><udpv4><address>127.0.0.1</address></udpv4></locator></initialPeersList>
+      </builtin>
+    </rtps>
+  </participant>
+</profiles>

@@ -336,6 +336,8 @@ def main():
 def run(cls, fit_after=False):
     os.environ.setdefault("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST")
     os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "LARGE_DATA")
+    from tello_driver.ros_env import local_ros_env
+    local_ros_env()  # + the Fast DDS profile (loopback only, small packets)
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)  # Ctrl+C must still be able to land
     node = cls()
     old = termios.tcgetattr(sys.stdin)

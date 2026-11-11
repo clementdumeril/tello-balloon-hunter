@@ -196,6 +196,8 @@ def main():
     # same local-only ROS 2 settings as real.launch.py, or the teleop cannot see the driver on the Tello Wi-Fi
     os.environ.setdefault("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST")
     os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "LARGE_DATA")
+    from tello_driver.ros_env import local_ros_env
+    local_ros_env()  # + the Fast DDS profile (loopback only, small packets)
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)  # Ctrl+C must still be able to land
     signal.signal(signal.SIGINT, on_sigint)
     root = tk.Tk()
