@@ -30,3 +30,6 @@ Thumbs.db
 
 # Flight logs from scripts/first_flight.py
 logs/
+
+# takeoff pad learnt from the flights (tools/set_home.py): local to the flying machine
+config/home.yaml

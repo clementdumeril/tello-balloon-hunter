@@ -59,7 +59,12 @@ class FakeWorld:
         self.K, self.D = np.asarray(K, float).reshape(3, 3), np.asarray(D, float).ravel()
 
     def start_pose(self):
-        """On the floor, 2 m in front of the wall that holds the most markers, facing it (like a real start)."""
+        """On the floor, 2 m in front of the wall that holds the most markers, facing it (like a real start).
+        FAKE_START=x,y,yaw_deg: start there instead (e.g. on the takeoff pad)."""
+        st = os.environ.get("FAKE_START")
+        if st:
+            x, y, yaw = (float(v) for v in st.split(","))
+            return np.array([x, y, 0.0]), math.radians(yaw)
         groups = {}
         for m in self.markers.values():
             groups.setdefault(round(math.degrees(math.atan2(m.R[1, 2], m.R[0, 2])) / 45), []).append(m)

@@ -264,6 +264,7 @@ class MarkerTour(StepTest):
             self.goto(w["p"], w["yaw"], look_at=(m.t[0], m.t[1]), tol=0.15)
         self.say("Back to the start point")
         self.goto((x0, y0, max(z0, self.z_lo)), yaw0)
+        self.return_home()
         self.say("Tour done: landing.")
 
 

@@ -32,6 +32,12 @@ class EkfNode(Node):
                             tau_z=p("tau_z", 0.45).value, L_u=p("L_u", 0.30).value, L_v=p("L_v", 0.20).value,
                             accel_noise=p("accel_noise", 0.6).value, drift_noise=p("drift_noise", 0.01).value)
         self.child = p("child_frame", "base_link").value
+        from tello_driver.home import HOME_FILE, load_home
+        self.home = load_home(p("home_file", HOME_FILE).value)  # takeoff pad: the filter starts there
+        self.home_used = False
+        if self.home:
+            self.get_logger().info(f"takeoff pad (marker {self.home['marker']}) at ({self.home['x']:+.2f}, "
+                                   f"{self.home['y']:+.2f}), heading {self.home['yaw_deg']:.0f} deg: the EKF starts there")
         self.pub_pose = self.create_publisher(PoseWithCovarianceStamped, "/ekf/pose", 10)
         self.pub_vel = self.create_publisher(TwistStamped, "/ekf/velocity", 10)
         self.pub_path = self.create_publisher(PathMsg, "/ekf/path", 2)
@@ -68,6 +74,10 @@ class EkfNode(Node):
             st = json.loads(m.data)
         except ValueError:
             return
+        if self.home and not self.home_used and not self.ekf.initialised and not st.get("flying"):
+            # on the floor, on the pad, no marker seen yet: start from the pad
+            self.home_used = True
+            self.ekf.init_at(self.now(), self.home["x"], self.home["y"], 0.0, math.radians(self.home["yaw_deg"]))
         self.ekf.predict(self.now())
         tof = st.get("tof")
         if isinstance(tof, (int, float)) and 15 <= tof <= 400 and st.get("flying"):

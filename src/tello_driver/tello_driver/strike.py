@@ -228,6 +228,7 @@ class Strike(StepTest):
         if "strike" in self.mode:
             self.strike()
         self.summary()
+        self.return_home()
         self.say("Done: landing.")
 
     def summary(self):

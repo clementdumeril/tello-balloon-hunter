@@ -123,6 +123,17 @@ class DroneEKF:
         P = (np.eye(NX) - K @ H) @ P
         return s, 0.5 * (P + P.T), float(y @ np.linalg.solve(S, y))
 
+    def init_at(self, t, x, y, z, yaw, sigma_p=0.10, sigma_yaw=math.radians(15)):
+        """Start from a known spot (the takeoff pad) before any marker is seen. A wrong spot (drone not on the
+        pad) is corrected by the markers: their poses are gated, then the filter restarts from them."""
+        self.s[:] = 0.0
+        self.s[[IX, IY, IZ, IYAW]] = x, y, z, yaw
+        self.P = np.diag([sigma_p ** 2] * 2 + [0.05 ** 2] + [0.1 ** 2] * 3 + [sigma_yaw ** 2, 1.0] + [0.08 ** 2] * 2)
+        self.t = t
+        self.hist.clear()
+        self.initialised = True
+        self.b_init = False
+
     def update_pose(self, t_recv, pose, sigma_p, sigma_yaw, gate=16.3):
         """ArUco pose (x, y, z, yaw) received at t_recv, image taken L_v earlier."""
         pose = np.asarray(pose, float)

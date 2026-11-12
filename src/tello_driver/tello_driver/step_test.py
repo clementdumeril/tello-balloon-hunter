@@ -84,6 +84,8 @@ class StepTest(Node):
             # abort limits: the band +-0.3 m (an identification pulse or a braking overshoot may leave it briefly)
             self.z_min, self.z_max = self.band_z[0] - 0.3, self.band_z[1] + 0.3
         self.min_battery = p("min_battery", 30).value
+        from tello_driver.home import HOME_FILE
+        p("home_file", HOME_FILE)
         out = Path(p("out_dir", str(Path.home() / "tello_ws/sessions")).value) / datetime.now().strftime(f"{self.PREFIX}_%Y%m%d_%H%M%S")
         out.mkdir(parents=True, exist_ok=True)
         self.out = out
@@ -285,6 +287,25 @@ class StepTest(Node):
         self.run(timeout, step)
         self.run(1.0, lambda: self.send())
 
+    def return_home(self):
+        """Fly back above the takeoff pad (config/home.yaml) at the current height, so that the landing ends on
+        it. Skipped when the pad is unknown, or not in the free space at this height."""
+        from tello_driver.home import HOME_FILE, load_home
+        h = load_home(self.get_parameter("home_file").value)
+        if h is None or self.pose_age() > 0.5:
+            self.recentre()
+            return
+        if self.zone and "grid" in self.zone:
+            from tello_driver.driver import clearance
+            c = clearance(self.zone, h["x"], h["y"])
+            if c is not None and c[0] < self.zone["margin"]:
+                self.say(f"pad ({h['x']:+.2f}, {h['y']:+.2f}) too close to an obstacle at this height: landing here")
+                self.recentre()
+                return
+        _, x, y, z, yaw = self.pose
+        self.say(f"Back above the takeoff pad (marker {h['marker']}) at ({h['x']:+.2f}, {h['y']:+.2f})")
+        self.recentre(timeout=15.0, target=(h["x"], h["y"], z, self.p0[3]))
+
     def hold_cmd(self):
         """Body-frame command that pulls the drone back to its start point (the Tello drifts ~10 cm/s on its
         own: 37 cm in 4 s of 'hover' on Nov 10, and the test left its box)."""
@@ -422,7 +443,7 @@ class StepTest(Node):
                         seg += 1
                         self.say("  markers lost during the test: searching, then repeating it")
                         self.search_until_found(self.p0[3])
-        self.recentre()
+        self.return_home()
         self.say("Done: landing.")
 
     def close(self):

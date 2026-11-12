@@ -150,6 +150,27 @@ def main():
             say(f"Height band       {inside:5.1f} % of the time in [{a.band[0]:.2f}, {a.band[1]:.2f}] m (+-5 cm), "
                 f"z {np.min(ez):.2f}-{np.max(ez):.2f} m")
             verdict.append(("in the band >= 95 %", inside >= 95))
+    # ---- takeoff pad (config/home.yaml): did the flight start and end on it?
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from set_home import HOME, landing_point, takeoff_point  # noqa: E402
+    try:
+        import yaml
+        h = yaml.safe_load(open(HOME, encoding="utf-8")) or {}
+    except OSError:
+        h = {}
+    tp, lp = takeoff_point(ses), landing_point(ses)
+    if h.get("x") is not None:
+        hx, hy = float(h["x"]), float(h["y"])
+        if tp:
+            say(f"Takeoff           {np.hypot(tp[0] - hx, tp[1] - hy) * 100:4.0f} cm from the pad, heading "
+                f"{tp[2]:.0f} deg (pad {float(h.get('yaw_deg', 0)):.0f})")
+        if lp:
+            d = np.hypot(lp[0] - hx, lp[1] - hy)
+            say(f"Landing           {d * 100:4.0f} cm from the pad")
+            verdict.append(("landed on the pad (< 15 cm)", d < 0.15))
+    elif tp:
+        say(f"Takeoff point     ({tp[0]:+.2f}, {tp[1]:+.2f}), heading {tp[2]:.0f} deg: pad not learnt yet "
+            "(python3 tools/set_home.py)")
     # ---- missions in this session: tracking error
     for m in sorted(p for p in SESSIONS.glob("*_2*") if p.is_dir()):
         ft = folder_time(m)
