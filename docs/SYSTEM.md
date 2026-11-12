@@ -130,6 +130,7 @@ command limit, checked against the free space before flying; tracked with the mo
 | `config/tello_camera.yaml` | `scripts/calibrate_camera.py` | Camera intrinsics and distortion |
 | `config/flight_zone.yaml` + `_grid.npz` + `.png` | `tools/free_zone.py` (room scan) | Mission rectangle and free-space grid (distance to obstacles), heights 1.4–2.4 m |
 | `config/flight_zone_band.yaml` + `_grid.npz` + `.png` | `tools/free_zone.py --z 1.7 2.0` | Same for the band mode (1.70–2.00 m) |
+| `config/home.yaml` (local, not in git) | `tools/set_home.py` (learnt from the climbs of real flights) | Takeoff pad (marker 48 on the floor): position and heading. The EKF starts there; the missions fly back above it and land on it |
 | `src/tello_driver/config/fastdds_local.xml` | — | ROS 2 transport: loopback only, packets ≤ 1400 B (WSL mirrored networking drops larger UDP packets) |
 | `src/tello_driver/config/real.rviz` | — | RViz layout |
 
@@ -147,6 +148,7 @@ command limit, checked against the free space before flying; tracked with the mo
 | `tools/video_latency_bench.py` | Video reader latency bench on a fake H.264 Tello stream (no drone): decoding on the PC costs ~45-50 ms; the main latency is in the drone and the Wi-Fi |
 | `tools/ekf_replay.py` | Replays a recorded flight through the EKF with markers hidden: dead-reckoning error |
 | `tools/align_scan.py` | Aligns the phone scan on the marker map from the markers found in its texture (scale, residual per marker) |
+| `tools/set_home.py` | Learns the takeoff pad from the first marker poses of each climb (median over the flights) |
 | `tools/flight_report.py` | After a flight: markers in view, pose jumps, ArUco height vs distance sensor, time in the band, mission tracking error; `report.txt` + `report.png` in the session |
 
 ## Simulation
