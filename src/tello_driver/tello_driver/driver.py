@@ -761,9 +761,10 @@ class TelloDriver(Node):
         to 0.17 m, among the furniture). Only on a certain EKF height: the distance sensor alone reads low over
         the furniture and would push the drone up for nothing."""
         z = self.zone
-        # markers in view only (certain horizontal pose too): a dead-reckoned height pushed the drone to 2.6 m (sim)
-        if (not z or not self.tello.is_flying or self.climb_target is not None or not self.pose_valid(0.5, 0.12)
-                or self.pose_sigma_z > 0.10):
+        # only on a certain height (the EKF height is uncertain again after the takeoff jump: a wrong one pushed
+        # the drone to 2.6 m in the sim before that fix); markers not required (blind descents went below 1.2 m)
+        if (not z or not self.tello.is_flying or self.climb_target is not None or self.pose_xy is None
+                or time.time() - self.pose_t > 0.5 or self.pose_sigma_z > 0.10):
             return rc
         lr, fb, ud, yw = rc
         h = self.pose_z
@@ -846,7 +847,9 @@ class TelloDriver(Node):
             c.append(tof / 100.0)
         # the EKF height as long as IT is certain, even when the horizontal position is not (blind over the bed the
         # sensor reads low and the drone climbed to 2.67 m: stress test seed 113)
-        if self.pose_xy is not None and time.time() - self.pose_t < 0.5 and self.pose_sigma_z < 0.15:
+        # (the max of both: conservative for the ceiling; 0.5 m because the EKF height variance grows while the
+        # sensor is gated out over furniture, and the sensor then reads low: stress test seed 203 reached 2.67 m)
+        if self.pose_xy is not None and time.time() - self.pose_t < 0.5 and self.pose_sigma_z < 0.5:
             c.append(self.pose_z)
         return max(c) if c else None
 
