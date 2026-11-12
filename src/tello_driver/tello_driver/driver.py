@@ -18,7 +18,7 @@ import time
 import numpy as np
 import rclpy
 import yaml
-from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist, TwistStamped, Vector3Stamped
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
@@ -210,11 +210,24 @@ class TelloDriver(Node):
         # position hold: when no horizontal move is commanded, hold the position (and heading) with a PI loop on
         # the ArUco pose. The Tello's own optical-flow hold does not work in this room (vgx = vgy = 0 while it
         # drifted 0.4 m in 8 s, Nov 11: dim light / plain floor).
+        # v2 (Nov 11, flight 221322: the old PI, kp 0.6, swung 30-50 cm after each key release and let the height
+        # wander 1.60-1.85 m): position predicted L_u ahead (the command acts 0.3 s later), desired velocity
+        # kp * error, model inversion u = (v_d - drift + kv (v_d - v)) / K with the EKF velocity and drift, and a
+        # small integral for the model errors. Offline sim on the identified model: 0.3 cm overshoot instead of
+        # 15 cm, 4 cm instead of 12 cm under a 10 cm/s drift step; stable with K +-25 % and L_u 0.45 s.
+        # Height: same loop on the EKF height (ArUco + distance sensor), at the height where the pilot released.
         self.hold_enabled = p("position_hold", True).value
-        self.hold_kp, self.hold_ki = p("hold_kp", 0.6).value, p("hold_ki", 0.15).value
+        self.hold_kp, self.hold_kv, self.hold_ki = p("hold_kp", 1.2).value, p("hold_kv", 0.7).value, p("hold_ki", 0.4).value
+        self.hold_vmax = p("hold_vmax", 0.4).value     # m/s, the hold never moves faster than this
+        self.hold_z = p("height_hold", True).value
+        self.hold_kpz = p("hold_kp_z", 1.0).value
+        self.model_Kz = p("model_K_z", 0.9).value
         self.hold_target = None
-        self.hold_i = [0.0, 0.0]
+        self.hold_zt = None
+        self.hold_i = [0.0, 0.0, 0.0]
         self.hold_t = 0.0
+        self.ekf_v, self.ekf_v_t = (0.0, 0.0, 0.0), 0.0
+        self.ekf_d = (0.0, 0.0)
         # obstacle-free flight zone from the room scan (tools/free_zone.py): commands that would take the drone
         # out of it are cut, whatever program sends them (Nov 10: a test drifted 1 m back towards furniture)
         self.zone = load_zone(p("flight_zone_file", "").value)
@@ -243,6 +256,8 @@ class TelloDriver(Node):
         # or the raw ArUco pose; trusted while its uncertainty is small
         self.pose_sigma = 1.0
         self.create_subscription(PoseWithCovarianceStamped, p("pose_topic", "/ekf/pose").value, self.on_pose, 10)
+        self.create_subscription(TwistStamped, "/ekf/velocity", self.on_ekf_vel, 10)
+        self.create_subscription(Vector3Stamped, "/ekf/drift", self.on_ekf_drift, 10)
         # wall ahead, from the size of the closest marker in view (works without map and without pose)
         from std_msgs.msg import Float32
         self.near_d, self.near_t = 9.0, 0.0
@@ -421,6 +436,7 @@ class TelloDriver(Node):
         # takeoff / climb / land running: not ready for velocity commands
         st["busy"] = self.busy.locked() or self.climb_target is not None
         st["video_fps"] = round(self.video_fps, 1)  # images published per second (the Tello sends 30 at most)
+        st["hold"] = self.hold_target is not None  # position hold active (no horizontal command): flight_report
         self.pub_tel.publish(String(data=json.dumps(st)))
         bat = self.state.get("bat")
         if self.tello.is_flying and isinstance(bat, (int, float)) and bat <= self.low_battery:
@@ -610,39 +626,69 @@ class TelloDriver(Node):
         dt = t1 - t0
         return ((x1 - x0) / dt, (y1 - y0) / dt) if dt > 0.2 else (0.0, 0.0)
 
+    def on_ekf_vel(self, m):
+        v = m.twist.linear
+        self.ekf_v, self.ekf_v_t = (v.x, v.y, v.z), time.time()
+
+    def on_ekf_drift(self, m):
+        self.ekf_d = (m.vector.x, m.vector.y)
+
+    def hold_axis(self, k, target, pos, vel, drift, K, kp, dt):
+        """One axis of the hold: world velocity command (m/s). See the comment in __init__."""
+        e = target - (pos + vel * self.model_Lu)  # where the drone will be when this command acts
+        vd = max(-self.hold_vmax, min(self.hold_vmax, kp * e))
+        if abs(e) < 0.3:
+            self.hold_i[k] = max(-0.1, min(0.1, self.hold_i[k] + self.hold_ki * e * dt))
+        u = (vd - drift + self.hold_kv * (vd - vel)) / K + self.hold_i[k]
+        return max(-0.6, min(0.6, u))
+
     def position_hold(self, rc):
-        """No horizontal/yaw command -> hold where the drone stops (PI on the ArUco pose, integral for the drift).
-        A command releases the hold; no fresh pose -> nothing to hold on (the integral is kept)."""
+        """No horizontal/yaw command -> hold where the drone stops; no vertical command -> hold that height.
+        A command on an axis releases the hold of that axis; no fresh, certain pose -> no hold (integral kept)."""
         now = time.time()
         dt = min(0.1, now - self.hold_t) if self.hold_t else 0.05
         self.hold_t = now
         if not (self.hold_enabled and self.tello.is_flying) or self.busy.locked():
-            self.hold_target = None
+            self.hold_target = self.hold_zt = None
             return rc
-        if rc[0] or rc[1] or rc[3]:
+        lr, fb, ud, yw = rc
+        moving_xy = bool(lr or fb or yw)
+        if moving_xy:
             self.hold_target = None  # the pilot / the mission is moving the drone
-            self.hold_i = [0.0, 0.0]
-            return rc
+            self.hold_i[0] = self.hold_i[1] = 0.0
+        if ud or self.climb_target is not None:
+            self.hold_zt = None
+            self.hold_i[2] = 0.0
         if not self.pose_valid(0.4, 0.12):
             return rc
         x, y = self.pose_xy
-        if self.hold_target is None:
-            vx, vy = self.velocity_xy()
-            # hold where it will stop (it keeps moving ~0.8 s), not where it was when the keys were released
-            self.hold_target = (x + 0.8 * vx, y + 0.8 * vy, self.pose_yaw)
-            self.hold_i = [0.0, 0.0]
-        tx, ty, tyaw = self.hold_target
-        ex, ey = tx - x, ty - y
-        for k, e in enumerate((ex, ey)):
-            if abs(e) < 0.4:
-                self.hold_i[k] = max(-0.15, min(0.15, self.hold_i[k] + self.hold_ki * e * dt))
-        wx = max(-0.25, min(0.25, self.hold_kp * ex + self.hold_i[0]))
-        wy = max(-0.25, min(0.25, self.hold_kp * ey + self.hold_i[1]))
-        c, s = math.cos(self.pose_yaw), math.sin(self.pose_yaw)
-        bx, by = c * wx + s * wy, -s * wx + c * wy
-        wz = max(-0.3, min(0.3, 0.8 * wrap(tyaw - self.pose_yaw)))
+        z = self.pose_z
+        if now - self.ekf_v_t < 0.3:
+            vx, vy, vz = self.ekf_v
+        else:
+            (vx, vy), vz = self.velocity_xy(), 0.0
+        dx, dy = self.ekf_d if now - self.ekf_v_t < 0.3 else (0.0, 0.0)
         clip = lambda v: int(max(-self.max_rc, min(self.max_rc, round(v))))  # noqa: E731
-        return (clip(-by / self.lin_gain), clip(bx / self.lin_gain), rc[2], clip(-wz / self.yaw_gain))
+        if not moving_xy:
+            if self.hold_target is None:
+                # hold where it stops on its own (it keeps going ~ (L_u + tau) * v), not where the keys were released
+                s = self.model_Lu + self.model_tau
+                self.hold_target = (x + s * vx, y + s * vy, self.pose_yaw)
+                self.hold_i[0] = self.hold_i[1] = 0.0
+            tx, ty, tyaw = self.hold_target
+            wx = self.hold_axis(0, tx, x, vx, dx, self.model_K, self.hold_kp, dt)
+            wy = self.hold_axis(1, ty, y, vy, dy, self.model_K, self.hold_kp, dt)
+            c, s = math.cos(self.pose_yaw), math.sin(self.pose_yaw)
+            bx, by = c * wx + s * wy, -s * wx + c * wy
+            wz = max(-0.3, min(0.3, 0.8 * wrap(tyaw - self.pose_yaw)))
+            lr, fb, yw = clip(-by / self.lin_gain), clip(bx / self.lin_gain), clip(-wz / self.yaw_gain)
+        if self.hold_z and not ud and self.climb_target is None:
+            if self.hold_zt is None:
+                self.hold_zt = z + 0.5 * vz
+                self.hold_i[2] = 0.0
+            uz = self.hold_axis(2, self.hold_zt, z, vz, 0.0, self.model_Kz, self.hold_kpz, dt)
+            ud = clip(max(-0.3, min(0.3, uz)) / self.lin_gain)
+        return (lr, fb, ud, yw)
 
     def zone_guard(self, rc):
         """Keep the drone inside the flight zone: like the ceiling guard, on the position predicted 1 s ahead

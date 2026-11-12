@@ -3,6 +3,7 @@
 Subscribes  /aruco/pose (ArUco, delayed ~L_v), /tello/telemetry (distance sensor, IMU heading),
             /tello/rc_sent (the velocity command the driver really sent, after its hold and guards)
 Publishes   /ekf/pose (PoseWithCovarianceStamped, map, 30 Hz), /ekf/velocity (TwistStamped, map frame),
+            /ekf/drift (Vector3Stamped: the learnt drift velocity d, used by the driver's position hold),
             /ekf/path, TF map -> base_link (the drone in RViz follows the EKF, also between marker detections)
 """
 import json
@@ -11,7 +12,8 @@ import time
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TransformStamped, Twist, TwistStamped
+from geometry_msgs.msg import (PoseStamped, PoseWithCovarianceStamped, TransformStamped, Twist, TwistStamped,
+                               Vector3Stamped)
 from nav_msgs.msg import Path as PathMsg
 from rclpy.node import Node
 from std_msgs.msg import String
@@ -40,6 +42,7 @@ class EkfNode(Node):
                                    f"{self.home['y']:+.2f}), heading {self.home['yaw_deg']:.0f} deg: the EKF starts there")
         self.pub_pose = self.create_publisher(PoseWithCovarianceStamped, "/ekf/pose", 10)
         self.pub_vel = self.create_publisher(TwistStamped, "/ekf/velocity", 10)
+        self.pub_drift = self.create_publisher(Vector3Stamped, "/ekf/drift", 10)
         self.pub_path = self.create_publisher(PathMsg, "/ekf/path", 2)
         self.tf = TransformBroadcaster(self)
         self.path = PathMsg()
@@ -110,6 +113,10 @@ class EkfNode(Node):
         v.header = m.header
         v.twist.linear.x, v.twist.linear.y, v.twist.linear.z = float(s[IVX]), float(s[IVY]), float(s[IVZ])
         self.pub_vel.publish(v)
+        dm = Vector3Stamped()
+        dm.header = m.header
+        dm.vector.x, dm.vector.y = float(s[IDX]), float(s[IDY])
+        self.pub_drift.publish(dm)
         t = TransformStamped()
         t.header = m.header
         t.child_frame_id = self.child

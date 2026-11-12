@@ -17,7 +17,6 @@ Writes report.txt (and report.png when matplotlib is there) in the session folde
 """
 import argparse
 import csv
-import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -90,27 +89,38 @@ def main():
         (ses / "report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
         return
     f0, f1 = tt[flying][0], tt[flying][-1]
-    say(f"Flight report {ses.name}: {f1 - f0:.0f} s in the air, battery {bat[flying][0]:.0f} -> {bat[flying][-1]:.0f} %")
+    # several takeoffs in one session: each flight separately (the time on the floor between them is not counted)
+    edges = np.flatnonzero(np.diff(np.r_[0, flying.astype(int), 0]))
+    flights = [(tt[a], tt[b - 1]) for a, b in zip(edges[::2], edges[1::2])]
+
+    def in_air(t, start=3.0, end=1.0):
+        """t inside a flight, skipping `start` s after the takeoff and `end` s before the landing."""
+        return np.any([(t > a + start) & (t < b - end) for a, b in flights], axis=0)
+
+    say(f"Flight report {ses.name}: {len(flights)} flight(s), {sum(b - a for a, b in flights):.0f} s in the air, "
+        f"battery {bat[flying][0]:.0f} -> {bat[flying][-1]:.0f} %")
     say("")
 
     poses = read_csv(ses / "poses.csv")
     ekf = read_csv(ses / "ekf.csv")
     pt = col(poses, "t") + t0
     P = np.c_[col(poses, "x"), col(poses, "y"), col(poses, "z")] if poses else np.zeros((0, 3))
-    air_p = (pt > f0 + 3) & (pt < f1 - 1)  # skip the takeoff and the landing
+    air_p = in_air(pt) if len(pt) else np.zeros(0, bool)  # skip the takeoffs and the landings
     verdict = []
 
     # ---- markers in view
-    grid = np.arange(f0 + 3, f1 - 1, 0.05)
-    if len(grid) and len(pt):
-        age = nearest(pt, pt, grid)[1]
-        seen = age < 0.3
-        blind, longest, run = 0, 0.0, 0.0
-        for s in seen:
-            run = 0.0 if s else run + 0.05
-            longest = max(longest, run)
-        share = seen.mean() * 100
-        rate = air_p.sum() / max(f1 - f0 - 4, 1)
+    grids = [g for g in (np.arange(a + 3, b - 1, 0.05) for a, b in flights) if len(g)]
+    if grids and len(pt):
+        seen_all, longest = [], 0.0
+        for grid in grids:  # per flight: a blind period never spans the time on the floor
+            seen = nearest(pt, pt, grid)[1] < 0.3
+            run = 0.0
+            for s in seen:
+                run = 0.0 if s else run + 0.05
+                longest = max(longest, run)
+            seen_all.append(seen)
+        share = np.concatenate(seen_all).mean() * 100
+        rate = air_p.sum() / max(sum(len(g) for g in grids) * 0.05, 1)
         say(f"Markers in view   {share:5.1f} % of the time, {rate:.1f} poses/s, longest blind period {longest:.1f} s")
         verdict.append(("markers in view >= 85 %", share >= 85))
     # ---- pose jumps against the EKF
@@ -125,7 +135,7 @@ def main():
         say(f"ArUco vs EKF      median {np.median(d) * 100:4.1f} cm, 95 % {np.percentile(d, 95) * 100:4.1f} cm, "
             f"jumps > 15 cm: {jumps} ({jumps / max(len(d), 1) * 100:.1f} % of the poses)")
         verdict.append(("pose jumps < 1 %", jumps / max(len(d), 1) < 0.01))
-        sig = col(ekf, "sigma_xy")[(et > f0 + 3) & (et < f1 - 1)]
+        sig = col(ekf, "sigma_xy")[in_air(et)]
         if len(sig):
             say(f"EKF uncertainty   median {np.nanmedian(sig) * 100:4.1f} cm, max {np.nanmax(sig) * 100:4.1f} cm")
     # ---- height: ArUco z - ToF
@@ -144,12 +154,31 @@ def main():
     # ---- band
     if a.band and ekf:
         et = col(ekf, "t")
-        ez = col(ekf, "z")[(et > f0 + 8) & (et < f1 - 1)]  # after the climb
+        ez = col(ekf, "z")[in_air(et, start=8.0)]  # after the climb
         if len(ez):
             inside = ((ez >= a.band[0] - 0.05) & (ez <= a.band[1] + 0.05)).mean() * 100
             say(f"Height band       {inside:5.1f} % of the time in [{a.band[0]:.2f}, {a.band[1]:.2f}] m (+-5 cm), "
                 f"z {np.min(ez):.2f}-{np.max(ez):.2f} m")
             verdict.append(("in the band >= 95 %", inside >= 95))
+    # ---- hover: the driver's position hold (no horizontal command) -> how still does the drone stay?
+    hold = np.array([r.get("hold") == "True" for r in tel]) & flying
+    if hold.any() and air_p.any():
+        edges = np.flatnonzero(np.diff(np.r_[0, hold.astype(int), 0]))
+        devs, zs, total = [], [], 0.0
+        for a, b in zip(edges[::2], edges[1::2]):
+            t_a, t_b = tt[a] + 2.0, tt[b - 1]  # 2 s to stop after the keys are released
+            k = air_p & (pt > t_a) & (pt < t_b)
+            if t_b - t_a < 2.0 or k.sum() < 20:
+                continue
+            total += t_b - t_a
+            xy = P[k, :2] - np.median(P[k, :2], axis=0)
+            devs.append(np.hypot(xy[:, 0], xy[:, 1]))
+            zs.append(P[k, 2] - np.median(P[k, 2]))
+        if devs:
+            d, dz = np.concatenate(devs), np.concatenate(zs)
+            say(f"Hover (hold)      {total:.0f} s: distance to the hover point median {np.median(d) * 100:4.1f} cm, "
+                f"95 % {np.percentile(d, 95) * 100:4.1f} cm; height 95 % {np.percentile(np.abs(dz), 95) * 100:4.1f} cm")
+            verdict.append(("hover within 8 cm (95 %)", np.percentile(d, 95) < 0.08))
     # ---- takeoff pad (config/home.yaml): did the flight start and end on it?
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from set_home import HOME, landing_point, takeoff_point  # noqa: E402
