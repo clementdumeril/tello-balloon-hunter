@@ -99,7 +99,7 @@ and land after 15 s without any.
 | Command watchdog | No command for 0.5 s → hover |
 | Climb after takeoff | Climbs to `takeoff_height` (auto: median marker height − 0.3 m, ≤ 2.0 m; band mode: the middle of the band, 1.85 m) with joystick commands, closed loop on the distance sensor / EKF |
 | Band mode | `band:=true` (launch and missions): free zone computed for the 1.70–2.00 m band only (`config/flight_zone_band.yaml`: all the furniture is below, so the zone is larger), missions plan inside the band, identification aborts outside band ± 0.3 m |
-| Position hold | No horizontal command → PI hold on the EKF position (cancels the drift; the Tello's own optical-flow hold works only on a lit, textured floor) |
+| Position hold | No horizontal command → hold where the drone stops; no vertical command → hold that height. The Tello's own optical-flow hold does not work on the plain floor of the room (vgx = vgy = 0 in flight), so the driver does it: position predicted L_u ahead, desired speed kp·error, model inversion with the EKF velocity and learnt drift (`/ekf/drift`), small integral. Gains `hold_kp` 0.8, `hold_kv` 0.4, `hold_ki` 0.15, `hold_kp_z` 1.0, changeable in flight (`ros2 param set /tello_driver hold_kp 1.0`). Fake drone with 8/5 cm/s drift: within 2.4 cm at hover (old PI: 13 cm), 9 cm overshoot after a key release (old: 24 cm). `flight_report.py` prints the real hover spread |
 | Ceiling | `max_height` 2.6 m: predicts the height 1 s ahead, brakes, descends above the limit |
 | Free space | Distance to the nearest scanned obstacle (margin 0.35 m), predicted 1 s ahead with the identified model; brakes, pushes back; no pose → no horizontal move |
 | Wall ahead | A marker closer than 0.7 m in the image → no forward motion, back off |
