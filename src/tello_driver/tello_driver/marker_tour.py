@@ -124,7 +124,7 @@ class MarkerTour(StepTest):
             from tello_driver.driver import clearance
             for k in range(40):
                 x, y = m.t[0] + (d + 0.05 * k) * n[0], m.t[1] + (d + 0.05 * k) * n[1]
-                if clearance(self.zone, x, y)[0] >= self.zone["margin"] + 0.1:
+                if clearance(self.zone, x, y)[0] >= self.zone["margin"] + 0.15:  # +0.10 overshot by 5 cm (sim)
                     return x, y
         x = min(max(m.t[0] + d * n[0], f[0]), f[1])
         y = min(max(m.t[1] + d * n[1], f[2]), f[3])
