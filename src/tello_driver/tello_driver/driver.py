@@ -11,6 +11,7 @@ The Tello answers only the first program that talked to it since power-on: start
 """
 import json
 import math
+import os
 import threading
 import time
 
@@ -257,7 +258,7 @@ class TelloDriver(Node):
         if self.mock:
             # with a marker map, the fake drone renders the markers and flies with the rc commands
             self.tello = FakeTello(p("mock_markers_file", "").value)
-            if self.zone and self.tello.world is not None:
+            if self.zone and self.tello.world is not None and not os.environ.get("FAKE_START"):
                 # start where the real one should: in the zone, 0.3 m from its edge furthest from the main marker
                 # wall (the drone faces that wall; from the zone centre the markers were cut at the image edges)
                 w = self.tello.world

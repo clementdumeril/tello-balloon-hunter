@@ -74,10 +74,12 @@ class EkfNode(Node):
             st = json.loads(m.data)
         except ValueError:
             return
-        if self.home and not self.home_used and not self.ekf.initialised and not st.get("flying"):
-            # on the floor, on the pad, no marker seen yet: start from the pad
-            self.home_used = True
+        if self.home and not self.home_used and not st.get("flying") and (self.n_pose - self.n_rej) == 0:
+            # on the floor, on the pad, no marker accepted yet: the drone is on the pad and does not move (without
+            # this, the uncertainty grows on the ground and the prior is lost by the takeoff)
             self.ekf.init_at(self.now(), self.home["x"], self.home["y"], 0.0, math.radians(self.home["yaw_deg"]))
+        elif self.home and st.get("flying"):
+            self.home_used = True  # in the air: the markers take over
         self.ekf.predict(self.now())
         tof = st.get("tof")
         if isinstance(tof, (int, float)) and 15 <= tof <= 400 and st.get("flying"):
