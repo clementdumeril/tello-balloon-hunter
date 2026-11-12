@@ -53,6 +53,7 @@ class StepTest(Node):
     PREFIX = "step"
     MOVE_TO_ZONE_CENTRE = True
     POSE_TOPIC = "/aruco/pose"
+    BAND_DEFAULT = False
 
     def __init__(self):
         super().__init__(self.NODE_NAME)
@@ -70,7 +71,7 @@ class StepTest(Node):
         self.failed_segments = []
         # band mode: fly only in a thin height band (config/flight_zone_band.yaml, z 1.70-2.00 m): above all the
         # furniture (bigger free zone), markers of every row in view, far from the ceiling
-        self.band = bool(p("band", False).value)
+        self.band = bool(p("band", self.BAND_DEFAULT).value)
         zf = p("flight_zone_file", os.path.join(os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter")),
                                                  "config", "flight_zone_band.yaml" if self.band else "flight_zone.yaml")).value
         from tello_driver.driver import load_zone
@@ -202,7 +203,7 @@ class StepTest(Node):
                 raise Abort(f"left the obstacle-free flight zone at ({x:+.2f}, {y:+.2f}) m")
             f = getattr(self, "fence", None)  # (xmin, xmax, ymin, ymax) for missions; else a box around the start
             if f is not None:
-                tol = 0.3
+                tol = getattr(self, "fence_tol", 0.3)
                 if not (f[0] - tol <= x <= f[1] + tol and f[2] - tol <= y <= f[3] + tol):
                     raise Abort(f"left the flight zone at ({x:+.2f}, {y:+.2f}) m")
             elif abs(x - self.p0[0]) > self.box or abs(y - self.p0[1]) > self.box:
@@ -382,7 +383,7 @@ class StepTest(Node):
         samples = []
         t0 = time.time()
         imu0 = self.imu_yaw()
-        while time.time() - t0 < 20.0 and len(samples) < 15:
+        while time.time() - t0 < 30.0 and len(samples) < 15:
             self.check_keys()
             if time.time() - self.video_t > 1.0 and time.time() - t0 > 3.0:
                 raise Abort("no video from the drone (Wi-Fi drop?): reconnect, wait 30 s, relaunch")
@@ -390,11 +391,15 @@ class StepTest(Node):
                 samples.append(self.pose[1:])
                 self.send()
             elif imu0 is not None and time.time() - t0 > 2.0:
-                # no marker yet: sweep +-40 deg around the takeoff heading (IMU) to find them
+                # no marker yet: sweep +-40 deg around the takeoff heading (IMU) to find them; after one sweep,
+                # turn on the spot (the drone may have been put down facing a wall without markers)
                 imu = self.imu_yaw()
-                tgt = imu0 + math.radians(40) * math.sin(2 * math.pi * (time.time() - t0 - 2.0) / 6.0)
-                if imu is not None:
-                    self.send(cw=max(-0.5, min(0.5, 0.9 * wrap(tgt - imu))), blind=True)
+                if time.time() - t0 < 8.0:
+                    tgt = imu0 + math.radians(40) * math.sin(2 * math.pi * (time.time() - t0 - 2.0) / 6.0)
+                    if imu is not None:
+                        self.send(cw=max(-0.5, min(0.5, 0.9 * wrap(tgt - imu))), blind=True)
+                else:
+                    self.send(cw=0.4, blind=True)
                 if int(time.time() - t0) % 4 == 0 and int(time.time() - t0) != getattr(self, "_said0", -1):
                     self._said0 = int(time.time() - t0)
                     self.say("  no marker yet: turning to find them")
@@ -402,7 +407,7 @@ class StepTest(Node):
                 self.send()
             self.spin(0.05)
         if len(samples) < 5:
-            raise Abort("no marker found in 20 s: place the drone facing the marker wall")
+            raise Abort("no marker found in 30 s (even turning on the spot): check the video / the light")
         S = np.array(samples)
         self.p0 = (float(np.median(S[:, 0])), float(np.median(S[:, 1])), float(np.median(S[:, 2])),
                    float(np.median(S[:, 3])))

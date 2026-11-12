@@ -57,7 +57,13 @@ class MarkerTour(StepTest):
         # (default: no limit, the obstacle-free zone of the scan and the marker walls bound the tour)
         self.room = list(p("room_box", [-99.0, 99.0, -99.0, 99.0]).value)
         self.lost_max = p("tour_lost_timeout", 12.0).value  # searching before giving up and landing
+        # sequence mode (tello_goto 49 35): only these markers, in this order, back to the room centre between them
+        seq = p("sequence", os.environ.get("GOTO_SEQ", "")).value
+        self.sequence = [int(s) for s in str(seq).replace(";", ",").replace(" ", ",").split(",") if s.strip()]
         _, self.markers = load_marker_map(self.markers_file)
+        missing = [i for i in self.sequence if i not in self.markers]
+        if missing:
+            raise SystemExit(f"marker(s) {missing} not in {self.markers_file}")
         self.fence = self.flight_zone()
         self.centroid = (float(np.mean([m.t[0] for m in self.markers.values()])),
                          float(np.mean([m.t[1] for m in self.markers.values()])))
@@ -229,8 +235,53 @@ class MarkerTour(StepTest):
         finally:
             self.lost_max = lost
 
+    def centre_point(self):
+        """Middle of the flight zone, moved to the nearest spot with room all around (obstacle grid)."""
+        f = self.fence
+        cx, cy = (f[0] + f[1]) / 2, (f[2] + f[3]) / 2
+        if self.zone and "grid" in self.zone:
+            from tello_driver.driver import clearance
+            best = None
+            for dx in np.arange(-0.6, 0.61, 0.05):
+                for dy in np.arange(-0.6, 0.61, 0.05):
+                    c = clearance(self.zone, cx + dx, cy + dy)[0]
+                    if c >= self.zone["margin"] + 0.2 and (best is None or math.hypot(dx, dy) < best[0]):
+                        best = (math.hypot(dx, dy), cx + dx, cy + dy)
+            if best:
+                cx, cy = best[1], best[2]
+        return cx, cy
+
+    def go_sequence(self):
+        """tello_goto 49 35: centre -> face 49 -> in front of 49 -> centre -> face 35 -> in front of 35 -> ..."""
+        wps = {w["id"]: w for w in self.waypoints()}
+        cx, cy = self.centre_point()
+        zc = sum(self.band_z) / 2 if self.band_z else min(max(self.p0[2], self.z_lo), self.z_hi)
+        _, x, y, z, yaw = self.pose
+        self.say(f"Mission: {' -> '.join(map(str, self.sequence))}. Room centre ({cx:+.2f}, {cy:+.2f}, {zc:.2f}) m")
+        self.say("Going to the room centre")
+        self.goto((cx, cy, zc), yaw)
+        n = len(self.sequence)
+        for i, mid in enumerate(self.sequence):
+            w, m = wps[mid], self.markers[mid]
+            self.say(f"[{i + 1}/{n}] marker {mid}: turning to face it")
+            self.turn(w["yaw"])
+            d = math.hypot(w["near"][0] - m.t[0], w["near"][1] - m.t[1])
+            self.say(f"[{i + 1}/{n}] marker {mid}: going in front of it ({d:.2f} m away)")
+            self.goto(w["near"], w["yaw"], look_at=(m.t[0], m.t[1]), tol=0.10)
+            self.run(self.hold, lambda: self.send())
+            _, x, y, _, _ = self.pose
+            self.say(f"[{i + 1}/{n}] marker {mid}: reached, {math.hypot(x - w['near'][0], y - w['near'][1]) * 100:.0f} cm "
+                     "from the target point")
+            self.say(f"[{i + 1}/{n}] back to the room centre")
+            self.goto((cx, cy, zc), w["yaw"], look_at=(m.t[0], m.t[1]))
+        self.return_home()
+        self.say("Mission done: landing.")
+
     def main(self):
         self.prepare()
+        if self.sequence:
+            self.go_sequence()
+            return
         f = self.fence
         self.say(f"Flight zone x [{f[0]:+.2f}, {f[1]:+.2f}]  y [{f[2]:+.2f}, {f[3]:+.2f}]  "
                  f"z [{self.z_lo:.1f}, {self.z_hi:.1f}] m. Max speed {self.v_max} m/s.")
