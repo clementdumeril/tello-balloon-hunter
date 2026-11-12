@@ -115,6 +115,10 @@ class DroneEKF:
             self.s[IDY] = max(-self.d_max, min(self.d_max, self.s[IDY]))
             if self.t - self.t_pose > 1.0:
                 self.s[[IDX, IDY]] *= 1.0 - dt / 2.0
+                # forgetting the drift = not knowing it: its variance goes back to the real drift spread, so the
+                # position uncertainty keeps up with the real error (it was > 3 sigma: guards trusted it too long)
+                for i in (IDX, IDY):
+                    self.P[i, i] += (self.d_max ** 2 - self.P[i, i]) * dt / 2.0
             self.t += dt
             self.hist.append((self.t, self.s.copy(), self.P.copy()))
         while self.hist and self.hist[0][0] < t - self.history_s:
@@ -150,7 +154,18 @@ class DroneEKF:
         H = np.zeros((4, NX))
         H[0, IX] = H[1, IY] = H[2, IZ] = H[3, IYAW] = 1.0
         if not self.initialised:
-            self.s[:3] = pose[:3]
+            # start only on 3 consistent poses (15 cm, 10 deg): a single wrong pose (wrong marker match, yaw
+            # flipped 180 deg) taken as the start sent the hold the wrong way (offline stress test, seeds 27/327)
+            self.init_buf = [b for b in getattr(self, "init_buf", []) if t_recv - b[0] < 1.0] + [(t_recv, pose)]
+            if len(self.init_buf) < 3:
+                return False
+            P3 = np.array([b[1] for b in self.init_buf[-3:]])
+            if (np.ptp(P3[:, :2], axis=0).max() > 0.15
+                    or max(abs(wrap(a - P3[-1, 3])) for a in P3[:, 3]) > math.radians(10)):
+                return False
+            self.init_buf = []
+            pose = P3[-1]
+            self.s[:3] = np.median(P3[:, :3], axis=0)
             self.s[3:6] = 0.0
             self.s[IYAW] = pose[3]
             self.s[IDX] = self.s[IDY] = 0.0

@@ -140,6 +140,18 @@ def load_zone(path):
             g = np.load(Path(path).parent / z["grid_file"])
             c = g["clearance"].astype(float)
             gy, gx = np.gradient(c)
+            # inside an obstacle / outside the scan the clearance is a flat 0: no gradient, so the guard did not push
+            # at all (offline stress test, seed 367: the drone stayed at x = 2.2 m). There: point to the nearest
+            # cell with room (margin + 10 cm)
+            from scipy.ndimage import distance_transform_edt
+            margin = float(z.get("margin", 0.35))
+            bad = c < margin + 0.1
+            if bad.any() and (~bad).any():
+                _, (ii, jj) = distance_transform_edt(bad, return_indices=True)
+                I, J = np.indices(c.shape)
+                flat = bad & (np.hypot(gx, gy) < 1e-6) | (c < margin)
+                gx = np.where(flat, jj - J, gx).astype(float)
+                gy = np.where(flat, ii - I, gy).astype(float)
             zone["grid"] = {"d": c, "gx": gx, "gy": gy, "x0": float(g["x0"]), "y0": float(g["y0"]),
                             "cell": float(g["cell"])}
         return zone
@@ -155,7 +167,10 @@ def clearance(zone, x, y):
     j = int(round((x - g["x0"]) / g["cell"]))
     i = int(round((y - g["y0"]) / g["cell"]))
     if not (0 <= i < g["d"].shape[0] and 0 <= j < g["d"].shape[1]):
-        return 0.0, (0.0, 0.0)
+        # outside the scanned area: back towards the middle of the flight zone
+        ux, uy = (zone["x_min"] + zone["x_max"]) / 2 - x, (zone["y_min"] + zone["y_max"]) / 2 - y
+        n = math.hypot(ux, uy)
+        return 0.0, ((ux / n, uy / n) if n > 1e-6 else (0.0, 0.0))
     gx, gy = g["gx"][i, j], g["gy"][i, j]
     n = math.hypot(gx, gy)
     return float(g["d"][i, j]), ((gx / n, gy / n) if n > 1e-6 else (0.0, 0.0))
@@ -207,6 +222,7 @@ class TelloDriver(Node):
         self.max_height = p("max_height", 2.6).value
         self.pose_z, self.pose_t = 0.0, 0.0
         self.pose_xy, self.pose_yaw = None, 0.0
+        self.pose_sigma_z = 1.0
         # position hold: when no horizontal move is commanded, hold the position (and heading) with a PI loop on
         # the ArUco pose. The Tello's own optical-flow hold does not work in this room (vgx = vgy = 0 while it
         # drifted 0.4 m in 8 s, Nov 11: dim light / plain floor).
@@ -505,6 +521,7 @@ class TelloDriver(Node):
             else:
                 ud = min(ud, int((limit - h_pred) / self.lin_gain))  # slower and slower towards the limit
             rc = (lr, fb, ud, yw)
+        rc = self.band_guard(rc)
         rc = self.zone_guard(rc)
         rc = self.wall_guard(rc)
         try:
@@ -652,6 +669,14 @@ class TelloDriver(Node):
     def on_pose(self, m):
         p, q = m.pose.pose.position, m.pose.pose.orientation
         self.pose_sigma = math.sqrt(max(m.pose.covariance[0], m.pose.covariance[7], 0.0))
+        self.pose_sigma_z = math.sqrt(max(m.pose.covariance[14], 0.0))
+        # the estimate jumped (markers back after dead reckoning, filter restart) or is uncertain: a hold target
+        # taken from the old estimate is meaningless (stress test seed 142: dragged the drone 63 cm to it)
+        if self.pose_xy is not None and (math.hypot(p.x - self.pose_xy[0], p.y - self.pose_xy[1]) > 0.15
+                                         or self.pose_sigma > 0.06):
+            self.hold_target = None
+        if abs(p.z - self.pose_z) > 0.15 or self.pose_sigma_z > 0.08:
+            self.hold_zt = None
         self.pose_z, self.pose_t = p.z, time.time()
         self.pose_xy = (p.x, p.y)
         self.pose_yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
@@ -709,8 +734,8 @@ class TelloDriver(Node):
             (vx, vy), vz = self.velocity_xy(), 0.0
         dx, dy = self.ekf_d if (self.hold_drift_ff and now - self.ekf_v_t < 0.3) else (0.0, 0.0)
         clip = lambda v: int(max(-self.max_rc, min(self.max_rc, round(v))))  # noqa: E731
-        if not moving_xy:
-            if self.hold_target is None:
+        if not moving_xy and (self.hold_target is not None or self.pose_sigma < 0.06):
+            if self.hold_target is None:  # a new target only on a certain pose (markers in view)
                 # hold where it stops on its own (it keeps going ~ (L_u + tau) * v), not where the keys were released
                 s = self.model_Lu + self.model_tau
                 self.hold_target = (x + s * vx, y + s * vy, self.pose_yaw)
@@ -728,6 +753,31 @@ class TelloDriver(Node):
                 self.hold_i[2] = 0.0
             uz = self.hold_axis(2, self.hold_zt, z, vz, 0.0, self.model_Kz, self.hold_kpz, dt)
             ud = clip(max(-0.3, min(0.3, uz)) / self.lin_gain)
+        return (lr, fb, ud, yw)
+
+    def band_guard(self, rc):
+        """The obstacle grid is only valid in the zone's height band (band mode 1.70-2.00 m): the pilot cannot
+        take the drone more than 10 cm out of it, and 25 cm out it is pushed back (stress test seed 27 went down
+        to 0.17 m, among the furniture). Only on a certain EKF height: the distance sensor alone reads low over
+        the furniture and would push the drone up for nothing."""
+        z = self.zone
+        if (not z or not self.tello.is_flying or self.climb_target is not None or self.pose_xy is None
+                or time.time() - self.pose_t > 0.5 or self.pose_sigma_z > 0.15):
+            return rc
+        lr, fb, ud, yw = rc
+        h = self.pose_z
+        if h < z["z_min"] - 0.25:
+            ud = max(ud, 12)
+            self.note("band: up")
+        elif h < z["z_min"] - 0.10 and ud < 0:
+            ud = 0
+            self.note("band: low")
+        if h > z["z_max"] + 0.25:
+            ud = min(ud, -12)
+            self.note("band: down")
+        elif h > z["z_max"] + 0.10 and ud > 0:
+            ud = 0
+            self.note("band: high")
         return (lr, fb, ud, yw)
 
     def zone_guard(self, rc):
@@ -793,7 +843,9 @@ class TelloDriver(Node):
         tof = self.state.get("tof")
         if isinstance(tof, (int, float)) and 15 <= tof <= 400:
             c.append(tof / 100.0)
-        if self.pose_valid(0.5, 0.15):
+        # the EKF height as long as IT is certain, even when the horizontal position is not (blind over the bed the
+        # sensor reads low and the drone climbed to 2.67 m: stress test seed 113)
+        if self.pose_xy is not None and time.time() - self.pose_t < 0.5 and self.pose_sigma_z < 0.15:
             c.append(self.pose_z)
         return max(c) if c else None
 
