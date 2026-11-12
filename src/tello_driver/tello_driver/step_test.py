@@ -68,10 +68,21 @@ class StepTest(Node):
         # no marker for that long (searching all the time) -> land; shorter losses: the drone stays up and searches
         self.lost_max = p("lost_timeout", 15.0).value
         self.failed_segments = []
+        # band mode: fly only in a thin height band (config/flight_zone_band.yaml, z 1.70-2.00 m): above all the
+        # furniture (bigger free zone), markers of every row in view, far from the ceiling
+        self.band = bool(p("band", False).value)
         zf = p("flight_zone_file", os.path.join(os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter")),
-                                                 "config", "flight_zone.yaml")).value
+                                                 "config", "flight_zone_band.yaml" if self.band else "flight_zone.yaml")).value
         from tello_driver.driver import load_zone
         self.zone = load_zone(zf)
+        self.band_z = None
+        if self.band:
+            if not self.zone:
+                raise SystemExit(f"band mode: no flight zone {zf} (tools/free_zone.py <room_map.obj> --z 1.7 2.0 "
+                                 "--out config/flight_zone_band.yaml)")
+            self.band_z = (self.zone["z_min"], self.zone["z_max"])
+            # abort limits: the band +-0.3 m (an identification pulse or a braking overshoot may leave it briefly)
+            self.z_min, self.z_max = self.band_z[0] - 0.3, self.band_z[1] + 0.3
         self.min_battery = p("min_battery", 30).value
         out = Path(p("out_dir", str(Path.home() / "tello_ws/sessions")).value) / datetime.now().strftime(f"{self.PREFIX}_%Y%m%d_%H%M%S")
         out.mkdir(parents=True, exist_ok=True)
@@ -380,10 +391,14 @@ class StepTest(Node):
             # most open spot (near an edge the guard brakes the pulses and spoils the measurement)
             tx, ty = (zn["x_min"] + zn["x_max"]) / 2, (zn["y_min"] + zn["y_max"]) / 2
             self.say(f"Moving from ({self.p0[0]:+.2f}, {self.p0[1]:+.2f}) to the centre of the flight zone ({tx:+.2f}, {ty:+.2f})")
-            self.recentre(timeout=12.0, target=(tx, ty, self.p0[2], self.p0[3]))
+            tz = sum(self.band_z) / 2 if self.band_z else self.p0[2]  # band: to the middle of the band
+            self.recentre(timeout=12.0, target=(tx, ty, tz, self.p0[3]))
             _, x, y, z, yaw = self.pose
-            self.p0 = (x, y, z, self.p0[3])
-        if not self.z_min + 0.3 <= self.p0[2] <= self.z_max - 0.3:
+            self.p0 = (x, y, tz if self.band_z else z, self.p0[3])
+        if self.band_z:
+            if not self.z_min <= self.p0[2] <= self.z_max:
+                raise Abort(f"start height {self.p0[2]:.2f} m outside the band limits [{self.z_min:.2f}, {self.z_max:.2f}]")
+        elif not self.z_min + 0.3 <= self.p0[2] <= self.z_max - 0.3:
             raise Abort(f"start height {self.p0[2]:.2f} m too close to the limits [{self.z_min}, {self.z_max}]")
         self.say(f"Start point ({self.p0[0]:+.2f}, {self.p0[1]:+.2f}, {self.p0[2]:.2f}) m, "
                  f"yaw {math.degrees(self.p0[3]):.0f} deg.")

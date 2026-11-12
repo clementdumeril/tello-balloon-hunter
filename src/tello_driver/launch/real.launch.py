@@ -35,6 +35,9 @@ def setup(context):
     except Exception:  # noqa: BLE001
         pass
     share = get_package_share_directory("tello_driver")
+    band = lc("band") == "true"
+    zone = zone_file(lc("flight_zone"), band)
+    climb = takeoff_height(lc("markers"), lc("takeoff_height"), zone if band else "")
     calib = lc("camera_info_file")
     if calib == "auto":
         default = Path(REPO) / "config" / "tello_camera.yaml"
@@ -43,11 +46,11 @@ def setup(context):
         Node(package="tello_driver", executable="tello_driver", output="screen",
              parameters=[{"mock": lc("mock") == "true", "camera_info_file": calib,
                           "mock_markers_file": lc("markers"),
-                          "takeoff_height": takeoff_height(lc("markers"), lc("takeoff_height")),
-                          "max_height": float(lc("max_height")), "flight_zone_file": zone_file(lc("flight_zone"))}]),
+                          "takeoff_height": climb,
+                          "max_height": float(lc("max_height")), "flight_zone_file": zone}]),
         Node(package="aruco_localization", executable="marker_map_publisher", output="screen",
              parameters=[{"markers_file": lc("markers"), "room_mesh": room_mesh(lc("room_mesh")),
-                          "flight_zone_file": zone_file(lc("flight_zone"))}]),
+                          "flight_zone_file": zone}]),
         # the EKF owns base_link (smooth, predicted between detections); the raw ArUco pose is base_link_aruco
         Node(package="tello_driver", executable="tello_ekf", output="screen"),
         Node(package="aruco_localization", executable="aruco_localizer", output="screen",
@@ -62,13 +65,14 @@ def setup(context):
     return nodes
 
 
-def zone_file(arg):
-    """Obstacle-free flight zone (tools/free_zone.py); 'auto' = config/flight_zone.yaml if it exists, 'none' = off."""
+def zone_file(arg, band=False):
+    """Obstacle-free flight zone (tools/free_zone.py); 'auto' = config/flight_zone.yaml (band mode:
+    config/flight_zone_band.yaml) if it exists, 'none' = off."""
     if arg == "none":
         return ""
     if arg != "auto":
         return arg
-    p = Path(REPO) / "config" / "flight_zone.yaml"
+    p = Path(REPO) / "config" / ("flight_zone_band.yaml" if band else "flight_zone.yaml")
     return str(p) if p.exists() else ""
 
 
@@ -80,12 +84,19 @@ def room_mesh(arg):
     return str(p) if p.exists() else ""
 
 
-def takeoff_height(markers_file, arg):
+def takeoff_height(markers_file, arg, band_zone=""):
     """Height to climb to after takeoff: 0.5 m under the median marker height (camera 55.6 x 43 deg: from
-    2 m away it sees +-0.8 m around its own height), between 1.0 and 2.0 m. 'auto' or a number in metres."""
+    2 m away it sees +-0.8 m around its own height), between 1.0 and 2.0 m. 'auto' or a number in metres.
+    Band mode: the middle of the band of the zone file."""
     if arg != "auto":
         return float(arg)
     import yaml
+    if band_zone:
+        try:
+            z = yaml.safe_load(open(band_zone, encoding="utf-8"))
+            return round((float(z["z_min"]) + float(z["z_max"])) / 2, 2)
+        except Exception:  # noqa: BLE001
+            pass
     try:
         zs = sorted(float(m["z"]) for m in yaml.safe_load(open(markers_file, encoding="utf-8"))["markers"])
     except Exception:  # noqa: BLE001
@@ -131,6 +142,9 @@ def generate_launch_description():
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("record", default_value="true", description="save images, poses, telemetry in ~/tello_ws/sessions"),
         DeclareLaunchArgument("markers", default_value=os.path.join(REPO, "config", "markers.yaml")),
+        DeclareLaunchArgument("band", default_value="false",
+                              description="band mode: fly only in the 1.70-2.00 m band (config/flight_zone_band.yaml), "
+                                          "takeoff climbs to its middle; pass band:=true to the missions too"),
         DeclareLaunchArgument("flight_zone", default_value="auto",
                               description="obstacle-free zone YAML; auto = config/flight_zone.yaml; none = no zone"),
         DeclareLaunchArgument("room_mesh", default_value="auto",

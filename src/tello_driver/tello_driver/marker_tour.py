@@ -46,13 +46,16 @@ class MarkerTour(StepTest):
         self.survey = p("survey", True).value
         self.margin = p("wall_margin", 0.6).value         # m from the walls
         self.z_lo, self.z_hi = p("tour_z_min", 1.2).value, p("tour_z_max", 2.1).value  # 2.2 overshot to 2.40 (Nov 11)
+        if self.band_z:  # band mode: every stop inside the band
+            self.z_lo, self.z_hi = self.band_z
         self.v_max = p("max_speed", 0.5).value            # m/s horizontal
         self.vz_max = p("max_vertical_speed", 0.25).value
         self.w_max = p("max_yaw_rate", 0.5).value         # rad/s
         self.kp, self.kp_yaw = p("kp", 0.6).value, p("kp_yaw", 0.9).value
         self.hold = p("hold", 1.0).value
         # room scan extents in the map frame (x min, x max, y min, y max), for the sides without markers
-        self.room = list(p("room_box", [-2.99, 1.46, -0.02, 3.12]).value)
+        # (default: no limit, the obstacle-free zone of the scan and the marker walls bound the tour)
+        self.room = list(p("room_box", [-99.0, 99.0, -99.0, 99.0]).value)
         self.lost_max = p("tour_lost_timeout", 12.0).value  # searching before giving up and landing
         _, self.markers = load_marker_map(self.markers_file)
         self.fence = self.flight_zone()

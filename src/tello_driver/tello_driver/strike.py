@@ -50,8 +50,9 @@ class Strike(StepTest):
         self.ki = p("ki", 0.3).value  # integral: cancels the drift (the Tello's own hold does not work here)
         self.integ = np.zeros(2)
         self.strike_d, self.retreat_d = p("strike_distance", 0.9).value, p("retreat_distance", 1.6).value
-        self.z_fly = p("height", 2.0).value
-        self.z_lim = (1.2, 2.1)
+        self.z_lim = self.band_z or (1.2, 2.1)
+        # flight height: the middle of the band in band mode (0 = auto)
+        self.z_fly = p("height", 0.0).value or (sum(self.band_z) / 2 if self.band_z else 2.0)
         _, self.markers = load_marker_map(p("markers_file", os.path.join(REPO, "config", "markers.yaml")).value)
         self.lost_max = p("strike_lost_timeout", 15.0).value
         self.box = 99.0  # no box around the start point: the free space of the room scan is the limit
