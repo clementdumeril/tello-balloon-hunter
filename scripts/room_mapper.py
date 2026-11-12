@@ -305,6 +305,15 @@ def robust_average(Ts, max_angle_deg=8.0):
     return T, len(keep)
 
 
+def id_set(spec):
+    """'1-12,15' -> {1, ..., 12, 15}."""
+    out = set()
+    for part in filter(None, (spec or "").replace(" ", "").split(",")):
+        lo, _, hi = part.partition("-")
+        out.update(range(int(lo), int(hi or lo) + 1))
+    return out
+
+
 def camera_from_known(dets, M, size, K, D, single):
     """T_origin_cam from all already-mapped markers visible in the frame (joint PnP), or None."""
     known = [i for i in dets if i in M]
@@ -315,8 +324,7 @@ def camera_from_known(dets, M, size, K, D, single):
         if i not in single:
             return None
         return M[i] @ inv(single[i])
-    local = marker_local(size)
-    obj = np.concatenate([(M[i][:3, :3] @ local.T).T + M[i][:3, 3] for i in known])
+    obj = np.concatenate([(M[i][:3, :3] @ marker_local(size[i]).T).T + M[i][:3, 3] for i in known])
     img = np.concatenate([dets[i] for i in known])
     ok, r, tv = cv2.solvePnP(obj, img, K, D, flags=cv2.SOLVEPNP_SQPNP)
     if not ok:
@@ -342,6 +350,12 @@ def cmd_solve(a):
             sys.exit(f"No calibration file {CALIB}: run 'calibrate' first.")
         K, D, _ = load_calib(CALIB)
     size = a.size
+    sz = defaultdict(lambda: size)  # side of every marker: --size, or --sizes overrides (e.g. an older print run)
+    for part in filter(None, (a.sizes or "").split(";")):
+        rng, _, val = part.partition(":")
+        for i in id_set(rng):
+            sz[i] = float(val)
+    fit = id_set(a.fit_size)  # these markers share ONE unknown size factor, estimated by the bundle adjustment
     det = aruco_detector()
     files = sorted(glob.glob(str(cap / "f_*.jpg")))[:: a.stride]
     floor_files = sorted(glob.glob(str(cap / "floor_*.jpg")))
@@ -360,7 +374,7 @@ def cmd_solve(a):
         fr["single"] = {}
         for i, c in fr["dets"].items():
             counts[i] += 1
-            T, e, ratio = single_pose(c, size, K, D)
+            T, e, ratio = single_pose(c, sz[i], K, D)
             if T is not None and e < 1.5 and ratio > a.ambiguity:
                 fr["single"][i] = T
         for i in fr["dets"]:
@@ -373,7 +387,7 @@ def cmd_solve(a):
     for _ in range(50):
         cand = defaultdict(list)
         for fr in frames:
-            T_oc = camera_from_known(fr["dets"], M, size, K, D, fr["single"])
+            T_oc = camera_from_known(fr["dets"], M, sz, K, D, fr["single"])
             if T_oc is None:
                 continue
             for j, T_cj in fr["single"].items():
@@ -395,7 +409,7 @@ def cmd_solve(a):
     # ---- initial camera poses for the bundle adjustment
     cams = []
     for fr in frames:
-        T_oc = camera_from_known(fr["dets"], M, size, K, D, fr["single"])
+        T_oc = camera_from_known(fr["dets"], M, sz, K, D, fr["single"])
         if T_oc is not None:
             fr["T"] = T_oc
             cams.append(fr)
@@ -412,14 +426,17 @@ def cmd_solve(a):
     for fr in cams:
         r, t = T_to_rt(inv(fr["T"]))  # store camera as T_cam_origin
         x0 += [*r, *t]
+    fit = fit & set(ids) - {origin}
+    if fit:
+        x0.append(0.0)  # log of the size factor of the --fit-size markers
     x0 = np.array(x0)
     obs = [(ci, i, fr["dets"][i]) for ci, fr in enumerate(cams) for i in fr["dets"] if i in M]
-    local = marker_local(size)
 
     def residuals(x):
         res = []
         for ci, i, c in obs:
             cr, ct = x[nm + 6 * ci: nm + 6 * ci + 3], x[nm + 6 * ci + 3: nm + 6 * ci + 6]
+            local = marker_local(sz[i]) * (math.exp(x[-1]) if i in fit else 1.0)
             if i == origin:
                 pts = local
             else:
@@ -435,11 +452,19 @@ def cmd_solve(a):
         J[8 * k: 8 * k + 8, nm + 6 * ci: nm + 6 * ci + 6] = 1
         if i != origin:
             J[8 * k: 8 * k + 8, 6 * mi[i]: 6 * mi[i] + 6] = 1
+        if i in fit:
+            J[8 * k: 8 * k + 8, len(x0) - 1] = 1
     r0 = residuals(x0)
     sol = least_squares(residuals, x0, jac_sparsity=J, loss="huber", f_scale=1.0, x_scale="jac", max_nfev=200, verbose=0)
     r1 = sol.fun.reshape(-1, 2)
     print(f"reprojection RMS: {np.sqrt(np.mean(r0 ** 2)) * math.sqrt(2):.2f} px before, "
           f"{np.sqrt(np.mean(np.sum(r1 ** 2, 1))):.2f} px after")
+    if fit:
+        f = math.exp(sol.x[-1])
+        for i in fit:
+            sz[i] *= f
+        print(f"markers {sorted(fit)}: estimated size factor {f:.4f} -> side {sz[min(fit)] * 1000:.1f} mm "
+              f"(the others: {size * 1000:.1f} mm)")
     for i in free:
         k = mi[i]
         M[i] = rt_to_T(sol.x[6 * k: 6 * k + 3], sol.x[6 * k + 3: 6 * k + 6])
@@ -481,7 +506,7 @@ def cmd_solve(a):
         res_i = np.array([np.linalg.norm(sol.fun[8 * k: 8 * k + 8].reshape(4, 2), axis=1).mean()
                           for k, o in enumerate(obs) if o[1] == i])
         q = quat_xyzw(R)
-        out.append({"id": i, "x": pos[0], "y": pos[1], "z": pos[2], "yaw": yaw, "tilt": tilt, "q": q,
+        out.append({"id": i, "x": pos[0], "y": pos[1], "z": pos[2], "yaw": yaw, "tilt": tilt, "q": q, "size": sz[i],
                     "views": counts[i], "reproj": float(np.median(res_i))})
 
     # ---- report + yaml
@@ -504,7 +529,7 @@ def cmd_solve(a):
         "# used by the localizer: a marker stuck slightly rotated or leaning is not an error any more).",
         "",
         f"dictionary: {DICT}",
-        f"marker_size: {size}",
+        f"marker_size: {size:.4f}               # side of the black square (m); a marker with its own 'size' overrides it",
         "",
         "room:                      # bounding box of the markers + margin (simulator only)",
         f"  size_x: {max(xs) - min(xs) + 1.0:.2f}",
@@ -514,7 +539,8 @@ def cmd_solve(a):
         "markers:",
     ]
     lines += [f"  - {{id: {m['id']:2d}, x: {m['x']:.3f}, y: {m['y']:.3f}, z: {m['z']:.3f}, yaw_deg: {m['yaw']:6.1f}, "
-              f"q: [{m['q'][0]:.4f}, {m['q'][1]:.4f}, {m['q'][2]:.4f}, {m['q'][3]:.4f}]}}"
+              f"q: [{m['q'][0]:.4f}, {m['q'][1]:.4f}, {m['q'][2]:.4f}, {m['q'][3]:.4f}]"
+              + (f", size: {m['size']:.4f}" if abs(m['size'] - size) > 1e-5 else "") + "}"
               f"   # views {m['views']}, tilt {m['tilt']:.1f} deg" for m in out]
     MARKERS.write_text("\n".join(lines) + "\n", encoding="utf-8")
     (cap / "solve_report.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
@@ -536,6 +562,8 @@ def main():
     c.add_argument("--origin", type=int, help="origin marker id (default: the best connected)")
     c.add_argument("--size", type=float, default=MARKER_SIZE, help="side of the black square [m] (default: marker_size in markers.yaml)")
     c.add_argument("--origin-height", type=float, default=None, help="height of the origin marker centre above the floor [m]; overrides the floor frames")
+    c.add_argument("--sizes", default="", help="per-marker sides, e.g. '1-12:0.185;40:0.19' (others: --size)")
+    c.add_argument("--fit-size", default="", help="ids whose common size is unknown (e.g. an older print run '1-12'): estimated")
     c.add_argument("--stride", type=int, default=1)
     c.add_argument("--min-pairs", type=int, default=2, help="views needed to place a new marker")
     c.add_argument("--ambiguity", type=float, default=3.0, help="min error ratio between the two single-marker poses")

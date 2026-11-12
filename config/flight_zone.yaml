@@ -1,9 +1,9 @@
 # Flight zone with no obstacle (tools/free_zone.py, from the room scan): largest free rectangle at
 # flight heights, 0.35 m from any scanned surface between z 1.2 and 2.6 m.
-x_min: -2.30
-x_max: 0.05
-y_min: 1.03
-y_max: 2.08
+x_min: -0.26
+x_max: 0.79
+y_min: 0.51
+y_max: 2.71
 z_min: 1.40
 z_max: 2.40
 margin: 0.35

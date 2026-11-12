@@ -1,30 +1,59 @@
 # Marker map: the SINGLE source of truth for the marker layout (sim + real localizer).
-# Measured by scripts/room_mapper.py on 2026-11-09 18:48 from 20261109_183913
-# (76 images, bundle adjustment RMS 1.07 px; origin marker 6 set at 1.3 m above the floor (--origin-height); hand-held camera at 1.74 m median (sanity check)).
-# Frame map: origin on the floor below marker 6, y out of its wall into the room, z up.
-# 2026-11-09 23:00: all z shifted +0.38 m: the Scaniverse scan (aligned on the markers, 3 cm mean error) puts the
-# floor plane 0.38 m below the old origin (the 'marker 6 at 1.30 m' estimate was too low; real flight ToF agrees).
-# z is now the height above the floor (scan: flat floor, ceiling at 2.90 m).
-# Each marker: centre (m) and yaw_deg = direction the marker faces.
+# Measured by scripts/room_mapper.py on 2026-11-11 18:38 from 20261111_180749
+# (244 images, bundle adjustment RMS 1.13 px; origin marker 49 set at 1.95 m above the floor (--origin-height); hand-held camera at 1.79 m median (sanity check)).
+# Frame map: origin on the floor below marker 49, y out of its wall into the room, z up.
+# Each marker: centre (m), yaw_deg = direction the marker faces, q = full orientation (quaternion x y z w,
+# used by the localizer: a marker stuck slightly rotated or leaning is not an error any more).
 
 dictionary: DICT_6X6_50
-marker_size: 0.2
+marker_size: 0.1889               # side of the black square (m); a marker with its own 'size' overrides it
 
 room:                      # bounding box of the markers + margin (simulator only)
-  size_x: 4.41
-  size_y: 3.12
-  height: 3.09
+  size_x: 4.01
+  size_y: 4.89
+  height: 3.42
 
 markers:
-  - {id:  1, x: -2.832, y: 0.586, z: 2.670, yaw_deg:   -1.3}   # views 7, tilt 4.1 deg
-  - {id:  2, x: -2.784, y: 2.123, z: 2.490, yaw_deg:   -1.9}   # views 14, tilt 4.1 deg
-  - {id:  3, x: -2.804, y: 1.398, z: 2.582, yaw_deg:   -0.7}   # views 17, tilt 3.8 deg
-  - {id:  4, x: -2.089, y: 0.060, z: 2.289, yaw_deg:   88.7}   # views 19, tilt 2.0 deg
-  - {id:  5, x: -1.350, y: 0.042, z: 1.591, yaw_deg:   87.9}   # views 9, tilt 4.0 deg
-  - {id:  6, x: 0.000, y: 0.000, z: 1.680, yaw_deg:   90.0}   # views 22, tilt 1.5 deg
-  - {id:  7, x: -1.406, y: 0.064, z: 2.297, yaw_deg:   89.9}   # views 28, tilt 3.2 deg
-  - {id:  8, x: 0.104, y: 0.014, z: 2.307, yaw_deg:   88.7}   # views 17, tilt 1.1 deg
-  - {id:  9, x: 0.579, y: 0.548, z: 2.189, yaw_deg: -177.2}   # views 14, tilt 3.2 deg
-  - {id: 10, x: -0.660, y: 0.029, z: 2.179, yaw_deg:   89.7}   # views 22, tilt 1.0 deg
-  - {id: 11, x: 0.510, y: 1.332, z: 2.395, yaw_deg: -173.8}   # views 10, tilt 4.4 deg
-  - {id: 12, x: 0.529, y: 1.335, z: 1.890, yaw_deg: -173.8}   # views 12, tilt 2.8 deg
+  - {id:  1, x: -0.805, y: 3.239, z: 2.502, yaw_deg:  -89.0, q: [0.7036, 0.0046, 0.0076, 0.7106]}   # views 18, tilt 0.6 deg
+  - {id:  2, x: 0.555, y: 3.227, z: 2.470, yaw_deg:  -91.3, q: [0.6852, 0.0060, -0.0234, 0.7280]}   # views 21, tilt 4.2 deg
+  - {id:  3, x: -0.345, y: 3.238, z: 2.488, yaw_deg:  -89.5, q: [0.6963, 0.0083, -0.0020, 0.7177]}   # views 17, tilt 1.9 deg
+  - {id:  4, x: -1.287, y: 2.722, z: 2.317, yaw_deg:    0.6, q: [0.5114, 0.5092, 0.4954, 0.4835]}   # views 19, tilt 2.5 deg
+  - {id:  5, x: -1.268, y: 2.230, z: 2.311, yaw_deg:    0.9, q: [0.4937, 0.5089, 0.4985, 0.4988]}   # views 17, tilt 0.9 deg
+  - {id:  6, x: -1.255, y: 0.751, z: 2.309, yaw_deg:    0.3, q: [0.4909, 0.4975, 0.5052, 0.5063]}   # views 41, tilt 1.4 deg
+  - {id:  7, x: -1.253, y: 1.763, z: 2.310, yaw_deg:    0.3, q: [0.4921, 0.5023, 0.5006, 0.5049]}   # views 19, tilt 1.0 deg
+  - {id:  8, x: -1.254, y: 0.261, z: 2.306, yaw_deg:    0.0, q: [0.4949, 0.4936, 0.5065, 0.5049]}   # views 60, tilt 1.3 deg
+  - {id:  9, x: -0.647, y: -0.004, z: 2.343, yaw_deg:   89.9, q: [-0.0006, 0.7031, 0.7111, 0.0023]}   # views 60, tilt 0.7 deg
+  - {id: 10, x: -1.252, y: 1.235, z: 2.308, yaw_deg:   -0.0, q: [0.4913, 0.4962, 0.5033, 0.5090]}   # views 27, tilt 1.5 deg
+  - {id: 11, x: 0.195, y: -0.004, z: 2.335, yaw_deg:   90.2, q: [0.0007, 0.6995, 0.7146, -0.0034]}   # views 86, tilt 1.3 deg
+  - {id: 12, x: -0.202, y: -0.003, z: 2.332, yaw_deg:   89.6, q: [-0.0033, 0.7005, 0.7136, 0.0080]}   # views 96, tilt 1.4 deg
+  - {id: 17, x: -1.247, y: 0.505, z: 1.951, yaw_deg:   -0.1, q: [0.4927, 0.4963, 0.5030, 0.5079]}   # views 57, tilt 1.3 deg
+  - {id: 19, x: -1.240, y: 0.805, z: 1.528, yaw_deg:    0.3, q: [0.4953, 0.4904, 0.5119, 0.5022]}   # views 48, tilt 1.8 deg
+  - {id: 20, x: -1.236, y: 0.241, z: 1.535, yaw_deg:   -0.9, q: [0.5018, 0.4841, 0.5080, 0.5057]}   # views 66, tilt 2.0 deg
+  - {id: 21, x: -0.437, y: 0.001, z: 1.978, yaw_deg:   90.9, q: [0.0019, 0.7064, 0.7077, -0.0134]}   # views 128, tilt 1.2 deg
+  - {id: 22, x: -0.916, y: -0.001, z: 2.000, yaw_deg:   89.6, q: [0.0087, 0.7055, 0.7087, -0.0036]}   # views 78, tilt 1.0 deg
+  - {id: 23, x: -1.249, y: 0.991, z: 1.958, yaw_deg:   -0.1, q: [0.4936, 0.4932, 0.5061, 0.5070]}   # views 45, tilt 1.5 deg
+  - {id: 24, x: -1.248, y: 1.497, z: 1.957, yaw_deg:   -0.9, q: [0.4981, 0.4918, 0.5002, 0.5097]}   # views 26, tilt 1.2 deg
+  - {id: 25, x: -1.258, y: 2.000, z: 1.960, yaw_deg:   -0.0, q: [0.5006, 0.5022, 0.4975, 0.4997]}   # views 18, tilt 0.4 deg
+  - {id: 26, x: -1.288, y: 2.500, z: 1.938, yaw_deg:    1.4, q: [0.4925, 0.5210, 0.4915, 0.4944]}   # views 17, tilt 2.4 deg
+  - {id: 27, x: -1.297, y: 3.037, z: 1.985, yaw_deg:    1.7, q: [0.5000, 0.5175, 0.4971, 0.4848]}   # views 18, tilt 2.1 deg
+  - {id: 28, x: 0.129, y: 3.237, z: 2.483, yaw_deg:  -91.0, q: [0.6873, -0.0038, -0.0092, 0.7263]}   # views 22, tilt 3.2 deg
+  - {id: 29, x: 1.097, y: 3.207, z: 2.618, yaw_deg:  -91.2, q: [0.7025, -0.0167, 0.0020, 0.7114]}   # views 22, tilt 1.7 deg
+  - {id: 30, x: 0.842, y: 3.197, z: 2.207, yaw_deg:  -89.2, q: [0.7006, -0.0057, 0.0161, 0.7133]}   # views 22, tilt 2.0 deg
+  - {id: 31, x: 1.414, y: 3.213, z: 2.224, yaw_deg:  -90.1, q: [0.7115, 0.0096, -0.0104, 0.7026]}   # views 22, tilt 1.8 deg
+  - {id: 32, x: 1.709, y: 2.927, z: 2.421, yaw_deg:  179.3, q: [0.4908, -0.5011, -0.5053, 0.5028]}   # views 21, tilt 1.0 deg
+  - {id: 33, x: 1.698, y: 2.405, z: 2.422, yaw_deg:  178.7, q: [-0.4923, 0.5005, 0.5107, -0.4964]}   # views 18, tilt 0.9 deg
+  - {id: 34, x: 1.696, y: 2.645, z: 2.073, yaw_deg:  179.1, q: [0.4913, -0.4903, -0.5172, 0.5008]}   # views 20, tilt 2.3 deg
+  - {id: 35, x: 1.683, y: 2.062, z: 2.081, yaw_deg:  178.4, q: [0.4849, -0.4975, -0.5159, 0.5012]}   # views 16, tilt 2.0 deg
+  - {id: 36, x: 1.680, y: 1.707, z: 2.416, yaw_deg:  179.2, q: [-0.4940, 0.4952, 0.5117, -0.4989]}   # views 16, tilt 1.4 deg
+  - {id: 37, x: 1.674, y: 1.180, z: 2.407, yaw_deg:  178.3, q: [-0.5025, 0.4909, 0.5239, -0.4816]}   # views 20, tilt 3.2 deg
+  - {id: 38, x: 1.676, y: 0.657, z: 2.386, yaw_deg:  179.3, q: [-0.4968, 0.4996, 0.5062, -0.4973]}   # views 19, tilt 0.5 deg
+  - {id: 39, x: 1.675, y: 0.082, z: 2.408, yaw_deg:  179.2, q: [-0.5044, 0.5111, 0.4954, -0.4888]}   # views 19, tilt 1.8 deg
+  - {id: 40, x: 1.673, y: -0.380, z: 2.411, yaw_deg:  178.8, q: [-0.5085, 0.5098, 0.5003, -0.4809]}   # views 23, tilt 2.4 deg
+  - {id: 41, x: 0.818, y: -0.647, z: 2.521, yaw_deg:   88.7, q: [-0.0141, 0.6918, 0.7213, 0.0306]}   # views 37, tilt 4.3 deg
+  - {id: 42, x: 1.668, y: 1.548, z: 2.083, yaw_deg:  176.7, q: [-0.4760, 0.5045, 0.5235, -0.4949]}   # views 17, tilt 2.2 deg
+  - {id: 43, x: 1.678, y: 0.936, z: 2.100, yaw_deg:  178.3, q: [-0.4972, 0.4984, 0.5165, -0.4874]}   # views 17, tilt 1.7 deg
+  - {id: 44, x: -1.023, y: 3.239, z: 2.004, yaw_deg:  -89.1, q: [0.7017, 0.0044, 0.0068, 0.7124]}   # views 18, tilt 0.9 deg
+  - {id: 45, x: 1.700, y: 2.989, z: 2.065, yaw_deg:  178.5, q: [-0.4869, 0.5026, 0.5103, -0.5000]}   # views 22, tilt 1.2 deg
+  - {id: 46, x: -1.249, y: 1.333, z: 1.549, yaw_deg:    1.7, q: [0.4896, 0.5000, 0.5149, 0.4952]}   # views 24, tilt 1.3 deg
+  - {id: 47, x: -0.791, y: -0.001, z: 1.591, yaw_deg:   90.5, q: [-0.0077, 0.7052, 0.7089, 0.0022]}   # views 66, tilt 0.9 deg
+  - {id: 49, x: 0.000, y: 0.000, z: 1.950, yaw_deg:   90.0, q: [-0.0009, 0.7095, 0.7047, 0.0009]}   # views 130, tilt 0.4 deg
