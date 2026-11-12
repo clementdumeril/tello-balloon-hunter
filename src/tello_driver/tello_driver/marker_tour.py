@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from aruco_localization.marker_map import load_marker_map
-from tello_driver.step_test import RATE, Abort, StepTest, run, wrap
+from tello_driver.step_test import Abort, StepTest, run, wrap
 
 REPO = os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter"))
 
@@ -68,6 +68,12 @@ class MarkerTour(StepTest):
         self.centroid = (float(np.mean([m.t[0] for m in self.markers.values()])),
                          float(np.mean([m.t[1] for m in self.markers.values()])))
         self.last_xy = None
+        from geometry_msgs.msg import Vector3Stamped
+        self.drift, self.drift_t = (0.0, 0.0), 0.0
+        self.create_subscription(Vector3Stamped, "/ekf/drift", self.on_drift, 10)
+
+    def on_drift(self, m):
+        self.drift, self.drift_t = (m.vector.x, m.vector.y), time.time()
 
     def flight_zone(self):
         """Axis-aligned box: room scan shrunk by the margin, and margin from each marker wall."""
@@ -168,7 +174,7 @@ class MarkerTour(StepTest):
         look_at: where to turn to if the markers are lost (default: the markers' centroid)."""
         tx, ty, tz = target
         reached_t = [None]
-        integ = [0.0, 0.0]
+        last_err = [None]
         look = look_at or self.centroid
 
         def step():
@@ -212,12 +218,12 @@ class MarkerTour(StepTest):
             d = math.hypot(ex, ey)
             v = min(self.v_max, self.kp * d, math.sqrt(2 * self.a_max * max(d - 0.5 * tol, 0.0)))
             vx, vy = (ex / d * v, ey / d * v) if d > 1e-3 else (0.0, 0.0)
-            # integral near the target: cancels the drift (sim with 10 cm/s drift: a P-only approach stopped
-            # ~20 cm short, "not reached in time" three times)
-            if d < 0.4:
-                integ[0] = clip(integ[0] + 0.4 * ex / RATE, 0.15)
-                integ[1] = clip(integ[1] + 0.4 * ey / RATE, 0.15)
-            vx, vy = vx + integ[0], vy + integ[1]
+            # cancel the drift learnt by the EKF (the Tello drifts 5-10 cm/s on its own): without it the P-only
+            # approach stopped ~20 cm short (sim, 10 cm/s drift: "not reached in time" three times); an integral
+            # instead overshot by 20-30 cm
+            if time.time() - self.drift_t < 0.5:
+                vx, vy = vx - self.drift[0], vy - self.drift[1]
+            last_err[0] = (ex, ey, ez, eyaw)
             c, s = math.cos(yaw), math.sin(yaw)
             self.send(c * vx + s * vy, -s * vx + c * vy, clip(self.kp * ez, self.vz_max),
                       clip(self.kp_yaw * eyaw, self.w_max))
@@ -225,7 +231,9 @@ class MarkerTour(StepTest):
         t0 = time.time()
         self.run(timeout, step, search_on_loss=False)  # goto handles the losses itself (turns, look_at)
         if time.time() - t0 >= timeout - 0.05:
-            self.say("  (not reached in time, going on)")
+            e = last_err[0]
+            self.say("  (not reached in time, going on" + (f": {math.hypot(e[0], e[1]) * 100:.0f} cm, height {e[2] * 100:+.0f} cm, "
+                                                           f"heading {math.degrees(e[3]):+.0f} deg left)" if e else ")"))
 
     def turn(self, yaw_t):
         """Turn in place. A turn over 100 deg is split: first face the markers' centroid (the main wall), so the
