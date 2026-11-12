@@ -62,6 +62,7 @@ flowchart LR
 | `ros2 run tello_driver tello_step_test` | `step_test.py` | Identification flight: velocity doublets on each axis, then fits the model (`tello_step_fit`) |
 | `ros2 run tello_driver tello_step_fit <folder>` | `step_fit.py` | Fits `tau dv/dt = K u(t-L) - v` per axis on a recorded identification flight |
 | `ros2 run tello_driver tello_marker_tour` | `marker_tour.py` | Survey turn, then approach and back off in front of every marker |
+| `ros2 run tello_driver tello_goto 49 35` | `goto_markers.py` | Takeoff anywhere (>= 1 m from walls), find the markers (turn on the spot), room centre, then for each marker: face it, go ~0.9 m in front of it (nose kept on the marker, EKF drift cancelled), back to the centre; then back above the pad and land. Band mode by default. Tested on 4 fake drones in parallel (different starts, drift up to 10 cm/s): 1-12 cm from the target points |
 | `ros2 run tello_driver tello_strike` | `strike.py` | Planned trajectories: fast patrol legs and strike / retreat on target markers (balloon rehearsal) |
 
 All missions: ENTER takes off; **any key lands**; Ctrl+C lands; they search by turning when the markers are lost
