@@ -169,10 +169,13 @@ class MarkerTour(StepTest):
             return
         self.search_heading(math.atan2(look_at[1] - self.last_xy[1], look_at[0] - self.last_xy[0]))
 
-    def goto(self, target, yaw_t, timeout=25.0, tol=0.12, yaw_only=False, look_at=None):
+    def goto(self, target, yaw_t, timeout=25.0, tol=0.12, yaw_only=False, look_at=None, face=None):
         """Fly to target (x, y, z) with heading yaw_t; yaw_only: turn in place first. Returns when reached.
-        look_at: where to turn to if the markers are lost (default: the markers' centroid)."""
+        look_at: where to turn to if the markers are lost (default: the markers' centroid).
+        face: (x, y) of a marker: the heading is recomputed at every step to point at it (a fixed heading let the
+        marker slide out of the narrow camera view, 55 deg, when the drone was 20 cm off to the side: sim)."""
         tx, ty, tz = target
+        yaw_fixed = yaw_t
         reached_t = [None]
         last_err = [None]
         look = look_at or self.centroid
@@ -199,10 +202,13 @@ class MarkerTour(StepTest):
                 self.send()  # no fresh pose: hover (the driver/Tello hold position)
                 return None
             _, x, y, z, yaw = self.pose
+            yaw_t = yaw_fixed
+            if face is not None and math.hypot(face[0] - x, face[1] - y) > 0.3:
+                yaw_t = math.atan2(face[1] - y, face[0] - x)
             eyaw = wrap(yaw_t - yaw)
             if yaw_only:
                 ex = ey = ez = 0.0
-                ok = abs(eyaw) < math.radians(10)
+                ok = abs(eyaw) < math.radians(5)
             else:
                 ex, ey, ez = tx - x, ty - y, tz - z
                 ok = math.hypot(ex, ey) < tol and abs(ez) < 0.1 and abs(eyaw) < math.radians(10)
@@ -279,16 +285,17 @@ class MarkerTour(StepTest):
         for i, mid in enumerate(self.sequence):
             w, m = wps[mid], self.markers[mid]
             self.say(f"[{i + 1}/{n}] marker {mid}: turning to face it")
-            self.turn(w["yaw"])
+            _, x, y, _, _ = self.pose
+            self.turn(math.atan2(m.t[1] - y, m.t[0] - x))  # towards the marker from where the drone really is
             d = math.hypot(w["near"][0] - m.t[0], w["near"][1] - m.t[1])
             self.say(f"[{i + 1}/{n}] marker {mid}: going in front of it ({d:.2f} m away)")
-            self.goto(w["near"], w["yaw"], look_at=(m.t[0], m.t[1]), tol=0.10)
+            self.goto(w["near"], w["yaw"], look_at=(m.t[0], m.t[1]), tol=0.10, face=(m.t[0], m.t[1]))
             self.run(self.hold, lambda: self.send())
             _, x, y, _, _ = self.pose
             self.say(f"[{i + 1}/{n}] marker {mid}: reached, {math.hypot(x - w['near'][0], y - w['near'][1]) * 100:.0f} cm "
                      "from the target point")
             self.say(f"[{i + 1}/{n}] back to the room centre")
-            self.goto((cx, cy, zc), w["yaw"], look_at=(m.t[0], m.t[1]))
+            self.goto((cx, cy, zc), w["yaw"], look_at=(m.t[0], m.t[1]), face=(m.t[0], m.t[1]))
         self.return_home()
         self.say("Mission done: landing.")
 
@@ -324,10 +331,10 @@ class MarkerTour(StepTest):
             self.turn(w["yaw"])
             m = self.markers[w["id"]]
             self.say(f"[{i + 1}/{len(wps)}] marker {w['id']}: approach to {math.hypot(w['near'][0] - m.t[0], w['near'][1] - m.t[1]):.2f} m")
-            self.goto(w["near"], w["yaw"], look_at=(m.t[0], m.t[1]), tol=0.10)
+            self.goto(w["near"], w["yaw"], look_at=(m.t[0], m.t[1]), tol=0.10, face=(m.t[0], m.t[1]))
             self.run(self.hold, lambda: self.send())
             self.say(f"[{i + 1}/{len(wps)}] marker {w['id']}: back off to {math.hypot(w['p'][0] - m.t[0], w['p'][1] - m.t[1]):.2f} m")
-            self.goto(w["p"], w["yaw"], look_at=(m.t[0], m.t[1]), tol=0.15)
+            self.goto(w["p"], w["yaw"], look_at=(m.t[0], m.t[1]), tol=0.15, face=(m.t[0], m.t[1]))
         self.say("Back to the start point")
         self.goto((x0, y0, max(z0, self.z_lo)), yaw0)
         self.return_home()
