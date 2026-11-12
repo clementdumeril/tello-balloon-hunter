@@ -761,8 +761,9 @@ class TelloDriver(Node):
         to 0.17 m, among the furniture). Only on a certain EKF height: the distance sensor alone reads low over
         the furniture and would push the drone up for nothing."""
         z = self.zone
-        if (not z or not self.tello.is_flying or self.climb_target is not None or self.pose_xy is None
-                or time.time() - self.pose_t > 0.5 or self.pose_sigma_z > 0.15):
+        # markers in view only (certain horizontal pose too): a dead-reckoned height pushed the drone to 2.6 m (sim)
+        if (not z or not self.tello.is_flying or self.climb_target is not None or not self.pose_valid(0.5, 0.12)
+                or self.pose_sigma_z > 0.10):
             return rc
         lr, fb, ud, yw = rc
         h = self.pose_z

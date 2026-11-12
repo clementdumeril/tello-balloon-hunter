@@ -136,7 +136,14 @@ class DroneEKF:
         P = (np.eye(NX) - K @ H) @ P
         return s, 0.5 * (P + P.T), float(y @ np.linalg.solve(S, y))
 
-    def init_at(self, t, x, y, z, yaw, sigma_p=0.10, sigma_yaw=math.radians(15)):
+    def takeoff(self):
+        """The SDK takeoff lifts the drone to ~0.8 m without any rc command: the height is unknown again (with the
+        5 cm of the pad prior, every distance-sensor reading was then gated out as furniture: sim, the estimate
+        stayed at 0.8 m while the drone climbed to 1.8 m)."""
+        self.P[IZ, IZ] = max(self.P[IZ, IZ], 1.0)
+        self.P[IVZ, IVZ] = max(self.P[IVZ, IVZ], 1.0)
+
+    def init_at(self, t, x, y, z, yaw, sigma_p=0.25, sigma_yaw=math.radians(15)):
         """Start from a known spot (the takeoff pad) before any marker is seen. A wrong spot (drone not on the
         pad) is corrected by the markers: their poses are gated, then the filter restarts from them."""
         self.s[:] = 0.0
@@ -214,6 +221,9 @@ class DroneEKF:
         H[0, IZ] = 1.0
         s1, P1, d2 = self._update(self.s, self.P, np.array([z_meas]), np.array([self.s[IZ]]), H, np.array([[sigma ** 2]]))
         if d2 > gate:
+            # each rejection loosens the height a little: over furniture for a few seconds nothing changes, but a
+            # wrong height can never lock the sensor out for good (~12 s to accept a 0.85 m disagreement)
+            self.P[IZ, IZ] += 0.03 ** 2
             return False
         self.s, self.P = s1, P1
         return True

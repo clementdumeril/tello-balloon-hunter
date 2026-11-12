@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from aruco_localization.marker_map import load_marker_map
-from tello_driver.step_test import Abort, StepTest, run, wrap
+from tello_driver.step_test import RATE, Abort, StepTest, run, wrap
 
 REPO = os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter"))
 
@@ -168,6 +168,7 @@ class MarkerTour(StepTest):
         look_at: where to turn to if the markers are lost (default: the markers' centroid)."""
         tx, ty, tz = target
         reached_t = [None]
+        integ = [0.0, 0.0]
         look = look_at or self.centroid
 
         def step():
@@ -211,6 +212,12 @@ class MarkerTour(StepTest):
             d = math.hypot(ex, ey)
             v = min(self.v_max, self.kp * d, math.sqrt(2 * self.a_max * max(d - 0.5 * tol, 0.0)))
             vx, vy = (ex / d * v, ey / d * v) if d > 1e-3 else (0.0, 0.0)
+            # integral near the target: cancels the drift (sim with 10 cm/s drift: a P-only approach stopped
+            # ~20 cm short, "not reached in time" three times)
+            if d < 0.4:
+                integ[0] = clip(integ[0] + 0.4 * ex / RATE, 0.15)
+                integ[1] = clip(integ[1] + 0.4 * ey / RATE, 0.15)
+            vx, vy = vx + integ[0], vy + integ[1]
             c, s = math.cos(yaw), math.sin(yaw)
             self.send(c * vx + s * vy, -s * vx + c * vy, clip(self.kp * ez, self.vz_max),
                       clip(self.kp_yaw * eyaw, self.w_max))

@@ -83,6 +83,9 @@ class EkfNode(Node):
             self.ekf.init_at(self.now(), self.home["x"], self.home["y"], 0.0, math.radians(self.home["yaw_deg"]))
         elif self.home and st.get("flying"):
             self.home_used = True  # in the air: the markers take over
+        if st.get("flying") and not getattr(self, "was_flying", False) and self.ekf.initialised:
+            self.ekf.takeoff()
+        self.was_flying = bool(st.get("flying"))
         self.ekf.predict(self.now())
         tof = st.get("tof")
         if isinstance(tof, (int, float)) and 15 <= tof <= 400 and st.get("flying"):
