@@ -101,7 +101,9 @@ and land after 15 s without any.
 | Band mode | `band:=true` (launch and missions): free zone computed for the 1.70–2.00 m band only (`config/flight_zone_band.yaml`: all the furniture is below, so the zone is larger), missions plan inside the band, identification aborts outside band ± 0.3 m |
 | Position hold | No horizontal command → hold where the drone stops; no vertical command → hold that height. The Tello's own optical-flow hold does not work on the plain floor of the room (vgx = vgy = 0 in flight), so the driver does it: position predicted L_u ahead, desired speed kp·error, model inversion with the EKF velocity and learnt drift (`/ekf/drift`), small integral. Gains `hold_kp` 0.8, `hold_kv` 0.4, `hold_ki` 0.15, `hold_kp_z` 1.0, changeable in flight (`ros2 param set /tello_driver hold_kp 1.0`). Fake drone with 8/5 cm/s drift: within 2.4 cm at hover (old PI: 13 cm), 9 cm overshoot after a key release (old: 24 cm). `flight_report.py` prints the real hover spread |
 | Ceiling | `max_height` 2.6 m: predicts the height 1 s ahead, brakes, descends above the limit |
-| Free space | Distance to the nearest scanned obstacle (margin 0.35 m), predicted 1 s ahead with the identified model; brakes, pushes back; no pose → no horizontal move |
+| Free space | Distance to the nearest scanned obstacle (margin 0.35 m), predicted 1 s ahead with the identified model; brakes, pushes back; no certain pose → horizontal moves slowed to `blind_speed` 0.15 m/s (they were blocked: the pilot could not get out). The guard that acted is in the telemetry field `guard`; `cmd_in.csv` records what was asked |
+| Before land / takeoff | rc zeroed: the Tello keeps flying with the last rc command while a blocking SDK command runs |
+| EKF without markers | Drift bounded to 0.10 m/s and faded out after 1 s without markers (it ran the estimate 5 m away on flight 225048; replay: 0.75 m) |
 | Wall ahead | A marker closer than 0.7 m in the image → no forward motion, back off |
 | Low battery | ≤ 12 % → lands |
 | Land | A land request always goes through, even during another command |
