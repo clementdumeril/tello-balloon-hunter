@@ -48,12 +48,20 @@ class SessionRecorder(Node):
         self.sent_w.writerow(["t", "cx", "cy", "cz", "cw"])
         self.create_subscription(Twist, "/tello/rc_sent", lambda m: self.sent_w.writerow(
             [f"{time.time():.4f}", f"{m.linear.x:.3f}", f"{m.linear.y:.3f}", f"{m.linear.z:.3f}", f"{m.angular.z:.3f}"]), 50)
+        # what the pilot / the mission asked for, before the driver's hold and guards (compare with rc_sent)
+        self.cmd_f = open(self.out / "cmd_in.csv", "w", newline="")
+        self.cmd_w = csv.writer(self.cmd_f)
+        self.cmd_w.writerow(["t", "cx", "cy", "cz", "cw"])
+        self.create_subscription(Twist, "/tello/cmd_vel_safe", lambda m: self.cmd_w.writerow(
+            [f"{time.time():.4f}", f"{m.linear.x:.3f}", f"{m.linear.y:.3f}", f"{m.linear.z:.3f}", f"{m.angular.z:.3f}"]), 50)
         self.ekf_f = open(self.out / "ekf.csv", "w", newline="")
         self.ekf_w = csv.writer(self.ekf_f)
         self.ekf_w.writerow(["t", "x", "y", "z", "sigma_xy"])
         self.create_subscription(PoseWithCovarianceStamped, "/ekf/pose", lambda m: self.ekf_w.writerow(
             [f"{time.time():.4f}", f"{m.pose.pose.position.x:.4f}", f"{m.pose.pose.position.y:.4f}",
              f"{m.pose.pose.position.z:.4f}", f"{max(m.pose.covariance[0], m.pose.covariance[7]) ** 0.5:.4f}"]), 50)
+        # flush every 2 s: when the launch is killed, close() never runs (flight 225048 lost its last 40 s of poses)
+        self.create_timer(2.0, lambda: [f.flush() for f in (self.pose_f, self.tel_f, self.sent_f, self.cmd_f, self.ekf_f)])
         self.get_logger().info(f"Recording the session in {self.out}")
 
     def on_img(self, m):
@@ -104,6 +112,7 @@ class SessionRecorder(Node):
         self.pose_f.close()
         self.tel_f.close()
         self.sent_f.close()
+        self.cmd_f.close()
         self.ekf_f.close()
 
 

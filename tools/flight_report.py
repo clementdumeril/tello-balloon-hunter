@@ -165,8 +165,8 @@ def main():
     if hold.any() and air_p.any():
         edges = np.flatnonzero(np.diff(np.r_[0, hold.astype(int), 0]))
         devs, zs, total = [], [], 0.0
-        for a, b in zip(edges[::2], edges[1::2]):
-            t_a, t_b = tt[a] + 2.0, tt[b - 1]  # 2 s to stop after the keys are released
+        for i0, i1 in zip(edges[::2], edges[1::2]):
+            t_a, t_b = tt[i0] + 2.0, tt[i1 - 1]  # 2 s to stop after the keys are released
             k = air_p & (pt > t_a) & (pt < t_b)
             if t_b - t_a < 2.0 or k.sum() < 20:
                 continue

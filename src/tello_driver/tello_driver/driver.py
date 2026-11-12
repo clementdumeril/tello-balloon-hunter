@@ -230,6 +230,8 @@ class TelloDriver(Node):
         self.ekf_v, self.ekf_v_t = (0.0, 0.0, 0.0), 0.0
         self.ekf_d = (0.0, 0.0)
         self.hold_drift_ff = p("hold_drift_ff", True).value  # remove the EKF's learnt drift in the hold
+        self.blind_speed = p("blind_speed", 0.15).value      # m/s, horizontal speed allowed without a marker pose
+        self.guard_note, self.guard_note_t = "", 0.0
         # the hold gains can be changed in flight: ros2 param set /tello_driver hold_kp 1.0
         live = {"hold_kp": "hold_kp", "hold_kv": "hold_kv", "hold_ki": "hold_ki", "hold_kp_z": "hold_kpz",
                 "hold_vmax": "hold_vmax", "hold_drift_ff": "hold_drift_ff", "position_hold": "hold_enabled",
@@ -452,6 +454,7 @@ class TelloDriver(Node):
         st["busy"] = self.busy.locked() or self.climb_target is not None
         st["video_fps"] = round(self.video_fps, 1)  # images published per second (the Tello sends 30 at most)
         st["hold"] = self.hold_target is not None  # position hold active (no horizontal command): flight_report
+        st["guard"] = self.guard_note if time.time() - self.guard_note_t < 0.5 else ""
         self.pub_tel.publish(String(data=json.dumps(st)))
         bat = self.state.get("bat")
         if self.tello.is_flying and isinstance(bat, (int, float)) and bat <= self.low_battery:
@@ -491,10 +494,12 @@ class TelloDriver(Node):
             lr, fb, ud, yw = rc
             if hgt > self.max_height:
                 ud = -30
+                self.note("ceiling")
                 self.get_logger().warn(f"height {hgt:.2f} m > {self.max_height:.2f} m: descending",
                                        throttle_duration_sec=1.0)
             elif h_pred > limit:
                 ud = min(ud, -20)  # brake now, or it overshoots
+                self.note("ceiling: brake")
                 self.get_logger().warn(f"height {hgt:.2f} m rising {vz:+.2f} m/s: braking before the "
                                        f"{self.max_height:.2f} m limit", throttle_duration_sec=1.0)
             else:
@@ -511,10 +516,25 @@ class TelloDriver(Node):
         except Exception as e:  # noqa: BLE001
             self.get_logger().warn(f"rc failed: {e}", throttle_duration_sec=2.0)
 
+    def note(self, s):
+        """Which guard changed the command (telemetry 'guard', for flight_report / debugging)."""
+        self.guard_note, self.guard_note_t = s, time.time()
+
+    def stop_rc(self):
+        """The Tello keeps flying with the LAST rc command while no new one comes, and none comes while a takeoff /
+        land command runs (flight 225048: after 'g' it flew on backwards at 0.3 m/s for 5 s, 1.2 m, before the
+        landing started). Zero it before such a command."""
+        try:
+            self.tello.send_rc_control(0, 0, 0, 0)
+            self.pub_sent.publish(Twist())
+        except Exception:  # noqa: BLE001
+            pass
+
     def run_async(self, fn, label):
         def worker():
             if not self.busy.acquire(blocking=False):
                 return
+            self.stop_rc()
             try:
                 self.get_logger().info(label)
                 fn()
@@ -590,16 +610,19 @@ class TelloDriver(Node):
         if d < mg:
             if toward > -0.25:
                 wx, wy = wx + (toward + 0.25) * ux, wy + (toward + 0.25) * uy
+            self.note("zone: push away")
             self.get_logger().warn(f"flight zone: {d:.2f} m from an obstacle at ({x:+.2f}, {y:+.2f}): pushing away",
                                    throttle_duration_sec=1.0)
         elif d_use < mg + 0.1:
             if toward > -0.15:
                 wx, wy = wx + (toward + 0.15) * ux, wy + (toward + 0.15) * uy
+            self.note("zone: brake")
             self.get_logger().warn(f"flight zone: braking ({d_use:.2f} m from an obstacle)", throttle_duration_sec=1.0)
         else:
             allowed = (d_use - mg) * 1.0
             if toward > allowed:
                 wx, wy = wx + (toward - allowed) * ux, wy + (toward - allowed) * uy
+                self.note("zone: slow")
         return wx, wy
 
     def on_near(self, m):
@@ -614,9 +637,11 @@ class TelloDriver(Node):
         d = self.near_d
         if d < self.min_wall:
             fb = min(fb, -12)
+            self.note("wall: back off")
             self.get_logger().warn(f"wall {d:.2f} m ahead (marker size): backing off", throttle_duration_sec=1.0)
         elif d < self.min_wall + self.wall_band and fb > 0:
             fb = int(fb * (d - self.min_wall) / self.wall_band)
+            self.note("wall: slow")
         return (lr, fb, ud, yw)
 
     def pose_valid(self, max_age, max_sigma):
@@ -713,12 +738,15 @@ class TelloDriver(Node):
         if not z or not self.tello.is_flying or self.climb_target is not None:
             return rc
         if not self.pose_valid(0.5, 0.25):
-            # position unknown: the zone cannot be enforced, so no horizontal move at all (turning and up/down stay
-            # allowed, to find the markers again). Without this the drone flew blind through the wall (sim, Nov 10).
-            if rc[0] or rc[1]:
-                self.get_logger().warn("no marker pose: horizontal moves blocked (turn to see the markers)",
-                                       throttle_duration_sec=2.0)
-            return (0, 0, rc[2], rc[3])
+            # position unknown: the zone cannot be enforced. Nov 10 (sim) the drone flew blind through the wall, so
+            # moves were blocked; but then the pilot could not get out (flight 225048: 'it will not go back, I
+            # have to turn'). Now: slow moves only (0.15 m/s, ~1 s to cross the 15 cm the pilot can react in).
+            lim = int(round(self.blind_speed / self.lin_gain))
+            if abs(rc[0]) > lim or abs(rc[1]) > lim:
+                self.note("blind: slow")
+                self.get_logger().warn(f"no marker pose: horizontal moves slowed to {self.blind_speed:.2f} m/s (turn "
+                                       "to see the markers)", throttle_duration_sec=2.0)
+            return (max(-lim, min(lim, rc[0])), max(-lim, min(lim, rc[1])), rc[2], rc[3])
         x, y = self.pose_xy
         vx, vy = self.velocity_xy()
         lr, fb, ud, yw = rc
@@ -776,6 +804,7 @@ class TelloDriver(Node):
             # another command (e.g. a takeoff still waiting for its reply) holds the lock: a landing order must
             # never be dropped, so send it right away without waiting for an answer
             self.get_logger().warn("land while another command is running: sending 'land' immediately")
+            self.stop_rc()
             try:
                 self.tello.send_command_without_return("land")
             except Exception as e:  # noqa: BLE001

@@ -48,6 +48,8 @@ class DroneEKF:
         self.hist = deque()                       # (t, s, P, u_applied) for delayed measurements
         self.history_s = history_s
         self.rejected = 0
+        self.d_max = 0.10      # m/s, largest drift believed
+        self.t_pose = -1e18    # time of the last accepted marker pose
 
     # ------------------------------------------------------------------ model
     def command_at(self, t):
@@ -106,6 +108,13 @@ class DroneEKF:
             dt = min(0.02, t - self.t)
             u = self.command_at(self.t)
             self.s, self.P = self._step(self.s, self.P, u, dt)
+            # the drift is a few cm/s (Nov 11); a larger value is a model error learnt during fast flying. Without
+            # markers it was extrapolated for tens of seconds (flight 225048: the estimate ran 5 m away while the
+            # drone stayed in place): bounded, and faded out after 1 s without markers (tau 2 s)
+            self.s[IDX] = max(-self.d_max, min(self.d_max, self.s[IDX]))
+            self.s[IDY] = max(-self.d_max, min(self.d_max, self.s[IDY]))
+            if self.t - self.t_pose > 1.0:
+                self.s[[IDX, IDY]] *= 1.0 - dt / 2.0
             self.t += dt
             self.hist.append((self.t, self.s.copy(), self.P.copy()))
         while self.hist and self.hist[0][0] < t - self.history_s:
@@ -150,6 +159,7 @@ class DroneEKF:
             self.hist.clear()
             self.initialised = True
             self.b_init = False
+            self.t_pose = t_recv
             return True
         self.predict(t_recv)
         t_meas = t_recv - self.L_v
@@ -173,6 +183,7 @@ class DroneEKF:
             self.rejected = 0
             return self.update_pose(t_recv, pose, sigma_p, sigma_yaw)
         self.rejected = 0
+        self.t_pose = t_recv
         # re-propagate from the image time to now with the stored commands
         t_now = self.t
         self.s, self.P, self.t = s1, P1, t0
