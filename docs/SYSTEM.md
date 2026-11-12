@@ -97,7 +97,8 @@ and land after 15 s without any.
 | Layer | Rule |
 |---|---|
 | Command watchdog | No command for 0.5 s → hover |
-| Climb after takeoff | Climbs to `takeoff_height` (auto: median marker height − 0.3 m, ≤ 2.0 m) with joystick commands, closed loop on the distance sensor / EKF |
+| Climb after takeoff | Climbs to `takeoff_height` (auto: median marker height − 0.3 m, ≤ 2.0 m; band mode: the middle of the band, 1.85 m) with joystick commands, closed loop on the distance sensor / EKF |
+| Band mode | `band:=true` (launch and missions): free zone computed for the 1.70–2.00 m band only (`config/flight_zone_band.yaml`: all the furniture is below, so the zone is larger), missions plan inside the band, identification aborts outside band ± 0.3 m |
 | Position hold | No horizontal command → PI hold on the EKF position (cancels the drift; the Tello's own optical-flow hold works only on a lit, textured floor) |
 | Ceiling | `max_height` 2.6 m: predicts the height 1 s ahead, brakes, descends above the limit |
 | Free space | Distance to the nearest scanned obstacle (margin 0.35 m), predicted 1 s ahead with the identified model; brakes, pushes back; no pose → no horizontal move |
@@ -125,9 +126,10 @@ command limit, checked against the free space before flying; tracked with the mo
 
 | File | Made by | Content |
 |---|---|---|
-| `config/markers.yaml` | `scripts/room_mapper.py` (photos + bundle adjustment) | Dictionary (DICT_6X6_50), size (0.20 m), pose of every marker |
+| `config/markers.yaml` | `scripts/room_mapper.py` (photos + bundle adjustment) | Dictionary (DICT_6X6_50), real printed size (0.1889 m: the sheets were shrunk ~6 % by the printer; set from the room scan), full pose of every marker (optional per-marker `size`) |
 | `config/tello_camera.yaml` | `scripts/calibrate_camera.py` | Camera intrinsics and distortion |
-| `config/flight_zone.yaml` + `_grid.npz` + `.png` | `tools/free_zone.py` (room scan) | Mission rectangle and free-space grid (distance to obstacles) |
+| `config/flight_zone.yaml` + `_grid.npz` + `.png` | `tools/free_zone.py` (room scan) | Mission rectangle and free-space grid (distance to obstacles), heights 1.4–2.4 m |
+| `config/flight_zone_band.yaml` + `_grid.npz` + `.png` | `tools/free_zone.py --z 1.7 2.0` | Same for the band mode (1.70–2.00 m) |
 | `src/tello_driver/config/fastdds_local.xml` | — | ROS 2 transport: loopback only, packets ≤ 1400 B (WSL mirrored networking drops larger UDP packets) |
 | `src/tello_driver/config/real.rviz` | — | RViz layout |
 
@@ -144,6 +146,8 @@ command limit, checked against the free space before flying; tracked with the mo
 | `tools/measure_latency.py` | Perception latency of a recorded flight: ArUco heading vs IMU heading during turns (first reliable value: ~190 ms) |
 | `tools/video_latency_bench.py` | Video reader latency bench on a fake H.264 Tello stream (no drone): decoding on the PC costs ~45-50 ms; the main latency is in the drone and the Wi-Fi |
 | `tools/ekf_replay.py` | Replays a recorded flight through the EKF with markers hidden: dead-reckoning error |
+| `tools/align_scan.py` | Aligns the phone scan on the marker map from the markers found in its texture (scale, residual per marker) |
+| `tools/flight_report.py` | After a flight: markers in view, pose jumps, ArUco height vs distance sensor, time in the band, mission tracking error; `report.txt` + `report.png` in the session |
 
 ## Simulation
 
