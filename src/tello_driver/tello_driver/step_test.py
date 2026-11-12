@@ -391,15 +391,9 @@ class StepTest(Node):
                 samples.append(self.pose[1:])
                 self.send()
             elif imu0 is not None and time.time() - t0 > 2.0:
-                # no marker yet: sweep +-40 deg around the takeoff heading (IMU) to find them; after one sweep,
-                # turn on the spot (the drone may have been put down facing a wall without markers)
-                imu = self.imu_yaw()
-                if time.time() - t0 < 8.0:
-                    tgt = imu0 + math.radians(40) * math.sin(2 * math.pi * (time.time() - t0 - 2.0) / 6.0)
-                    if imu is not None:
-                        self.send(cw=max(-0.5, min(0.5, 0.9 * wrap(tgt - imu))), blind=True)
-                else:
-                    self.send(cw=0.4, blind=True)
+                # no marker yet: turn on the spot until some come into view (the drone may face a wall whose
+                # markers are above the camera view; a +-40 deg sweep first wasted 6 s while it drifted, sim)
+                self.send(cw=0.5, blind=True)
                 if int(time.time() - t0) % 4 == 0 and int(time.time() - t0) != getattr(self, "_said0", -1):
                     self._said0 = int(time.time() - t0)
                     self.say("  no marker yet: turning to find them")

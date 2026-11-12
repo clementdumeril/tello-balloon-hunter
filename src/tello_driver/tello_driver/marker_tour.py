@@ -192,7 +192,7 @@ class MarkerTour(StepTest):
                 if yaw is None:
                     self.send()
                     return None
-                eyaw = wrap(yaw_t - yaw)
+                eyaw = wrap(yaw_fixed - yaw)
                 if abs(eyaw) < math.radians(10):
                     self.send()
                     return None  # wait for the markers to confirm the heading
@@ -202,10 +202,10 @@ class MarkerTour(StepTest):
                 self.send()  # no fresh pose: hover (the driver/Tello hold position)
                 return None
             _, x, y, z, yaw = self.pose
-            yaw_t = yaw_fixed
+            yaw_g = yaw_fixed
             if face is not None and math.hypot(face[0] - x, face[1] - y) > 0.3:
-                yaw_t = math.atan2(face[1] - y, face[0] - x)
-            eyaw = wrap(yaw_t - yaw)
+                yaw_g = math.atan2(face[1] - y, face[0] - x)
+            eyaw = wrap(yaw_g - yaw)
             if yaw_only:
                 ex = ey = ez = 0.0
                 ok = abs(eyaw) < math.radians(5)
