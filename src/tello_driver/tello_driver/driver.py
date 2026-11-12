@@ -228,6 +228,20 @@ class TelloDriver(Node):
         self.hold_t = 0.0
         self.ekf_v, self.ekf_v_t = (0.0, 0.0, 0.0), 0.0
         self.ekf_d = (0.0, 0.0)
+        self.hold_drift_ff = p("hold_drift_ff", True).value  # remove the EKF's learnt drift in the hold
+        # the hold gains can be changed in flight: ros2 param set /tello_driver hold_kp 1.0
+        live = {"hold_kp": "hold_kp", "hold_kv": "hold_kv", "hold_ki": "hold_ki", "hold_kp_z": "hold_kpz",
+                "hold_vmax": "hold_vmax", "hold_drift_ff": "hold_drift_ff", "position_hold": "hold_enabled",
+                "height_hold": "hold_z"}
+
+        def on_params(params):
+            from rcl_interfaces.msg import SetParametersResult
+            for prm in params:
+                if prm.name in live:
+                    setattr(self, live[prm.name], prm.value)
+                    self.get_logger().info(f"{prm.name} = {prm.value}")
+            return SetParametersResult(successful=True)
+        self.add_on_set_parameters_callback(on_params)
         # obstacle-free flight zone from the room scan (tools/free_zone.py): commands that would take the drone
         # out of it are cut, whatever program sends them (Nov 10: a test drifted 1 m back towards furniture)
         self.zone = load_zone(p("flight_zone_file", "").value)
@@ -667,7 +681,7 @@ class TelloDriver(Node):
             vx, vy, vz = self.ekf_v
         else:
             (vx, vy), vz = self.velocity_xy(), 0.0
-        dx, dy = self.ekf_d if now - self.ekf_v_t < 0.3 else (0.0, 0.0)
+        dx, dy = self.ekf_d if (self.hold_drift_ff and now - self.ekf_v_t < 0.3) else (0.0, 0.0)
         clip = lambda v: int(max(-self.max_rc, min(self.max_rc, round(v))))  # noqa: E731
         if not moving_xy:
             if self.hold_target is None:
