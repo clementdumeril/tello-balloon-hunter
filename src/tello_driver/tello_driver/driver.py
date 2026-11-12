@@ -213,11 +213,12 @@ class TelloDriver(Node):
         # v2 (Nov 11, flight 221322: the old PI, kp 0.6, swung 30-50 cm after each key release and let the height
         # wander 1.60-1.85 m): position predicted L_u ahead (the command acts 0.3 s later), desired velocity
         # kp * error, model inversion u = (v_d - drift + kv (v_d - v)) / K with the EKF velocity and drift, and a
-        # small integral for the model errors. Offline sim on the identified model: 0.3 cm overshoot instead of
-        # 15 cm, 4 cm instead of 12 cm under a 10 cm/s drift step; stable with K +-25 % and L_u 0.45 s.
+        # small integral for the model errors. Gains tuned on the fake drone (full pipeline: video delay, ArUco,
+        # EKF; drift 8/5 cm/s): kp 1.2 / kv 0.7 circled +-4 cm, kp 0.8 / kv 0.4 / ki 0.15 holds within 2.4 cm
+        # (old PI: 13 cm) and overshoots 7-9 cm after a key release (old: 24 cm).
         # Height: same loop on the EKF height (ArUco + distance sensor), at the height where the pilot released.
         self.hold_enabled = p("position_hold", True).value
-        self.hold_kp, self.hold_kv, self.hold_ki = p("hold_kp", 1.2).value, p("hold_kv", 0.7).value, p("hold_ki", 0.4).value
+        self.hold_kp, self.hold_kv, self.hold_ki = p("hold_kp", 0.8).value, p("hold_kv", 0.4).value, p("hold_ki", 0.15).value
         self.hold_vmax = p("hold_vmax", 0.4).value     # m/s, the hold never moves faster than this
         self.hold_z = p("height_hold", True).value
         self.hold_kpz = p("hold_kp_z", 1.0).value
