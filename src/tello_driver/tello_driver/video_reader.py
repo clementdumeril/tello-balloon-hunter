@@ -30,7 +30,7 @@ URL = "udp://@0.0.0.0:11111?overrun_nonfatal=1&fifo_size=8000"
 BEHIND_WINDOW = 1.0     # s of packets looked at to decide that the reader is behind
 BEHIND_WAIT = 0.03      # behind if it waited for data less than 3 % of that time (real time: most of it)
 MAX_SKIP = 2.0          # s: give up waiting for a key frame and decode again (artifacts until the next one)
-# chosen with tools/video_latency_bench.py: nobuffer + short probe + decoder low_delay gave the best tails
+# chosen with a latency bench on a fake H.264 stream: nobuffer + short probe + decoder low_delay gave the best tails
 # (p90 49 ms vs 60, max 68 vs 120 for djitellopy). Adding max_delay=0 / flags=low_delay at the FORMAT level lost
 # images, and FRAME threading (thread_type AUTO) added ~260 ms: never enable it.
 FORMAT_OPTIONS = {"fflags": "nobuffer", "probesize": "32768", "analyzeduration": "0"}
@@ -39,7 +39,7 @@ FORMAT_OPTIONS = {"fflags": "nobuffer", "probesize": "32768", "analyzeduration":
 class LowLatencyReader:
     def __init__(self, url=URL, low_latency=True, log=None, format_options=None, codec_low_delay=None,
                  thread_type=None):
-        """low_latency=True: the settings chosen from the bench (tools/video_latency_bench.py); the other
+        """low_latency=True: the settings chosen from the latency bench; the other
         arguments override single settings for experiments."""
         self.url = url
         self.low_latency = low_latency

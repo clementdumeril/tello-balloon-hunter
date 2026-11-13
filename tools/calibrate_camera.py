@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Camera calibration for the Tello with the printed checkerboard (docs/print/checkerboard_A4.pdf).
 
-    python scripts/calibrate_camera.py            (or double-click calibrer_camera.bat)
+    python tools/calibrate_camera.py
 
 No target to aim at: move the board freely in front of the camera. The image is split into 9 cells
 that turn green as the board passes over them, and a checklist shows what is still missing (near, far,

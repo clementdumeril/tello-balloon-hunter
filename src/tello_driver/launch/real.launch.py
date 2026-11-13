@@ -142,9 +142,9 @@ def generate_launch_description():
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("record", default_value="true", description="save images, poses, telemetry in ~/tello_ws/sessions"),
         DeclareLaunchArgument("markers", default_value=os.path.join(REPO, "config", "markers.yaml")),
-        DeclareLaunchArgument("band", default_value="false",
-                              description="band mode: fly only in the 1.70-2.00 m band (config/flight_zone_band.yaml), "
-                                          "takeoff climbs to its middle; pass band:=true to the missions too"),
+        DeclareLaunchArgument("band", default_value="true",
+                              description="band mode (default): fly in the 1.70-2.00 m band (config/flight_zone_band.yaml), "
+                                          "takeoff climbs to its middle (1.85 m); band:=false = zone 1.4-2.4 m"),
         DeclareLaunchArgument("flight_zone", default_value="auto",
                               description="obstacle-free zone YAML; auto = config/flight_zone.yaml; none = no zone"),
         DeclareLaunchArgument("room_mesh", default_value="auto",

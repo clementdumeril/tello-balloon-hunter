@@ -16,7 +16,6 @@ setup(
     entry_points={"console_scripts": [
         "tello_driver = tello_driver.driver:main",
         "tello_teleop = tello_driver.teleop:main",
-        "tello_teleop_gui = tello_driver.teleop_gui:main",
         "tello_step_test = tello_driver.step_test:main",
         "tello_step_fit = tello_driver.step_fit:main",
         "tello_marker_tour = tello_driver.marker_tour:main",

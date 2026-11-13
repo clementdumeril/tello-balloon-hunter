@@ -1,6 +1,0 @@
-djitellopy==2.5.0
-opencv-python>=4.9
-pynput>=1.7
-numpy>=1.26
-pyyaml>=6
-scipy>=1.11

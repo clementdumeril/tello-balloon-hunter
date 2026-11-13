@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Map the room's ArUco markers with the Tello camera: no tape measure, no reference corner.
 
-    python scripts/room_mapper.py calibrate      # 1. camera calibration with the printed checkerboard
-    python scripts/room_mapper.py capture        # 2. film the markers (drone held by hand, motors off)
-    python scripts/room_mapper.py solve          # 3. compute config/markers.yaml from the captured frames
+    python tools/room_mapper.py calibrate      # 1. camera calibration with the printed checkerboard
+    python tools/room_mapper.py capture        # 2. film the markers (drone held by hand, motors off)
+    python tools/room_mapper.py solve          # 3. compute config/markers.yaml from the captured frames
 
 How it works: the printed size of every marker is known (15 cm), so each image that shows two markers
 gives their relative pose. Chaining these pairs gives a first map; a bundle adjustment then refines all
@@ -109,8 +109,16 @@ def save_calib(path, K, D, size, rms):
 
 def tello_stream():
     """Generator of BGR frames from the drone (djitellopy), with a clean shutdown."""
-    from first_flight import check_tello_network  # fails fast with a clear message if not on the Tello Wi-Fi
-    check_tello_network()
+    import socket  # fail fast with a clear message if this PC is not on the Tello Wi-Fi (192.168.10.x)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("192.168.10.1", 8889))  # no packet sent: only asks which local address would be used
+        local_ip = s.getsockname()[0]
+        s.close()
+    except OSError:
+        local_ip = "?"
+    if not local_ip.startswith("192.168.10."):
+        sys.exit(f"Not on the Tello Wi-Fi (address towards the drone: {local_ip}): connect to TELLO-xxxxxx first.")
     from djitellopy import Tello
     t = Tello()
     try:
@@ -222,7 +230,7 @@ def cmd_capture(a):
     print(f"{n} frames + {floor_saved} floor frames in {out}. Markers seen: {dict(sorted(seen.items()))}")
     if len(connected_groups(seen.keys(), pairs)) > 1:
         print("WARNING: some markers are never seen together with the others: film the gaps again.")
-    print(f"Next: python scripts/room_mapper.py solve --dir \"{out}\"")
+    print(f"Next: python tools/room_mapper.py solve --dir \"{out}\"")
 
 
 def connected_groups(nodes, pairs):
@@ -522,7 +530,7 @@ def cmd_solve(a):
     xs, ys, zs = [m["x"] for m in out], [m["y"] for m in out], [m["z"] for m in out]
     lines = [
         "# Marker map: the SINGLE source of truth for the marker layout (sim + real localizer).",
-        f"# Measured by scripts/room_mapper.py on {datetime.now():%Y-%m-%d %H:%M} from {cap.name}",
+        f"# Measured by tools/room_mapper.py on {datetime.now():%Y-%m-%d %H:%M} from {cap.name}",
         f"# ({len(cams)} images, bundle adjustment RMS {np.sqrt(np.mean(np.sum(r1 ** 2, 1))):.2f} px; {floor_note}).",
         f"# Frame map: origin on the floor below marker {origin}, y out of its wall into the room, z up.",
         "# Each marker: centre (m), yaw_deg = direction the marker faces, q = full orientation (quaternion x y z w,",

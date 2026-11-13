@@ -53,7 +53,7 @@ class StepTest(Node):
     PREFIX = "step"
     MOVE_TO_ZONE_CENTRE = True
     POSE_TOPIC = "/aruco/pose"
-    BAND_DEFAULT = False
+    BAND_DEFAULT = True   # band mode everywhere (launch default); band:=false = zone 1.4-2.4 m
 
     def __init__(self):
         super().__init__(self.NODE_NAME)

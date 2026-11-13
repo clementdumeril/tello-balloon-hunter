@@ -1,163 +1,107 @@
 # Architecture
 
-- [Frames and TF tree](#frames-and-tf-tree)
-- [ROS 2 nodes and topics](#ros-2-nodes-and-topics)
-- [Localization from ArUco markers](#localization-from-aruco-markers)
-- [Drone EKF](#drone-ekf)
-- [Balloon EKF](#balloon-ekf)
-- [Control](#control)
-- [Mission state machine](#mission-state-machine)
-- [Simulation strategy](#simulation-strategy)
+What runs, who talks to whom, and where each piece of code is. Everything below is implemented and flies.
 
----
+## The idea in four steps
 
-## Frames and TF tree
+1. **See the markers.** The camera image goes to the ArUco localizer, which computes where the drone is in the room
+   (`map` frame) from the marker map measured beforehand (`config/markers.yaml`).
+2. **Know where it is all the time.** The EKF fuses that pose with the commands really sent, the distance sensor and
+   the IMU heading. It compensates the ~0.5 s delay and keeps estimating for a few seconds without markers.
+3. **Decide where to go.** A mission (or the teleop) asks for a velocity on `/tello/cmd_vel_safe`.
+4. **Fly safely.** The driver passes every request through its safety chain, then sends it to the Tello.
 
-Conventions follow ROS REP-103 and REP-105: x forward, y left, z up, in meters and radians. Camera frames use the optical convention (z forward, x right, y down) and carry the suffix `_optical`.
-
-```mermaid
-graph TD
-    map["map<br/>(origin: room corner, z = floor)"]
-    map --> aruco["aruco_0 … aruco_N<br/>static, from config/markers.yaml"]
-    map --> logi["logitech_cam_optical<br/>static, calibrated at startup (B7)"]
-    map --> base["base_link<br/>published ONLY by drone_ekf"]
-    map --> balloon["balloon<br/>published by balloon_ekf"]
-    base --> tcam["tello_camera_optical<br/>static: forward, small offset"]
-```
-
-**Rule:** a frame has exactly one publisher. The ArUco localizer does **not** publish TF. It publishes a pose measurement, and `drone_ekf` alone publishes `map → base_link`.
-
-## ROS 2 nodes and topics
+## ROS 2 graph
 
 ```mermaid
 flowchart LR
-    subgraph HW["Hardware"]
-        tello["Tello"]
-        c922["Logitech C922"]
-    end
-
-    tello <-->|UDP| drv["tello_driver"]
-    c922 --> cam["usb_cam"]
-
-    drv -- "/tello/image_raw<br/>/tello/camera_info" --> loc["aruco_localizer"]
-    drv -- "/tello/telemetry" --> ekf["drone_ekf"]
-    loc -- "/aruco/pose<br/>(PoseWithCovarianceStamped)" --> ekf
-    ekf -- "TF map→base_link<br/>/drone/odom" --> ctrl["position_controller"]
-
-    drv -- "/tello/image_raw" --> yolo["balloon_detector (tello)"]
-    cam -- "/logitech/image_raw" --> det2["balloon_detector (fixed)"]
-    yolo -- "/balloon/detections/tello" --> bekf["balloon_ekf"]
-    det2 -- "/balloon/detections/fixed" --> bekf
-    bekf -- "TF map→balloon" --> mission["mission"]
-    ekf --> mission
-    mission -- "/goal_pose or /servo_cmd" --> ctrl
-    ctrl -- "/tello/cmd_vel" --> safety["safety_layer"]
-    safety -- "/tello/cmd_vel_safe" --> drv
+    T((Tello)) -- "video 30 fps, telemetry 10 Hz (Wi-Fi UDP)" --> D[tello_driver]
+    D -- "/tello/image_raw, /tello/camera_info" --> L[aruco_localizer]
+    M[marker_map_publisher] -- "static TF map → aruco_i" --> L
+    L -- /aruco/pose --> E[tello_ekf]
+    D -- "/tello/telemetry, /tello/rc_sent" --> E
+    E -- "/ekf/pose, /ekf/velocity, /ekf/drift" --> D
+    E -- /ekf/pose --> P
+    L -- /aruco/nearest_marker --> D
+    P[tello_goto / tello_teleop] -- /tello/cmd_vel_safe --> D
+    P -- "~/takeoff, ~/land" --> D
+    D -- "rc commands 20 Hz" --> T
+    E --> R[RViz]
+    L --> R
+    D --> S[session_recorder]
 ```
 
-| Package | Nodes | Owner role |
+| Node | File | Role |
 |---|---|---|
-| `tello_driver` | `tello_driver`, `safety_layer`, `teleop` | Drone & control |
-| `aruco_localization` | `aruco_localizer`, `marker_map_publisher`, `marker_mapper` (B6), `fixed_cam_extrinsics` | Localization & mapping |
-| `estimation` | `drone_ekf`, `balloon_ekf` (+ pure-Python EKF library, unit tested) | State estimation |
-| `perception` | `balloon_detector` (YOLO or HSV backend) | Perception |
-| `control` | `position_controller`, `visual_servo` | Drone & control |
-| `mission` | `mission` (state machine) | Mission & integration |
-| `sim` | toy simulator (pure Python), Gazebo world | State estimation |
+| `tello_driver` | `tello_driver/driver.py` | Link to the drone (djitellopy), video (`video_reader.py`), telemetry, takeoff + climb, landing; every command goes through `safety.py` |
+| `aruco_localizer` | `aruco_localization/aruco_localizer.py` | One joint PnP over the corners of all visible markers → `/aruco/pose`; distance to the closest marker → `/aruco/nearest_marker` |
+| `tello_ekf` | `tello_driver/ekf_node.py` + `ekf_core.py` | Drone state estimate, TF `map → base_link` |
+| `marker_map_publisher` | `aruco_localization/marker_map_publisher.py` | Static TF of the markers and the camera mount; room scan and free space for RViz |
+| `session_recorder` | `tello_driver/session_recorder.py` | Saves every flight in `~/tello_ws/sessions/<time>/` |
+| missions / teleop | `goto_markers.py`, `marker_tour.py`, `strike.py`, `teleop.py` | Velocity requests on `/tello/cmd_vel_safe` |
 
-## Localization from ArUco markers
+All nodes are started by `src/tello_driver/launch/real.launch.py` (except the mission / teleop, run in a second
+terminal). `mock:=true` replaces the Tello by `fake_tello.py` + `fake_world.py`: a virtual camera renders the real
+marker map and the drone moves with the identified dynamics; every other node is the real one.
 
-When the Tello camera sees markers whose poses in `map` are known from `markers.yaml`:
+## What happens to a command (`safety.py`, 20 Hz)
 
-1. Detect the markers (`cv2.aruco`, dictionary `DICT_4X4_50`) and refine the corners to subpixel accuracy.
-2. Gather **the 3D corners of all visible markers** in `map` together with their 2D detections, and solve **one** `solvePnP` (then refine with Levenberg–Marquardt). This is much more accurate than averaging single-marker poses, and it removes the planar "flip" ambiguity of a single marker.
-3. Compose with the camera mount:
-
-$$T_{map}^{base} = T_{map}^{cam} \cdot \left(T_{base}^{cam}\right)^{-1}$$
-
-4. Estimate a covariance from the reprojection residuals (or from a model fitted on the C4 data as a function of distance and number of markers), and publish it as a measurement for the EKF.
-
-**Reject a solution** when fewer than 4 corners are visible, the reprojection error is too large, or the jump from the EKF prediction fails the χ² gate (that test lives in the EKF).
-
-**Fixed camera extrinsics (B7).** A reference marker in the C922 view gives $T_{logi}^{ref}$, and therefore $T_{map}^{logi} = T_{map}^{ref} \cdot (T_{logi}^{ref})^{-1}$. This is computed once at startup and then published as a static transform.
-
-## Drone EKF
-
-### State
-
-$$\mathbf{x} = [\,p_x,\ p_y,\ p_z,\ v_x,\ v_y,\ v_z,\ \psi,\ \dot\psi,\ b_\psi\,]^\top$$
-
-Positions and velocities are expressed in `map`. $\psi$ is the yaw, and $b_\psi$ is the offset between the Tello's internal yaw reference (its heading at power-on) and `map`, modeled as a slow random walk.
-
-### Process model
-
-- **v1: constant velocity**, driven by white acceleration noise, at about 50 Hz.
-- **v2: command input.** The first-order response identified in F1, $\dot v = (k\,u - v)/\tau$, where $u$ is the `rc` command rotated into `map`.
-
-### Measurements
-
-| Source | Measurement $z$ | Model $h(\mathbf{x})$ | Notes |
-|---|---|---|---|
-| ArUco pose | $[p_x, p_y, p_z, \psi]$ | linear | Delayed by the video latency (A5), covariance from the localizer |
-| Tello velocity | $[v^b_x, v^b_y, v_z]$ | $R_z(\psi)^\top [v_x, v_y]^\top,\ v_z$ | **Nonlinear in ψ, hence the EKF.** Units, resolution and frame to be confirmed in A6 (likely integer dm/s, i.e. 0.1 m/s quantization) |
-| ToF height | $h$ | $p_z$ | Assumes a flat floor; reject readings over furniture |
-| IMU yaw | $\psi_{imu}$ | $\psi - b_\psi$ | Fast, slowly drifting |
-
-### Robustness
-
-- **χ² gating:** reject a measurement when $\nu^\top S^{-1} \nu > \chi^2_{k,\,0.99}$.
-- **Angle wrapping:** wrap ψ and every yaw innovation into $[-\pi, \pi]$.
-- **Delayed measurements (E4):** keep a ring buffer of (state, covariance, input) over about 1 s. When an image-based measurement stamped at $t_{img} = t_{rx} - \hat{\tau}_{latency}$ arrives, roll back to $t_{img}$, apply the update, then re-propagate to now.
-
-### Validation
-
-On the toy simulator: RMSE against ground truth, NEES and NIS consistency, and innovation plots. On hardware: the C4 and I2 protocols.
-
-## Balloon EKF
-
-- **State:** $\mathbf{x}_b = [b_x, b_y, b_z]^\top$ in `map`. The balloon is tethered, so its position is modeled as a slow random walk.
-- **Measurements:** pixel center $(u, v)$ plus apparent diameter $d$ from each camera, through the pinhole model and the known balloon diameter $D$:
-  - Range estimate: $r \approx f D / d$
-  - Tello measurements go through $T_{map}^{cam}$ from the drone EKF, so their uncertainty also includes the drone pose uncertainty.
-  - C922 measurements go through the static $T_{map}^{logi}$.
-- When there is no detection, the filter keeps predicting and the covariance grows. The mission uses that covariance to decide between searching and approaching.
-
-## Control
-
-- **Position controller:** a PID on the position error in `map`, rotated into the body frame, saturated, then sent as `rc` commands. Yaw uses a separate PID. The D term uses the **EKF velocity**, not a derivative of a noisy pose.
-- **Visual servoing (final approach):** yaw rate ∝ horizontal pixel error of the balloon, $v_z$ ∝ vertical pixel error, and forward speed from a profile on the apparent balloon size. The pin is aligned with the image center (calibrated in H1).
-- **Safety layer:** speed limits, command watchdog (hover if no command arrives for more than 0.3 s), emergency land key, low-battery land.
-
-## Mission state machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> Preflight
-    Preflight --> Takeoff: checks OK (battery, localization)
-    Takeoff --> Localize: airborne
-    Localize --> Search: EKF converged
-    Search --> GoToStandoff: balloon covariance small
-    GoToStandoff --> VisualServo: balloon in view at about 1 m
-    VisualServo --> Strike: balloon centered and close
-    Strike --> Verify
-    Verify --> Return: balloon gone (popped)
-    Verify --> Search: balloon still there
-    VisualServo --> Search: balloon lost > 1 s
-    Return --> Land
-    Land --> [*]
-
-    Localize --> Land: localization lost
-    Search --> Land: timeout / low battery
+```
+request (mission / teleop, zero after 0.5 s without one)
+ → climb after takeoff     the Tello stops at ~0.8 m: climb to 1.85 m (middle of the band) where the markers are in view
+ → position hold           no horizontal request: hold where the drone stops; no vertical one: hold the height
+ → ceiling                 never above 2.6 m (on the height predicted 1 s ahead)
+ → height band             not more than 10 cm out of 1.70–2.00 m (the obstacle map is only valid there)
+ → flight zone             slow down, brake, push back before the obstacles of the room scan; blind: 0.15 m/s max
+ → wall ahead              a marker closer than 0.7 m in the image: no forward motion, back off
+→ Tello (rc), and /tello/rc_sent (what was really sent: the EKF's input)
 ```
 
-Any state can trigger an emergency land, through the operator key or the watchdog.
+The position hold is needed because the Tello's own optical-flow hold does not work on the plain floor of the room.
+It predicts the position 0.3 s ahead (command delay), inverts the identified model and cancels the drift learnt by
+the EKF. `CommandFilter` has no ROS dependency, so it is tested offline (400 randomized flights with key mashing,
+blind periods, wrong poses and model errors).
 
-## Simulation strategy
+## Model and EKF
 
-The course requires the final result on real hardware. Simulation **only speeds up development**.
+Identified on the real drone: per horizontal axis `tau dv/dt = K u(t - L) - v` with K ≈ 1.1, tau ≈ 0.55 s, and a
+total delay of ~0.5 s from command to marker pose (0.30 s command + 0.20 s video).
 
-| Tool | Used for | Not used for |
+EKF state `[x, y, z, vx, vy, vz, yaw, b, dx, dy]` (b: IMU heading offset; dx, dy: drift learnt while markers are seen,
+bounded to 0.10 m/s and faded out without markers). Input: the commands really sent. Measurements: the marker pose,
+applied at the time the image was taken and re-propagated to now (chi-square gate); the distance sensor (gated out
+over furniture); the IMU heading. It starts on 3 consistent poses, or on the takeoff pad (`config/home.yaml`).
+
+## Frames
+
+| Frame | Parent | Published by |
 |---|---|---|
-| **Python toy simulator (D1)** | Developing and tuning the EKFs with exact ground truth, outliers and delays | Anything visual |
-| **Rosbag replay** | Perception evaluation (real compression, real lighting), offline localizer and EKF testing | Closed-loop control |
-| **Gazebo Harmonic (D2–D3)**, `tello_sim` package | Validating ROS nodes and TF frames before the first real flight · closed-loop tests of the controller and mission, with injected latency and H.264 compression | YOLO accuracy, which suffers from the sim-to-real gap |
+| `map` | — | room frame: origin on the floor below marker 49, z up |
+| `aruco_<id>` | `map` | marker_map_publisher (static), from `config/markers.yaml` |
+| `base_link` | `map` | tello_ekf (filtered drone) |
+| `base_link_aruco` | `map` | aruco_localizer (raw marker pose) |
+| `tello_camera_optical` | `base_link` | marker_map_publisher (static), 5 cm ahead of the body |
+
+## Missions
+
+| Command | What it does |
+|---|---|
+| `tello_goto 49 35` | Takeoff anywhere ≥ 1 m from the walls, turn on the spot until markers are in view, fly to the room centre; for each marker: turn to face it, go ~0.9 m in front of it (nose kept on the marker), stop 1 s, back to the centre; then back above the takeoff pad and land |
+| `tello_marker_tour` | Visit every marker of the map |
+| `tello_strike` | Fast planned legs and strike / retreat on target markers (balloon rehearsal) |
+| `tello_step_test` | Identification flight (velocity doublets), then `tello_step_fit` fits the model |
+
+ENTER takes off, any key lands, Ctrl+C lands; markers lost: the drone turns to find them, lands after 12 s.
+
+## Configuration and tools
+
+| File | Made by |
+|---|---|
+| `config/markers.yaml` | `tools/room_mapper.py` (photos of the markers + bundle adjustment) |
+| `config/tello_camera.yaml` | `tools/calibrate_camera.py` (checkerboard) |
+| `config/flight_zone_band.yaml` (+ grid, png) | `tools/free_zone.py` on the phone scan of the room (`tools/room_mesh_to_map.py`, `tools/align_scan.py`) |
+| `config/home.yaml` (local) | `tools/set_home.py`: the takeoff pad (marker 48), learnt from the first poses of each climb |
+
+Other tools: `tools/flight_report.py` (after a flight: markers in view, pose jumps, time in the band, hover spread,
+mission tracking error), `tools/ekf_replay.py` (replays a flight through the EKF), `tools/make_print_sheets.py`
+(printable markers, in `docs/print/`).

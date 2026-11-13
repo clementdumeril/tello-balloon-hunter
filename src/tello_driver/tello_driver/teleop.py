@@ -1,4 +1,4 @@
-"""Keyboard teleop for the Tello in a terminal (same keys as scripts/first_flight.py).
+"""Keyboard teleop for the Tello in a terminal (t take off, arrows, i/k up/down, j/l turn, g land, x emergency).
 
     ros2 run tello_driver tello_teleop
 
