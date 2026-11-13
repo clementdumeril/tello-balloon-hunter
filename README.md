@@ -11,6 +11,11 @@ the missions, every file).
 
 Everything runs on one laptop: Windows connects to the drone's Wi-Fi, ROS 2 Jazzy runs in WSL2 (Ubuntu 24.04).
 
+**Quickest: double-click `tello.bat`** (drone on first): it connects the USB Wi-Fi dongle to the Tello, starts
+the launch below with RViz, and opens a second terminal ready for the commands. `tello.bat mock` = fake drone.
+
+By hand:
+
 ```bash
 # terminal 1 (WSL): driver + localizer + EKF + RViz. Band mode (1.70-2.00 m) is the default.
 ros2 launch tello_driver real.launch.py
