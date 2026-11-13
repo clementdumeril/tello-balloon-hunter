@@ -97,7 +97,8 @@ class StepTest(Node):
             self.band_z = (self.zone["z_min"], self.zone["z_max"])
             # abort limits: the band +-0.3 m (an identification pulse or a braking overshoot may leave it briefly)
             self.z_min, self.z_max = self.band_z[0] - 0.3, self.band_z[1] + 0.3
-        self.min_battery = p("min_battery", 30).value
+        # identification: 3.5 min of flight and a full climb needed (at 32 % the Tello only climbed to 1.28 m)
+        self.min_battery = p("min_battery", 50 if self.PREFIX == "step" else 30).value
         from tello_driver.home import HOME_FILE
         p("home_file", HOME_FILE)
         prefix = self.PREFIX + ("val" if self.PREFIX == "step" and self.schedule == "valid" else "")
@@ -228,7 +229,11 @@ class StepTest(Node):
                     raise Abort(f"left the flight zone at ({x:+.2f}, {y:+.2f}) m")
             elif abs(x - self.p0[0]) > self.box or abs(y - self.p0[1]) > self.box:
                 raise Abort(f"left the safety box ({x - self.p0[0]:+.2f}, {y - self.p0[1]:+.2f} m from the start)")
-            if not self.z_min <= z <= self.z_max:
+            # the height limits apply once the drone has reached them: on the way up (a weak climb, low battery:
+            # 1.28 m on Nov 13) the test aborted at 1.38 m < 1.40 m while it was still moving to its start point
+            if self.z_min <= z <= self.z_max:
+                self.z_reached = True
+            elif getattr(self, "z_reached", False):
                 raise Abort(f"height {z:.2f} m outside [{self.z_min}, {self.z_max}]")
         if self.pose_age() > self.lost_max:
             raise Abort(f"no marker seen for {self.pose_age():.1f} s")

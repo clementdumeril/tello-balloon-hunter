@@ -70,6 +70,7 @@ def main():
     ap.add_argument("obj")
     ap.add_argument("--z", type=float, nargs=2, default=[1.4, 2.4], help="flight heights (m)")
     ap.add_argument("--margin", type=float, default=0.35, help="clearance from any obstacle (m)")
+    ap.add_argument("--z-slack", type=float, default=0.2, help="obstacles counted down to z_lo - slack and up to z_hi + slack (m)")
     ap.add_argument("--corridor", type=float, default=0.25,
                     help="free passages narrower than ~2x this are cut (keeps the drone in the main region)")
     ap.add_argument("--out", default=str(Path(__file__).resolve().parent.parent / "config" / "flight_zone.yaml"))
@@ -77,7 +78,7 @@ def main():
     V, F = load_obj(a.obj)
     P = surface_points(V, F)
     z_lo, z_hi = a.z
-    obs = P[(P[:, 2] > z_lo - 0.2) & (P[:, 2] < z_hi + 0.2)]
+    obs = P[(P[:, 2] > z_lo - a.z_slack) & (P[:, 2] < z_hi + a.z_slack)]
     x0, y0 = np.percentile(V[:, 0], 0.5) - 0.3, np.percentile(V[:, 1], 0.5) - 0.3
     x1, y1 = np.percentile(V[:, 0], 99.5) + 0.3, np.percentile(V[:, 1], 99.5) + 0.3
     nx, ny = int((x1 - x0) / CELL) + 1, int((y1 - y0) / CELL) + 1
@@ -127,7 +128,7 @@ def main():
     np.savez_compressed(grid, clearance=clearance, x0=x0, y0=y0, cell=CELL, z_lo=z_lo, z_hi=z_hi)
     out.write_text(
         "# Flight zone with no obstacle (tools/free_zone.py, from the room scan): largest free rectangle at\n"
-        f"# flight heights, {a.margin} m from any scanned surface between z {z_lo - 0.2:.1f} and {z_hi + 0.2:.1f} m.\n"
+        f"# flight heights, {a.margin} m from any scanned surface between z {z_lo - a.z_slack:.2f} and {z_hi + a.z_slack:.2f} m.\n"
         f"x_min: {zx0:.2f}\nx_max: {zx1:.2f}\ny_min: {zy0:.2f}\ny_max: {zy1:.2f}\nz_min: {z_lo:.2f}\nz_max: {z_hi:.2f}\n"
         f"margin: {a.margin}\ngrid_file: {grid.name}\n", encoding="utf-8")
     print(f"free zone x [{zx0:.2f}, {zx1:.2f}] y [{zy0:.2f}, {zy1:.2f}] ({zx1 - zx0:.2f} x {zy1 - zy0:.2f} m), "
@@ -142,7 +143,7 @@ def main():
     img[occ] = (40, 40, 220)
     img[i0:i1, j0:j1][~blocked[i0:i1, j0:j1]] = (120, 220, 120)
     img = cv2.resize(img[::-1], None, fx=6, fy=6, interpolation=cv2.INTER_NEAREST)  # y up
-    cv2.putText(img, f"free zone {zx1 - zx0:.2f} x {zy1 - zy0:.2f} m (green), obstacles at {z_lo - .2:.1f}-{z_hi + .2:.1f} m (red), "
+    cv2.putText(img, f"free zone {zx1 - zx0:.2f} x {zy1 - zy0:.2f} m (green), obstacles at {z_lo - a.z_slack:.2f}-{z_hi + a.z_slack:.2f} m (red), "
                 f"margin {a.margin} m (orange)", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
     cv2.imwrite(str(out.with_suffix(".png")), img)
 
