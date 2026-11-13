@@ -158,11 +158,12 @@ class TelloDriver(Node):
         self.get_logger().info(f"Connected, battery {self.tello.get_battery()} %")
         self.tello.streamon()
         self.get_logger().info("Video stream on, waiting for the first frames...")
-        # Video reader: video_reader.LowLatencyReader by default (Nov 12): djitellopy's reader decodes AND converts
+        # Video reader: djitellopy by default again (Nov 13: video_reader.py failed to open the real stream, InvalidDataError
+        # in a loop; low_latency_video:=true to use it once fixed). Why it was tried (Nov 12): djitellopy decodes AND converts
         # every image with FFmpeg's large UDP buffer, so with a busy CPU the images pile up and the delay keeps
         # growing (a minute seen in RViz). Ours drops late images to catch up (synthetic stream, decoder at ~16 fps:
-        # 0.2-0.6 s instead of 15 s and growing). low_latency_video:=false = djitellopy's reader.
-        self.low_latency_video = p("low_latency_video", True).value and not self.mock
+        # 0.2-0.6 s instead of 15 s and growing), but only tested on a synthetic stream.
+        self.low_latency_video = p("low_latency_video", False).value and not self.mock
         if self.low_latency_video:
             from tello_driver.video_reader import LowLatencyReader
             self.reader = LowLatencyReader(log=lambda m: self.get_logger().warn(m, throttle_duration_sec=2.0))
