@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from aruco_localization.marker_map import load_marker_map
-from tello_driver.driver import clearance
+from tello_driver.zone import clearance
 from tello_driver.step_test import RATE, Abort, StepTest, run, wrap
 from tello_driver.trajectory import Quintic, check
 

@@ -127,7 +127,7 @@ class MarkerTour(StepTest):
         (room scan grid, margin + 10 cm); without grid, clamped into the mission rectangle."""
         f = self.fence
         if self.zone and "grid" in self.zone:
-            from tello_driver.driver import clearance
+            from tello_driver.zone import clearance
             for k in range(40):
                 x, y = m.t[0] + (d + 0.05 * k) * n[0], m.t[1] + (d + 0.05 * k) * n[1]
                 if clearance(self.zone, x, y)[0] >= self.zone["margin"] + 0.15:  # +0.10 overshot by 5 cm (sim)
@@ -261,7 +261,7 @@ class MarkerTour(StepTest):
         f = self.fence
         cx, cy = (f[0] + f[1]) / 2, (f[2] + f[3]) / 2
         if self.zone and "grid" in self.zone:
-            from tello_driver.driver import clearance
+            from tello_driver.zone import clearance
             best = None
             for dx in np.arange(-0.6, 0.61, 0.05):
                 for dy in np.arange(-0.6, 0.61, 0.05):

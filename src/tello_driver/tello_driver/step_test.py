@@ -74,7 +74,7 @@ class StepTest(Node):
         self.band = bool(p("band", self.BAND_DEFAULT).value)
         zf = p("flight_zone_file", os.path.join(os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter")),
                                                  "config", "flight_zone_band.yaml" if self.band else "flight_zone.yaml")).value
-        from tello_driver.driver import load_zone
+        from tello_driver.zone import load_zone
         self.zone = load_zone(zf)
         self.band_z = None
         if self.band:
@@ -195,7 +195,7 @@ class StepTest(Node):
             _, x, y, z, _ = self.pose
             zn = self.zone
             if zn and "grid" in zn:
-                from tello_driver.driver import clearance
+                from tello_driver.zone import clearance
                 d, _ = clearance(zn, x, y)
                 if d < zn["margin"] - 0.2:
                     raise Abort(f"{d:.2f} m from an obstacle at ({x:+.2f}, {y:+.2f}) m")
@@ -297,7 +297,7 @@ class StepTest(Node):
             self.recentre()
             return
         if self.zone and "grid" in self.zone:
-            from tello_driver.driver import clearance
+            from tello_driver.zone import clearance
             c = clearance(self.zone, h["x"], h["y"])
             if c is not None and c[0] < self.zone["margin"]:
                 self.say(f"pad ({h['x']:+.2f}, {h['y']:+.2f}) too close to an obstacle at this height: landing here")

@@ -1,13 +1,16 @@
-"""ROS 2 driver for the real DJI Tello. Publishes the SAME topics as the simulator (tello_sim/sim_adapter).
+"""ROS 2 driver for the DJI Tello: the link to the drone, the video, takeoff / landing, and the ROS wiring.
 
 Publishes   /tello/image_raw (rgb8), /tello/camera_info   stamped when the frame reaches the PC
-            /tello/telemetry (std_msgs/String, JSON with the djitellopy state fields)
+            /tello/telemetry (std_msgs/String, JSON with the djitellopy state fields + driver fields)
+            /tello/rc_sent (Twist, body frame): the command REALLY sent, after the hold and the guards (EKF input)
 Subscribes  /tello/cmd_vel_safe (Twist, body frame, m/s and rad/s) -> rc commands at 20 Hz
+            /ekf/pose, /ekf/velocity, /ekf/drift, /aruco/nearest_marker: for the hold and the guards
 Services    ~/takeoff, ~/land, ~/emergency (std_srvs/Trigger)
 
-Safety: watchdog (hover if no command for cmd_timeout), speed limits, auto-land on low battery,
-land on shutdown. Velocity -> rc gains come from the Nov 7 flights (rc 30 ~ 0.38 m/s, yaw rc 30 ~ 18 deg/s).
-The Tello answers only the first program that talked to it since power-on: start this driver first.
+Every command goes through safety.CommandFilter (position hold, ceiling, height band, flight zone, wall) before it
+is sent: whatever program sends it (teleop, missions). The fake drone (mock:=true) is in fake_tello.py, the flight
+zone of the room scan in zone.py. Velocity -> rc gains from the Nov 7 flights (rc 30 ~ 0.38 m/s, yaw rc 30 ~
+18 deg/s). The Tello answers only the first program that talked to it since power-on: start this driver first.
 """
 import json
 import math
@@ -21,159 +24,12 @@ import yaml
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist, TwistStamped, Vector3Stamped
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import String
+from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
-
-# ---------------------------------------------------------------- fake drone (tests without hardware)
-class FakeFrameRead:
-    """Without a marker map: a plain moving test pattern. With one: the virtual camera view of the markers,
-    delivered VIDEO_DELAY late like the real video (the EKF assumes that latency)."""
-    def __init__(self, world=None):
-        self.world = world
-        self._t = -1
-        self._frame = None
-        self._queue = []
-
-    @property
-    def frame(self):
-        k = int(time.time() * 30)
-        if k != self._t:
-            self._t = k
-            if self.world is not None:
-                from tello_driver.fake_world import VIDEO_DELAY
-                now = time.time()
-                self._queue.append((now, self.world.render()))
-                while len(self._queue) > 1 and self._queue[1][0] <= now - VIDEO_DELAY:
-                    self._queue.pop(0)
-                self._frame = self._queue[0][1]
-            else:
-                img = np.full((720, 960, 3), 90, np.uint8)
-                img[:, :, 0] = (np.arange(960) * 255 // 960).astype(np.uint8)
-                img[(k * 7) % 720, :, :] = 255
-                self._frame = img
-        return self._frame
-
-
-class FakeTello:
-    def __init__(self, markers_file=""):
-        self.world = None
-        if markers_file:
-            from tello_driver.fake_world import FakeWorld
-            self.world = FakeWorld(markers_file)
-        self.is_flying = False
-
-    def connect(self): pass
-    def streamon(self): pass
-    def streamoff(self): pass
-    def end(self): pass
-    def get_battery(self): return 90
-    def get_frame_read(self): return FakeFrameRead(self.world)
-
-    def takeoff(self):
-        if self.world is not None:
-            self.world.flying = True
-            self.world.z_target = max(self.world.p[2], 0.85)  # the real Tello stops around 0.8-0.9 m
-            self.wait_z()
-        else:
-            time.sleep(1.0)
-        self.is_flying = True
-
-    def move_up(self, cm):
-        if self.world is not None:
-            self.world.z_target = self.world.p[2] + cm / 100.0
-            self.wait_z()
-
-    def wait_z(self, timeout=8.0):
-        t0 = time.time()
-        while self.world.z_target is not None and time.time() - t0 < timeout:
-            time.sleep(0.05)
-
-    def get_height(self):
-        return int(self.world.p[2] * 100) if self.world is not None else 80
-
-    def land(self):
-        if self.world is not None:
-            self.world.z_target = 0.05
-        time.sleep(1.0)
-        self.is_flying = False
-        if self.world is not None:
-            self.world.flying = False
-
-    def emergency(self):
-        self.is_flying = False
-        if self.world is not None:
-            self.world.flying, self.world.z_target = False, 0.05
-
-    def send_command_without_return(self, cmd):
-        if cmd == "land":
-            threading.Thread(target=self.land, daemon=True).start()
-
-    def send_rc_control(self, a, b, c, d):
-        if self.world is not None:
-            self.world.rc = (a, b, c, d)
-
-    def get_current_state(self):
-        if self.world is not None:
-            return self.world.state()
-        return {"pitch": 0, "roll": 0, "yaw": 0, "vgx": 0, "vgy": 0, "vgz": 0, "templ": 50, "temph": 52,
-                "tof": 80 if self.is_flying else 10, "h": 80 if self.is_flying else 0, "bat": 90,
-                "baro": 80.0, "time": 0, "agx": 0.0, "agy": 0.0, "agz": -1000.0}
-
-
-def wrap(a):
-    return math.atan2(math.sin(a), math.cos(a))
-
-
-def load_zone(path):
-    """config/flight_zone.yaml -> dict: the mission rectangle (x_min ... z_max), the margin, and when present the
-    free-space grid (distance to the nearest obstacle, tools/free_zone.py). None if no file."""
-    if not path:
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            z = yaml.safe_load(f)
-        zone = {k: float(z[k]) for k in ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")}
-        zone["margin"] = float(z.get("margin", 0.35))
-        if z.get("grid_file"):
-            from pathlib import Path
-            g = np.load(Path(path).parent / z["grid_file"])
-            c = g["clearance"].astype(float)
-            gy, gx = np.gradient(c)
-            # inside an obstacle / outside the scan the clearance is a flat 0: no gradient, so the guard did not push
-            # at all (offline stress test, seed 367: the drone stayed at x = 2.2 m). There: point to the nearest
-            # cell with room (margin + 10 cm)
-            from scipy.ndimage import distance_transform_edt
-            margin = float(z.get("margin", 0.35))
-            bad = c < margin + 0.1
-            if bad.any() and (~bad).any():
-                _, (ii, jj) = distance_transform_edt(bad, return_indices=True)
-                I, J = np.indices(c.shape)
-                flat = bad & (np.hypot(gx, gy) < 1e-6) | (c < margin)
-                gx = np.where(flat, jj - J, gx).astype(float)
-                gy = np.where(flat, ii - I, gy).astype(float)
-            zone["grid"] = {"d": c, "gx": gx, "gy": gy, "x0": float(g["x0"]), "y0": float(g["y0"]),
-                            "cell": float(g["cell"])}
-        return zone
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def clearance(zone, x, y):
-    """(distance to the nearest obstacle in m, unit vector pointing away from it) at (x, y); None without grid."""
-    g = zone.get("grid") if zone else None
-    if g is None:
-        return None
-    j = int(round((x - g["x0"]) / g["cell"]))
-    i = int(round((y - g["y0"]) / g["cell"]))
-    if not (0 <= i < g["d"].shape[0] and 0 <= j < g["d"].shape[1]):
-        # outside the scanned area: back towards the middle of the flight zone
-        ux, uy = (zone["x_min"] + zone["x_max"]) / 2 - x, (zone["y_min"] + zone["y_max"]) / 2 - y
-        n = math.hypot(ux, uy)
-        return 0.0, ((ux / n, uy / n) if n > 1e-6 else (0.0, 0.0))
-    gx, gy = g["gx"][i, j], g["gy"][i, j]
-    n = math.hypot(gx, gy)
-    return float(g["d"][i, j]), ((gx / n, gy / n) if n > 1e-6 else (0.0, 0.0))
+from tello_driver.fake_tello import FakeFrameRead, FakeTello  # noqa: F401  (re-exported for older imports)
+from tello_driver.safety import CommandFilter
+from tello_driver.zone import clearance, load_zone, wrap  # noqa: F401  (re-exported: missions import them here)
 
 
 # ---------------------------------------------------------------- camera info
@@ -216,56 +72,35 @@ class TelloDriver(Node):
         self.cmd_timeout = p("cmd_timeout", 0.5).value
         self.low_battery = p("low_battery", 12).value
         # after the takeoff (~0.8 m), climb to this height (m above the takeoff point, 0 = stay) so that the
-        # camera sees the markers; real.launch.py computes it from the marker map
+        # camera sees the markers; real.launch.py computes it from the marker map (band mode: the band middle)
         self.takeoff_height = p("takeoff_height", 0.0).value
         # highest allowed height above the floor (m): ceiling 2.80 m in the room, 2.60 m max (user, Nov 9)
         self.max_height = p("max_height", 2.6).value
-        self.pose_z, self.pose_t = 0.0, 0.0
-        self.pose_xy, self.pose_yaw = None, 0.0
-        self.pose_sigma_z = 1.0
-        # position hold: when no horizontal move is commanded, hold the position (and heading) with a PI loop on
-        # the ArUco pose. The Tello's own optical-flow hold does not work in this room (vgx = vgy = 0 while it
-        # drifted 0.4 m in 8 s, Nov 11: dim light / plain floor).
-        # v2 (Nov 11, flight 221322: the old PI, kp 0.6, swung 30-50 cm after each key release and let the height
-        # wander 1.60-1.85 m): position predicted L_u ahead (the command acts 0.3 s later), desired velocity
-        # kp * error, model inversion u = (v_d - drift + kv (v_d - v)) / K with the EKF velocity and drift, and a
-        # small integral for the model errors. Gains tuned on the fake drone (full pipeline: video delay, ArUco,
-        # EKF; drift 8/5 cm/s): kp 1.2 / kv 0.7 circled +-4 cm, kp 0.8 / kv 0.4 / ki 0.15 holds within 2.4 cm
-        # (old PI: 13 cm) and overshoots 7-9 cm after a key release (old: 24 cm).
-        # Height: same loop on the EKF height (ArUco + distance sensor), at the height where the pilot released.
-        self.hold_enabled = p("position_hold", True).value
-        self.hold_kp, self.hold_kv, self.hold_ki = p("hold_kp", 0.8).value, p("hold_kv", 0.4).value, p("hold_ki", 0.15).value
-        self.hold_vmax = p("hold_vmax", 0.4).value     # m/s, the hold never moves faster than this
-        self.hold_z = p("height_hold", True).value
-        self.hold_kpz = p("hold_kp_z", 1.0).value
-        self.model_Kz = p("model_K_z", 0.9).value
-        self.hold_target = None
-        self.hold_zt = None
-        self.hold_i = [0.0, 0.0, 0.0]
-        self.hold_t = 0.0
-        self.ekf_v, self.ekf_v_t = (0.0, 0.0, 0.0), 0.0
-        self.ekf_d = (0.0, 0.0)
-        self.hold_drift_ff = p("hold_drift_ff", True).value  # remove the EKF's learnt drift in the hold
-        self.blind_speed = p("blind_speed", 0.15).value      # m/s, horizontal speed allowed without a marker pose
-        self.guard_note, self.guard_note_t = "", 0.0
-        # the hold gains can be changed in flight: ros2 param set /tello_driver hold_kp 1.0
-        live = {"hold_kp": "hold_kp", "hold_kv": "hold_kv", "hold_ki": "hold_ki", "hold_kp_z": "hold_kpz",
-                "hold_vmax": "hold_vmax", "hold_drift_ff": "hold_drift_ff", "position_hold": "hold_enabled",
-                "height_hold": "hold_z"}
-
-        def on_params(params):
-            from rcl_interfaces.msg import SetParametersResult
-            for prm in params:
-                if prm.name in live:
-                    setattr(self, live[prm.name], prm.value)
-                    self.get_logger().info(f"{prm.name} = {prm.value}")
-            return SetParametersResult(successful=True)
-        self.add_on_set_parameters_callback(on_params)
         # obstacle-free flight zone from the room scan (tools/free_zone.py): commands that would take the drone
         # out of it are cut, whatever program sends them (Nov 10: a test drifted 1 m back towards furniture)
         self.zone = load_zone(p("flight_zone_file", "").value)
         if self.zone:
             self.get_logger().info("flight zone x [{x_min:.2f}, {x_max:.2f}] y [{y_min:.2f}, {y_max:.2f}]".format(**self.zone))
+        # the hold and the guards (safety.py), on the identified model (Nov 11)
+        self.safety = CommandFilter(
+            zone=self.zone, lin_gain=self.lin_gain, yaw_gain=self.yaw_gain, max_rc=self.max_rc,
+            max_height=self.max_height, model_K=p("model_K", 1.15).value, model_tau=p("model_tau", 0.55).value,
+            model_Lu=p("model_L_u", 0.30).value, model_Kz=p("model_K_z", 0.9).value,
+            min_wall=p("min_wall_distance", 0.7).value, wall_band=p("wall_slow_band", 0.15).value,
+            blind_speed=p("blind_speed", 0.15).value, hold_enabled=p("position_hold", True).value,
+            hold_kp=p("hold_kp", 0.8).value, hold_kv=p("hold_kv", 0.4).value, hold_ki=p("hold_ki", 0.15).value,
+            hold_vmax=p("hold_vmax", 0.4).value, hold_z=p("height_hold", True).value,
+            hold_kpz=p("hold_kp_z", 1.0).value, hold_drift_ff=p("hold_drift_ff", True).value,
+            warn=lambda m: self.get_logger().warn(m))
+
+        # the hold gains can be changed in flight: ros2 param set /tello_driver hold_kp 1.0
+        def on_params(params):
+            from rcl_interfaces.msg import SetParametersResult
+            for prm in params:
+                if self.safety.set_param(prm.name, prm.value):
+                    self.get_logger().info(f"{prm.name} = {prm.value}")
+            return SetParametersResult(successful=True)
+        self.add_on_set_parameters_callback(on_params)
         self.climb_target = None  # set after takeoff: send_rc climbs to it with joystick commands
 
         # Refuse to run next to another driver (e.g. a forgotten fake drone): two sources of /tello/image_raw
@@ -282,23 +117,15 @@ class TelloDriver(Node):
         self.pub_img = self.create_publisher(Image, "/tello/image_raw", 5)
         self.pub_info = self.create_publisher(CameraInfo, "/tello/camera_info", 5)
         self.pub_tel = self.create_publisher(String, "/tello/telemetry", 10)
-        # the command really sent (after hold / guards), in m/s and rad/s, body frame: the EKF's input
         self.pub_sent = self.create_publisher(Twist, "/tello/rc_sent", 10)
         self.create_subscription(Twist, "/tello/cmd_vel_safe", self.on_cmd, 10)
-        # pose used by the hold and the guards: the EKF (smooth, predicted between detections, delay compensated)
-        # or the raw ArUco pose; trusted while its uncertainty is small
-        self.pose_sigma = 1.0
+        # pose for the hold and the guards: the EKF (smooth, predicted between detections, delay compensated)
         self.create_subscription(PoseWithCovarianceStamped, p("pose_topic", "/ekf/pose").value, self.on_pose, 10)
-        self.create_subscription(TwistStamped, "/ekf/velocity", self.on_ekf_vel, 10)
-        self.create_subscription(Vector3Stamped, "/ekf/drift", self.on_ekf_drift, 10)
+        self.create_subscription(TwistStamped, "/ekf/velocity",
+                                 lambda m: self.safety.on_ekf_velocity(m.twist.linear.x, m.twist.linear.y, m.twist.linear.z), 10)
+        self.create_subscription(Vector3Stamped, "/ekf/drift", lambda m: self.safety.on_ekf_drift(m.vector.x, m.vector.y), 10)
         # wall ahead, from the size of the closest marker in view (works without map and without pose)
-        from std_msgs.msg import Float32
-        self.near_d, self.near_t = 9.0, 0.0
-        # identified model (Nov 11), for the guards' predictions
-        self.model_K, self.model_tau, self.model_Lu = p("model_K", 1.15).value, p("model_tau", 0.55).value, p("model_L_u", 0.30).value
-        self.min_wall = p("min_wall_distance", 0.7).value
-        self.wall_band = p("wall_slow_band", 0.15).value  # forward speed shrinks over this band above min_wall
-        self.create_subscription(Float32, "/aruco/nearest_marker", self.on_near, 5)
+        self.create_subscription(Float32, "/aruco/nearest_marker", lambda m: self.safety.on_nearest_marker(m.data), 5)
         self.create_service(Trigger, "~/takeoff", self.srv_takeoff)
         self.create_service(Trigger, "~/land", self.srv_land)
         self.create_service(Trigger, "~/emergency", self.srv_emergency)
@@ -331,15 +158,18 @@ class TelloDriver(Node):
         self.get_logger().info(f"Connected, battery {self.tello.get_battery()} %")
         self.tello.streamon()
         self.get_logger().info("Video stream on, waiting for the first frames...")
-        # Video reader. Bench (tools/video_latency_bench.py, fake Tello stream on localhost): the low-latency reader
-        # gains only ~4 ms median / ~10 ms p90 but lost ~10 % of the images, so djitellopy's reader stays the
-        # default; low_latency_video:=true to try the other one on the real drone.
-        self.low_latency_video = p("low_latency_video", False).value and not self.mock
+        # Video reader: video_reader.LowLatencyReader by default (Nov 12): djitellopy's reader decodes AND converts
+        # every image with FFmpeg's large UDP buffer, so with a busy CPU the images pile up and the delay keeps
+        # growing (a minute seen in RViz). Ours drops late images to catch up (synthetic stream, decoder at ~16 fps:
+        # 0.2-0.6 s instead of 15 s and growing). low_latency_video:=false = djitellopy's reader.
+        self.low_latency_video = p("low_latency_video", True).value and not self.mock
         if self.low_latency_video:
             from tello_driver.video_reader import LowLatencyReader
             self.reader = LowLatencyReader(log=lambda m: self.get_logger().warn(m, throttle_duration_sec=2.0))
         else:
             self.reader = self.tello.get_frame_read()
+        self.get_logger().info("video reader: " + ("low latency (video_reader.py)" if self.low_latency_video
+                                                   else "fake" if self.mock else "djitellopy"))
         self.video_count, self.video_fps, self.video_t0 = 0, 0.0, time.time()
 
         self.info = None
@@ -355,6 +185,31 @@ class TelloDriver(Node):
         self.create_timer(0.1, self.poll_state)
         self.create_timer(0.05, self.send_rc)
         self.create_timer(1.0, self.video_watchdog)
+
+    # ---------------------------------------------------------------- link
+    def wait_for_tello_network(self, timeout):
+        """WSL mirrored networking takes a few seconds to follow a Wi-Fi change: wait for a route to the drone."""
+        import socket
+        t0, warned = time.time(), False
+        while True:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("192.168.10.1", 8889))  # sends nothing: only asks for a route
+                ip = s.getsockname()[0]
+                s.close()
+                if ip.startswith("192.168.10."):
+                    self.get_logger().info(f"On the Tello Wi-Fi ({ip})")
+                    return
+            except OSError:
+                ip = "no route"
+            if time.time() - t0 > timeout:
+                self.get_logger().fatal(f"Not on the Tello Wi-Fi after {timeout:.0f} s ({ip}). Connect Windows to "
+                                        "TELLO-xxxxxx, wait ~10 s, then relaunch.")
+                raise SystemExit(1)
+            if not warned:
+                self.get_logger().warn("Waiting for the Tello Wi-Fi (connect Windows to TELLO-xxxxxx)...")
+                warned = True
+            time.sleep(1.0)
 
     def video_watchdog(self):
         """The Wi-Fi/WSL route to the drone can drop for a few seconds (Windows re-checks the network ~20 s
@@ -401,30 +256,6 @@ class TelloDriver(Node):
                 self.restarting = False
         threading.Thread(target=restart, daemon=True).start()
 
-    def wait_for_tello_network(self, timeout):
-        """WSL mirrored networking takes a few seconds to follow a Wi-Fi change: wait for a route to the drone."""
-        import socket
-        t0, warned = time.time(), False
-        while True:
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("192.168.10.1", 8889))  # sends nothing: only asks for a route
-                ip = s.getsockname()[0]
-                s.close()
-                if ip.startswith("192.168.10."):
-                    self.get_logger().info(f"On the Tello Wi-Fi ({ip})")
-                    return
-            except OSError:
-                ip = "no route"
-            if time.time() - t0 > timeout:
-                self.get_logger().fatal(f"Not on the Tello Wi-Fi after {timeout:.0f} s ({ip}). Connect Windows to "
-                                        "TELLO-xxxxxx, wait ~10 s, then relaunch.")
-                raise SystemExit(1)
-            if not warned:
-                self.get_logger().warn("Waiting for the Tello Wi-Fi (connect Windows to TELLO-xxxxxx)...")
-                warned = True
-            time.sleep(1.0)
-
     # ---------------------------------------------------------------- video
     def poll_video(self):
         frame = self.reader.frame
@@ -457,7 +288,7 @@ class TelloDriver(Node):
         self.info.header.stamp = stamp
         self.pub_info.publish(self.info)
 
-    # ---------------------------------------------------------------- telemetry + safety
+    # ---------------------------------------------------------------- telemetry
     def poll_state(self):
         try:
             self.state = dict(self.tello.get_current_state() or {})
@@ -469,8 +300,8 @@ class TelloDriver(Node):
         # takeoff / climb / land running: not ready for velocity commands
         st["busy"] = self.busy.locked() or self.climb_target is not None
         st["video_fps"] = round(self.video_fps, 1)  # images published per second (the Tello sends 30 at most)
-        st["hold"] = self.hold_target is not None  # position hold active (no horizontal command): flight_report
-        st["guard"] = self.guard_note if time.time() - self.guard_note_t < 0.5 else ""
+        st["hold"] = self.safety.hold_target is not None  # position hold active (no horizontal command): flight_report
+        st["guard"] = self.safety.guard_now()               # the guard that changed the command, if any
         self.pub_tel.publish(String(data=json.dumps(st)))
         bat = self.state.get("bat")
         if self.tello.is_flying and isinstance(bat, (int, float)) and bat <= self.low_battery:
@@ -478,8 +309,14 @@ class TelloDriver(Node):
             self.run_async(self.tello.land, "low-battery land")
 
     # ---------------------------------------------------------------- commands
+    def on_pose(self, m):
+        p, q = m.pose.pose.position, m.pose.pose.orientation
+        self.safety.on_pose(p.x, p.y, p.z, math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)),
+                            math.sqrt(max(m.pose.covariance[0], m.pose.covariance[7], 0.0)),
+                            math.sqrt(max(m.pose.covariance[14], 0.0)))
+
     def on_cmd(self, m):
-        clip = lambda v: int(max(-self.max_rc, min(self.max_rc, round(v))))  # noqa: E731
+        clip = self.safety.clip
         # Tello rc: (left/right, forward/back, up/down, yaw), right/forward/up/clockwise positive.
         # ROS body frame: x forward, y LEFT, z up, yaw counter-clockwise positive.
         self.rc_target = (clip(-m.linear.y / self.lin_gain), clip(m.linear.x / self.lin_gain),
@@ -487,43 +324,18 @@ class TelloDriver(Node):
         self.last_cmd = time.time()
 
     def send_rc(self):
+        """20 Hz: the requested command (zero after cmd_timeout), the climb after takeoff, then the safety chain
+        (safety.py), then the Tello. The command really sent is published on /tello/rc_sent for the EKF."""
         if self.busy.locked():
             return  # a takeoff / climb / land command is running: rc would interfere with it
         rc = self.rc_target if time.time() - self.last_cmd < self.cmd_timeout else (0, 0, 0, 0)
-        hgt = self.height_estimate() if self.tello.is_flying else None
-        vz = 0.0
-        if hgt is not None:
-            now = time.time()
-            self.h_hist = [(t, h) for t, h in getattr(self, "h_hist", []) if now - t < 0.6] + [(now, hgt)]
-            t_old, h_old = self.h_hist[0]
-            vz = (hgt - h_old) / (now - t_old) if now - t_old > 0.2 else 0.0
-        if self.climb_target is not None and self.tello.is_flying:
+        flying = self.tello.is_flying
+        hgt, vz = self.safety.height_and_rate(self.state.get("tof"), flying)
+        if self.climb_target is not None and flying:
             ud = self.climb_rc(hgt, vz)
             if ud is not None:
                 rc = (0, 0, ud, 0)  # climbing: other commands wait (the position hold keeps it in place)
-        rc = self.position_hold(rc)
-        # ceiling guard, whatever program sends the commands. The drone needs ~1 s to stop (tau ~0.8 s + delay),
-        # so the guard works on the height predicted 1 s ahead, not on the current one.
-        if hgt is not None:
-            h_pred = hgt + max(vz, 0.0) * 1.0
-            limit = self.max_height - 0.15
-            lr, fb, ud, yw = rc
-            if hgt > self.max_height:
-                ud = -30
-                self.note("ceiling")
-                self.get_logger().warn(f"height {hgt:.2f} m > {self.max_height:.2f} m: descending",
-                                       throttle_duration_sec=1.0)
-            elif h_pred > limit:
-                ud = min(ud, -20)  # brake now, or it overshoots
-                self.note("ceiling: brake")
-                self.get_logger().warn(f"height {hgt:.2f} m rising {vz:+.2f} m/s: braking before the "
-                                       f"{self.max_height:.2f} m limit", throttle_duration_sec=1.0)
-            else:
-                ud = min(ud, int((limit - h_pred) / self.lin_gain))  # slower and slower towards the limit
-            rc = (lr, fb, ud, yw)
-        rc = self.band_guard(rc)
-        rc = self.zone_guard(rc)
-        rc = self.wall_guard(rc)
+        rc = self.safety.filter(rc, hgt, vz, flying, busy=self.busy.locked(), climbing=self.climb_target is not None)
         try:
             self.tello.send_rc_control(*rc)  # also keeps the link alive (the Tello lands after 15 s of silence)
             t = Twist()
@@ -532,10 +344,6 @@ class TelloDriver(Node):
             self.pub_sent.publish(t)
         except Exception as e:  # noqa: BLE001
             self.get_logger().warn(f"rc failed: {e}", throttle_duration_sec=2.0)
-
-    def note(self, s):
-        """Which guard changed the command (telemetry 'guard', for flight_report / debugging)."""
-        self.guard_note, self.guard_note_t = s, time.time()
 
     def stop_rc(self):
         """The Tello keeps flying with the LAST rc command while no new one comes, and none comes while a takeoff /
@@ -548,6 +356,7 @@ class TelloDriver(Node):
             pass
 
     def run_async(self, fn, label):
+        """Blocking SDK command (takeoff / land) in a thread; 'busy' stops the rc commands meanwhile."""
         def worker():
             if not self.busy.acquire(blocking=False):
                 return
@@ -561,6 +370,7 @@ class TelloDriver(Node):
                 self.busy.release()
         threading.Thread(target=worker, daemon=True).start()
 
+    # ---------------------------------------------------------------- takeoff / landing
     def srv_takeoff(self, req, res):
         bat = self.state.get("bat", 100)
         if isinstance(bat, (int, float)) and bat < 25:
@@ -572,9 +382,9 @@ class TelloDriver(Node):
         return res
 
     def takeoff_and_climb(self):
-        """Takeoff (SDK command), then the climb is done by send_rc with joystick commands, closed-loop on the
-        measured height. The SDK 'up' command was refused right after takeoff ('error Not joystick', Nov 9),
-        and 'h' (barometer) read 20 cm at 80 cm: distance sensor + ArUco pose only."""
+        """Takeoff (SDK command, the Tello stops at ~0.8 m), then the climb is done by send_rc with joystick
+        commands, closed-loop on the measured height. The SDK 'up' command was refused right after takeoff ('error
+        Not joystick', Nov 9), and 'h' (barometer) read 20 cm at 80 cm: distance sensor + EKF height only."""
         self.tello.takeoff()
         if self.takeoff_height > 0:
             self.climb_target = min(self.takeoff_height, self.max_height - 0.6)
@@ -602,256 +412,6 @@ class TelloDriver(Node):
         self.climb_target = None
         self.get_logger().info(msg)
         return None
-
-    def grid_guard(self, x, y, vx, vy, wx, wy):
-        """Free-space guard: distance to the nearest scanned obstacle at the current and the predicted (1 s)
-        position. Closer than the margin: the velocity towards the obstacle is removed and the drone is pushed
-        away; approaching it: that velocity shrinks to zero at the margin."""
-        mg = self.zone["margin"]
-        d, (gx, gy) = clearance(self.zone, x, y)
-        # where the drone will be in 1 s if this command is kept (identified model: delay L_u, then first-order
-        # response): a planned deceleration is not taken for a run at the wall (the old 'p + v * 1 s' braked
-        # before the end of every fast leg)
-        K, tau, Lu, H = self.model_K, self.model_tau, self.model_Lu, 1.0
-        f = tau * (1 - math.exp(-(H - Lu) / tau))
-        px = x + vx * Lu + K * wx * (H - Lu) + (vx - K * wx) * f
-        py = y + vy * Lu + K * wy * (H - Lu) + (vy - K * wy) * f
-        dp, (gpx, gpy) = clearance(self.zone, px, py)
-        if dp < d:
-            d_use, (ux, uy) = dp, (gpx, gpy)
-        else:
-            d_use, (ux, uy) = d, (gx, gy)
-        if ux == 0.0 and uy == 0.0:
-            return wx, wy
-        toward = -(wx * ux + wy * uy)  # > 0: moving towards the obstacle
-        if d < mg:
-            if toward > -0.25:
-                wx, wy = wx + (toward + 0.25) * ux, wy + (toward + 0.25) * uy
-            self.note("zone: push away")
-            self.get_logger().warn(f"flight zone: {d:.2f} m from an obstacle at ({x:+.2f}, {y:+.2f}): pushing away",
-                                   throttle_duration_sec=1.0)
-        elif d_use < mg + 0.1:
-            if toward > -0.15:
-                wx, wy = wx + (toward + 0.15) * ux, wy + (toward + 0.15) * uy
-            self.note("zone: brake")
-            self.get_logger().warn(f"flight zone: braking ({d_use:.2f} m from an obstacle)", throttle_duration_sec=1.0)
-        else:
-            allowed = (d_use - mg) * 1.0
-            if toward > allowed:
-                wx, wy = wx + (toward - allowed) * ux, wy + (toward - allowed) * uy
-                self.note("zone: slow")
-        return wx, wy
-
-    def on_near(self, m):
-        self.near_d, self.near_t = float(m.data), time.time()
-
-    def wall_guard(self, rc):
-        """A marker in view closer than min_wall_distance: no forward motion, back off. Between that and +0.3 m the
-        forward speed shrinks. Independent of the map and of the pose (camera = forward)."""
-        if not self.tello.is_flying or time.time() - self.near_t > 0.4:
-            return rc
-        lr, fb, ud, yw = rc
-        d = self.near_d
-        if d < self.min_wall:
-            fb = min(fb, -12)
-            self.note("wall: back off")
-            self.get_logger().warn(f"wall {d:.2f} m ahead (marker size): backing off", throttle_duration_sec=1.0)
-        elif d < self.min_wall + self.wall_band and fb > 0:
-            fb = int(fb * (d - self.min_wall) / self.wall_band)
-            self.note("wall: slow")
-        return (lr, fb, ud, yw)
-
-    def pose_valid(self, max_age, max_sigma):
-        """A pose recent enough and certain enough (the EKF keeps publishing without markers, with a growing
-        uncertainty: beyond max_sigma it is not trusted)."""
-        return (self.pose_xy is not None and time.time() - self.pose_t < max_age and self.pose_sigma < max_sigma)
-
-    def on_pose(self, m):
-        p, q = m.pose.pose.position, m.pose.pose.orientation
-        self.pose_sigma = math.sqrt(max(m.pose.covariance[0], m.pose.covariance[7], 0.0))
-        self.pose_sigma_z = math.sqrt(max(m.pose.covariance[14], 0.0))
-        # the estimate jumped (markers back after dead reckoning, filter restart) or is uncertain: a hold target
-        # taken from the old estimate is meaningless (stress test seed 142: dragged the drone 63 cm to it)
-        if self.pose_xy is not None and (math.hypot(p.x - self.pose_xy[0], p.y - self.pose_xy[1]) > 0.15
-                                         or self.pose_sigma > 0.06):
-            self.hold_target = None
-        if abs(p.z - self.pose_z) > 0.15 or self.pose_sigma_z > 0.08:
-            self.hold_zt = None
-        self.pose_z, self.pose_t = p.z, time.time()
-        self.pose_xy = (p.x, p.y)
-        self.pose_yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
-        now = time.time()
-        self.xy_hist = [(t, xy) for t, xy in getattr(self, "xy_hist", []) if now - t < 0.6] + [(now, (p.x, p.y))]
-
-    def velocity_xy(self):
-        hist = getattr(self, "xy_hist", [])
-        if len(hist) < 2:
-            return 0.0, 0.0
-        (t0, (x0, y0)), (t1, (x1, y1)) = hist[0], hist[-1]
-        dt = t1 - t0
-        return ((x1 - x0) / dt, (y1 - y0) / dt) if dt > 0.2 else (0.0, 0.0)
-
-    def on_ekf_vel(self, m):
-        v = m.twist.linear
-        self.ekf_v, self.ekf_v_t = (v.x, v.y, v.z), time.time()
-
-    def on_ekf_drift(self, m):
-        self.ekf_d = (m.vector.x, m.vector.y)
-
-    def hold_axis(self, k, target, pos, vel, drift, K, kp, dt):
-        """One axis of the hold: world velocity command (m/s). See the comment in __init__."""
-        e = target - (pos + vel * self.model_Lu)  # where the drone will be when this command acts
-        vd = max(-self.hold_vmax, min(self.hold_vmax, kp * e))
-        if abs(e) < 0.3:
-            self.hold_i[k] = max(-0.1, min(0.1, self.hold_i[k] + self.hold_ki * e * dt))
-        u = (vd - drift + self.hold_kv * (vd - vel)) / K + self.hold_i[k]
-        return max(-0.6, min(0.6, u))
-
-    def position_hold(self, rc):
-        """No horizontal/yaw command -> hold where the drone stops; no vertical command -> hold that height.
-        A command on an axis releases the hold of that axis; no fresh, certain pose -> no hold (integral kept)."""
-        now = time.time()
-        dt = min(0.1, now - self.hold_t) if self.hold_t else 0.05
-        self.hold_t = now
-        if not (self.hold_enabled and self.tello.is_flying) or self.busy.locked():
-            self.hold_target = self.hold_zt = None
-            return rc
-        lr, fb, ud, yw = rc
-        moving_xy = bool(lr or fb or yw)
-        if moving_xy:
-            self.hold_target = None  # the pilot / the mission is moving the drone
-            self.hold_i[0] = self.hold_i[1] = 0.0
-        if ud or self.climb_target is not None:
-            self.hold_zt = None
-            self.hold_i[2] = 0.0
-        if not self.pose_valid(0.4, 0.12):
-            return rc
-        x, y = self.pose_xy
-        z = self.pose_z
-        if now - self.ekf_v_t < 0.3:
-            vx, vy, vz = self.ekf_v
-        else:
-            (vx, vy), vz = self.velocity_xy(), 0.0
-        dx, dy = self.ekf_d if (self.hold_drift_ff and now - self.ekf_v_t < 0.3) else (0.0, 0.0)
-        clip = lambda v: int(max(-self.max_rc, min(self.max_rc, round(v))))  # noqa: E731
-        if not moving_xy and (self.hold_target is not None or self.pose_sigma < 0.06):
-            if self.hold_target is None:  # a new target only on a certain pose (markers in view)
-                # hold where it stops on its own (it keeps going ~ (L_u + tau) * v), not where the keys were released
-                s = self.model_Lu + self.model_tau
-                self.hold_target = (x + s * vx, y + s * vy, self.pose_yaw)
-                self.hold_i[0] = self.hold_i[1] = 0.0
-            tx, ty, tyaw = self.hold_target
-            wx = self.hold_axis(0, tx, x, vx, dx, self.model_K, self.hold_kp, dt)
-            wy = self.hold_axis(1, ty, y, vy, dy, self.model_K, self.hold_kp, dt)
-            c, s = math.cos(self.pose_yaw), math.sin(self.pose_yaw)
-            bx, by = c * wx + s * wy, -s * wx + c * wy
-            wz = max(-0.3, min(0.3, 0.8 * wrap(tyaw - self.pose_yaw)))
-            lr, fb, yw = clip(-by / self.lin_gain), clip(bx / self.lin_gain), clip(-wz / self.yaw_gain)
-        if self.hold_z and not ud and self.climb_target is None:
-            if self.hold_zt is None:
-                self.hold_zt = z + 0.5 * vz
-                self.hold_i[2] = 0.0
-            uz = self.hold_axis(2, self.hold_zt, z, vz, 0.0, self.model_Kz, self.hold_kpz, dt)
-            ud = clip(max(-0.3, min(0.3, uz)) / self.lin_gain)
-        return (lr, fb, ud, yw)
-
-    def band_guard(self, rc):
-        """The obstacle grid is only valid in the zone's height band (band mode 1.70-2.00 m): the pilot cannot
-        take the drone more than 10 cm out of it, and 25 cm out it is pushed back (stress test seed 27 went down
-        to 0.17 m, among the furniture). Only on a certain EKF height: the distance sensor alone reads low over
-        the furniture and would push the drone up for nothing."""
-        z = self.zone
-        # only on a certain height (the EKF height is uncertain again after the takeoff jump: a wrong one pushed
-        # the drone to 2.6 m in the sim before that fix); markers not required (blind descents went below 1.2 m)
-        if (not z or not self.tello.is_flying or self.climb_target is not None or self.pose_xy is None
-                or time.time() - self.pose_t > 0.5 or self.pose_sigma_z > 0.10):
-            return rc
-        lr, fb, ud, yw = rc
-        h = self.pose_z
-        if h < z["z_min"] - 0.25:
-            ud = max(ud, 12)
-            self.note("band: up")
-        elif h < z["z_min"] - 0.10 and ud < 0:
-            ud = 0
-            self.note("band: low")
-        if h > z["z_max"] + 0.25:
-            ud = min(ud, -12)
-            self.note("band: down")
-        elif h > z["z_max"] + 0.10 and ud > 0:
-            ud = 0
-            self.note("band: high")
-        return (lr, fb, ud, yw)
-
-    def zone_guard(self, rc):
-        """Keep the drone inside the flight zone: like the ceiling guard, on the position predicted 1 s ahead
-        (the drone needs ~1 s to stop). Outward commands shrink near the edge, brake before it, push back in
-        beyond it. Needs a fresh ArUco pose; without one, horizontal moves are blocked."""
-        z = self.zone
-        if not z or not self.tello.is_flying or self.climb_target is not None:
-            return rc
-        if not self.pose_valid(0.5, 0.25):
-            # position unknown: the zone cannot be enforced. Nov 10 (sim) the drone flew blind through the wall, so
-            # moves were blocked; but then the pilot could not get out (flight 225048: 'it will not go back, I
-            # have to turn'). Now: slow moves only (0.15 m/s, ~1 s to cross the 15 cm the pilot can react in).
-            lim = int(round(self.blind_speed / self.lin_gain))
-            if abs(rc[0]) > lim or abs(rc[1]) > lim:
-                self.note("blind: slow")
-                self.get_logger().warn(f"no marker pose: horizontal moves slowed to {self.blind_speed:.2f} m/s (turn "
-                                       "to see the markers)", throttle_duration_sec=2.0)
-            return (max(-lim, min(lim, rc[0])), max(-lim, min(lim, rc[1])), rc[2], rc[3])
-        x, y = self.pose_xy
-        vx, vy = self.velocity_xy()
-        lr, fb, ud, yw = rc
-        c, s = math.cos(self.pose_yaw), math.sin(self.pose_yaw)
-        bx, by = fb * self.lin_gain, -lr * self.lin_gain          # body velocity command
-        wx, wy = c * bx - s * by, s * bx + c * by                 # world
-        if "grid" in z:
-            wx, wy = self.grid_guard(x, y, vx, vy, wx, wy)
-            bx, by = c * wx + s * wy, -s * wx + c * wy
-            clip = lambda v: int(max(-self.max_rc, min(self.max_rc, round(v))))  # noqa: E731
-            return (clip(-by / self.lin_gain), clip(bx / self.lin_gain), ud, yw)
-        m = 0.15
-        hit = []
-        for name, pos, vel, lo, hi in (("x", x, vx, z["x_min"], z["x_max"]), ("y", y, vy, z["y_min"], z["y_max"])):
-            pred = pos + vel * 1.0
-            w = wx if name == "x" else wy
-            if pos > hi:
-                w = min(w, -0.25); hit.append(f"{name}>{hi:.2f}")
-            elif pred > hi - m:
-                w = min(w, -0.15); hit.append(f"{name}->{hi:.2f}")
-            else:
-                w = min(w, (hi - m - pred) * 1.0)
-            if pos < lo:
-                w = max(w, 0.25); hit.append(f"{name}<{lo:.2f}")
-            elif pred < lo + m:
-                w = max(w, 0.15); hit.append(f"{name}->{lo:.2f}")
-            else:
-                w = max(w, (lo + m - pred) * 1.0)
-            if name == "x":
-                wx = w
-            else:
-                wy = w
-        if hit:
-            self.get_logger().warn(f"flight zone: braking/pushing back ({', '.join(hit)}) at ({x:+.2f}, {y:+.2f})",
-                                   throttle_duration_sec=1.0)
-        bx, by = c * wx + s * wy, -s * wx + c * wy
-        clip = lambda v: int(max(-self.max_rc, min(self.max_rc, round(v))))  # noqa: E731
-        return (clip(-by / self.lin_gain), clip(bx / self.lin_gain), ud, yw)
-
-    def height_estimate(self):
-        """Height above the floor (m): the larger of the distance sensor and a fresh ArUco pose (conservative
-        for the ceiling; the sensor reads less over the bed). None if neither is valid."""
-        c = []
-        tof = self.state.get("tof")
-        if isinstance(tof, (int, float)) and 15 <= tof <= 400:
-            c.append(tof / 100.0)
-        # the EKF height as long as IT is certain, even when the horizontal position is not (blind over the bed the
-        # sensor reads low and the drone climbed to 2.67 m: stress test seed 113)
-        # (the max of both: conservative for the ceiling; 0.5 m because the EKF height variance grows while the
-        # sensor is gated out over furniture, and the sensor then reads low: stress test seed 203 reached 2.67 m)
-        if self.pose_xy is not None and time.time() - self.pose_t < 0.5 and self.pose_sigma_z < 0.5:
-            c.append(self.pose_z)
-        return max(c) if c else None
 
     def srv_land(self, req, res):
         self.rc_target = (0, 0, 0, 0)
