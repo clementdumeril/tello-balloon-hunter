@@ -1,11 +1,16 @@
-"""Identification flight: small velocity doublets on each axis, recorded with the ArUco pose, then fitted.
+"""Identification flight: velocity doublets of several amplitudes and durations on each axis, then fitted.
 
-    ros2 launch tello_driver real.launch.py          (terminal 1, drone 2 m from the marker wall, markers in view)
-    ros2 run tello_driver tello_step_test             (terminal 2, NO teleop running; you stay next to the drone)
+    ros2 launch tello_driver real.launch.py                                  (terminal 1)
+    ros2 run tello_driver tello_step_test                                    identification flight (~3.5 min)
+    ros2 run tello_driver tello_step_test --ros-args -p schedule:=valid      validation flight (~2 min)
 
-Each test: hover 2 s, +A for T, -A for T (a doublet: the drone comes back), hover 3 s. Axes: forward,
-left, up, yaw; 2 doublets each (opposite signs). Between tests the drone re-centres on its start point.
-About 1 min 30 of flight. Then it lands and runs tello_step_fit (K, tau, delay per axis -> model.yaml).
+Each doublet: hover 2 s, +A for T, -A for T (the drone comes back), hover 3 s; the tested axis is open loop, the
+others hold the position; the drone re-centres (middle of the flight zone and of the height band) before each one.
+Several amplitudes AND durations (Nov 13: 2 identical doublets could not separate the delay L from the time
+constant tau), both signs. Up/down: small doublets (A*T <= 12 cm) so that the height-band guard never cuts them
+(it did on Nov 13 and spoiled the vertical fit). The command REALLY sent by the driver (after its guards) is
+recorded in sent.csv and used by the fit. After landing: identification -> tello_step_fit (model.yaml);
+validation -> the latest identified model is simulated on this flight (validation.txt / .png).
 
 SAFETY: ANY KEY = stop and land. Ctrl+C = land. Automatic landing if the drone leaves a box around its start
 point (default +-0.8 m horizontally, 0.4-2.4 m high), if no marker is seen for 3 s, or on low battery.
@@ -35,6 +40,16 @@ from tello_driver.teleop import read_key
 
 RATE = 20.0
 
+# (amplitude, half-duration) of the doublets, per axis kind: m/s or rad/s, s. Signs alternate.
+SCHEDULES = {
+    "ident": {"xy": [(0.15, 1.8), (0.25, 1.2), (0.35, 0.8), (0.25, 1.8), (0.35, 1.2), (0.15, 0.8)],
+              "z": [(0.10, 0.6), (0.15, 0.6), (0.10, 0.8), (0.15, 0.4)],
+              "yaw": [(0.3, 1.2), (0.5, 1.0), (0.7, 0.6), (0.5, 0.6)]},
+    "valid": {"xy": [(0.20, 1.0), (0.30, 1.5), (0.30, 0.6), (0.20, 1.5)],
+              "z": [(0.12, 0.6), (0.12, 0.8)],
+              "yaw": [(0.4, 0.8), (0.6, 1.0)]},
+}
+
 
 class Abort(Exception):
     pass
@@ -58,11 +73,9 @@ class StepTest(Node):
     def __init__(self):
         super().__init__(self.NODE_NAME)
         p = self.declare_parameter
-        self.amp = p("amplitude", 0.3).value            # m/s
-        self.dur = p("duration", 1.2).value             # s per half of the doublet
-        self.yaw_amp = p("yaw_amplitude", 0.5).value    # rad/s
-        self.yaw_dur = p("yaw_duration", 1.0).value
-        self.repeats = int(p("repeats", 2).value)
+        self.schedule = p("schedule", "ident").value     # ident | valid (see SCHEDULES)
+        if self.schedule not in SCHEDULES:
+            raise SystemExit(f"schedule must be one of {list(SCHEDULES)}")
         self.axes = [a.strip() for a in p("axes", "x,y,z,yaw").value.split(",") if a.strip()]
         self.box = p("box", 0.8).value                  # m, horizontal half-size around the start point
         self.z_min, self.z_max = p("z_min", 0.4).value, p("z_max", 2.4).value
@@ -87,7 +100,8 @@ class StepTest(Node):
         self.min_battery = p("min_battery", 30).value
         from tello_driver.home import HOME_FILE
         p("home_file", HOME_FILE)
-        out = Path(p("out_dir", str(Path.home() / "tello_ws/sessions")).value) / datetime.now().strftime(f"{self.PREFIX}_%Y%m%d_%H%M%S")
+        prefix = self.PREFIX + ("val" if self.PREFIX == "step" and self.schedule == "valid" else "")
+        out = Path(p("out_dir", str(Path.home() / "tello_ws/sessions")).value) / datetime.now().strftime(f"{prefix}_%Y%m%d_%H%M%S")
         out.mkdir(parents=True, exist_ok=True)
         self.out = out
 
@@ -111,6 +125,12 @@ class StepTest(Node):
         self.w_cmd.writerow(["t", "segment", "axis", "u", "cx", "cy", "cz", "cw"])
         self.f_tel = open(out / "telemetry.csv", "w", newline="")
         self.w_tel = None
+        # what the driver REALLY sent (after its hold and guards): the identification input
+        self.f_sent = open(out / "sent.csv", "w", newline="")
+        self.w_sent = csv.writer(self.f_sent)
+        self.w_sent.writerow(["t", "cx", "cy", "cz", "cw"])
+        self.create_subscription(Twist, "/tello/rc_sent", lambda m: self.w_sent.writerow(
+            [f"{time.time():.4f}", f"{m.linear.x:.3f}", f"{m.linear.y:.3f}", f"{m.linear.z:.3f}", f"{m.angular.z:.3f}"]), 50)
 
     # ---------------------------------------------------------------- inputs
     def on_pose(self, m):
@@ -320,10 +340,9 @@ class StepTest(Node):
         return {"cx": clip(0.6 * (c * ex + s * ey), 0.2), "cy": clip(0.6 * (-s * ex + c * ey), 0.2),
                 "cz": clip(0.6 * (z0 - z), 0.2), "cw": clip(0.8 * wrap(yaw0 - yaw), 0.3)}
 
-    def doublet(self, segment, axis, sign):
-        """Hover (position held) - pulse +A - pulse -A - hover. During the pulses the tested axis is open loop
-        and the other axes keep holding the position; the logged u is what was really sent on the tested axis."""
-        amp, dur = (self.yaw_amp, self.yaw_dur) if axis == "yaw" else (self.amp, self.dur)
+    def doublet(self, segment, axis, sign, amp, dur):
+        """Hover (position held) - pulse +A for dur - pulse -A for dur - hover. During the pulses the tested axis is
+        open loop and the other axes keep holding the position (u logged = asked; sent.csv = really sent)."""
         key = {"x": "cx", "y": "cy", "z": "cz", "yaw": "cw"}[axis]
 
         def cmd(u):
@@ -425,28 +444,31 @@ class StepTest(Node):
 
     def run_tests(self):
         names = {"x": "forward/back", "y": "left/right", "z": "up/down", "yaw": "turn"}
+        sched = SCHEDULES[self.schedule]
+        plan = [(axis, a, d) for axis in self.axes for a, d in sched["xy" if axis in ("x", "y") else axis]]
+        unit = {"x": "m/s", "y": "m/s", "z": "m/s", "yaw": "rad/s"}
+        self.say(f"{self.schedule} flight: {len(plan)} doublets")
         seg = 0
-        n_tot = len(self.axes) * self.repeats
-        for axis in self.axes:
-            for rep in range(self.repeats):
-                for attempt in range(3):
-                    self.say(f"[{rep + 1 + self.repeats * self.axes.index(axis)}/{n_tot}] {names[axis]} doublet {rep + 1}"
-                             + (f" (retry {attempt})" if attempt else ""))
-                    self.recentre()
-                    try:
-                        self.doublet(seg, axis, 1 if rep % 2 == 0 else -1)
-                        seg += 1
-                        break
-                    except Lost:
-                        self.failed_segments.append(seg)
-                        seg += 1
-                        self.say("  markers lost during the test: searching, then repeating it")
-                        self.search_until_found(self.p0[3])
+        for n, (axis, amp, dur) in enumerate(plan):
+            sign = 1 if sum(1 for q in plan[:n] if q[0] == axis) % 2 == 0 else -1
+            for attempt in range(3):
+                self.say(f"[{n + 1}/{len(plan)}] {names[axis]}: {sign * amp:+.2f} {unit[axis]} for {dur:.1f} s, then back"
+                         + (f" (retry {attempt})" if attempt else ""))
+                self.recentre()
+                try:
+                    self.doublet(seg, axis, sign, amp, dur)
+                    seg += 1
+                    break
+                except Lost:
+                    self.failed_segments.append(seg)
+                    seg += 1
+                    self.say("  markers lost during the test: searching, then repeating it")
+                    self.search_until_found(self.p0[3])
         self.return_home()
         self.say("Done: landing.")
 
     def close(self):
-        for f in (self.f_pose, self.f_cmd, self.f_tel):
+        for f in (self.f_pose, self.f_cmd, self.f_tel, self.f_sent):
             f.close()
         (self.out / "failed_segments.txt").write_text(" ".join(map(str, self.failed_segments)))
 
@@ -486,9 +508,16 @@ def run(cls, fit_after=False):
         node.close()
         print(f"Data saved in {node.out}")
     if ok and fit_after:
-        from tello_driver.step_fit import fit
-        fit(node.out)
-        print(f"Model: {node.out / 'model.yaml'}   plot: {node.out / 'step_fit.png'}")
+        from tello_driver import step_fit
+        if getattr(node, "schedule", "ident") == "valid":
+            ident = step_fit.latest_identification(before=node.out)
+            if ident is None:
+                print("No identification flight to validate: run tello_step_test first")
+            else:
+                step_fit.validate(ident, node.out)
+        else:
+            step_fit.fit(node.out)
+            print(f"Model: {node.out / 'model.yaml'}   plots: {node.out / 'step_fit.png'}, {node.out / 'cost_map.png'}")
     node.destroy_node()
     rclpy.shutdown()
 
