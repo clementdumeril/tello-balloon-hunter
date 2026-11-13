@@ -4,7 +4,7 @@ What runs, who talks to whom, and where each piece of code is. Everything below 
 
 ## The idea in four steps
 
-1. **See the markers.** The camera image goes to the ArUco localizer, which computes where the drone is in the room
+1. **See the markers** ([ARUCO.md](ARUCO.md)). The camera image goes to the ArUco localizer, which computes where the drone is in the room
    (`map` frame) from the marker map measured beforehand (`config/markers.yaml`).
 2. **Know where it is all the time.** The EKF fuses that pose with the commands really sent, the distance sensor and
    the IMU heading. It compensates the ~0.5 s delay and keeps estimating for a few seconds without markers.

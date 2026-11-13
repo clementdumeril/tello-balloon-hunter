@@ -5,7 +5,7 @@ A DJI Tello localizes itself in a room covered with ArUco markers (our own EKF),
 in the end, finds and pops balloons.
 
 **How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** (nodes, topics, frames, the safety chain, the EKF,
-the missions, every file).
+the missions, every file) and **[docs/ARUCO.md](docs/ARUCO.md)** (how a camera image becomes the drone position).
 
 ## Fly
 
