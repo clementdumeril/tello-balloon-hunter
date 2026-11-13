@@ -1,6 +1,10 @@
 Panels:
   - Class: rviz_common/Displays
     Name: Displays
+  - Class: rviz_common/Tool Properties
+    Name: Tool Properties
+  - Class: rviz_common/Views
+    Name: Views
 Visualization Manager:
   Class: ""
   Displays:
@@ -81,6 +85,16 @@ Visualization Manager:
     Fixed Frame: map
     Frame Rate: 30
   Name: root
+  # mouse tools: without them the 3D view cannot be turned (Nov 13). Interact: left drag = rotate, middle drag or
+  # shift + left drag = move, wheel = zoom. Shortcuts: m = move camera, f = focus on a clicked point.
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
