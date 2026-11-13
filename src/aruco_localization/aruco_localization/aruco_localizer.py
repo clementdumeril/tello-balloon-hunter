@@ -69,6 +69,7 @@ class ArucoLocalizer(Node):
         self.n = 0 # Image count - MY
         self.ambiguous = 0
         self.saved = 0
+        self.moved = {}  # marker id -> times it was the one marker that did not fit the others
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -121,11 +122,13 @@ class ArucoLocalizer(Node):
         if ids is not None:
             for c, i in zip(corners, ids.flatten()):
                 mk = self.markers.get(int(i))
-                if mk is None:
+                if mk is None or self.moved.get(int(i), 0) >= 3:  # not in the map / found moved: ignored
                     continue
                 obj.append(mk.corners_map())
                 imgp.append(c.reshape(4, 2))
                 used.append(int(i))
+        if len(used) >= 3:
+            obj, imgp, used = self.drop_moved_marker(obj, imgp, used)
         ok, T_map_base, err, dist = False, None, float("nan"), float("nan")
         if used:
             fx = self.K[0, 0]
@@ -161,6 +164,35 @@ class ArucoLocalizer(Node):
             self.publish_viz(msg.header.stamp, T_map_cam[:3, 3], used)
         if self.debug_every and self.n % self.debug_every == 0:
             self.publish_debug(msg, img, corners, ids, ok, err, used)
+
+    def reprojection(self, obj, imgp):
+        """Joint PnP over these markers -> RMS reprojection error (px), inf if it fails."""
+        o, i = np.concatenate(obj).astype(np.float64), np.concatenate(imgp).astype(np.float64)
+        flag = cv2.SOLVEPNP_SQPNP if hasattr(cv2, "SOLVEPNP_SQPNP") else cv2.SOLVEPNP_ITERATIVE
+        ok, rvec, tvec = cv2.solvePnP(o, i, self.K, self.D, flags=flag)
+        if not ok:
+            return float("inf")
+        rvec, tvec = cv2.solvePnPRefineLM(o, i, self.K, self.D, rvec, tvec)
+        proj, _ = cv2.projectPoints(o, rvec, tvec, self.K, self.D)
+        return float(np.sqrt(np.mean(np.sum((proj.reshape(-1, 2) - i) ** 2, axis=1))))
+
+    def drop_moved_marker(self, obj, imgp, used):
+        """A marker moved since the map was made makes the joint pose fail for every marker in view (Nov 13: marker
+        39 had been moved next to 49; facing that wall, 6 markers gave 438 px and the drone flew 4.5 s blind, then
+        39 alone gave a pose 0.8 m too high and the mission landed). If the markers disagree, try without each one:
+        when removing one fixes it, that one is set aside; after 3 times it is ignored for the rest of the run."""
+        if self.reprojection(obj, imgp) <= self.max_reproj_multi:
+            return obj, imgp, used
+        errs = [self.reprojection(obj[:k] + obj[k + 1:], imgp[:k] + imgp[k + 1:]) for k in range(len(used))]
+        k = int(np.argmin(errs))
+        if errs[k] > self.max_reproj_multi:
+            return obj, imgp, used  # not one single marker: leave it to the normal rejection
+        bad = used[k]
+        self.moved[bad] = self.moved.get(bad, 0) + 1
+        if self.moved[bad] == 3:
+            self.get_logger().warn(f"marker {bad} does not match the map (moved since the capture?): ignored from now "
+                                   f"on. Re-map it: python3 tools/room_mapper.py")
+        return obj[:k] + obj[k + 1:], imgp[:k] + imgp[k + 1:], used[:k] + used[k + 1:]
 
     def single_marker_pose(self, corners, mk, min_ratio=3.0, max_tilt_deg=30.0):
         """Pose from ONE marker, as map -> camera (rvec, tvec); ok=False if it cannot be disambiguated.

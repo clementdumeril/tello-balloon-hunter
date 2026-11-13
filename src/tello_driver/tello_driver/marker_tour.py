@@ -71,9 +71,17 @@ class MarkerTour(StepTest):
         from geometry_msgs.msg import Vector3Stamped
         self.drift, self.drift_t = (0.0, 0.0), 0.0
         self.create_subscription(Vector3Stamped, "/ekf/drift", self.on_drift, 10)
+        from geometry_msgs.msg import PoseWithCovarianceStamped
+        self.marker_t = 0.0
+        self.create_subscription(PoseWithCovarianceStamped, "/aruco/pose",
+                                 lambda m: setattr(self, "marker_t", time.time()), 10)
 
     def on_drift(self, m):
         self.drift, self.drift_t = (m.vector.x, m.vector.y), time.time()
+
+    def marker_age(self):
+        """Seconds since the last ArUco pose (the EKF pose keeps coming without markers, predicted)."""
+        return time.time() - self.marker_t
 
     def flight_zone(self):
         """Axis-aligned box: room scan shrunk by the margin, and margin from each marker wall."""
@@ -183,8 +191,13 @@ class MarkerTour(StepTest):
         def step():
             if self.pose_age() < 0.5:
                 self.last_xy = self.pose[1:3]
-            if self.pose_age() > 1.0 and not yaw_only:
+            # translations only on markers really seen: the EKF prediction is fine to bridge 0.5 s, not to fly on
+            # (Nov 13: 4.5 s without a marker pose, the mission flew 0.7 m forward on the prediction alone)
+            if not yaw_only and (self.pose_age() > 1.0 or self.marker_age() > 1.0):
                 self.search(look)
+                return None
+            if not yaw_only and self.marker_age() > 0.7:
+                self.send()  # hover (the driver holds) while waiting for the next marker pose
                 return None
             if yaw_only and self.pose_age() > 0.5:
                 # markers out of view during a turn: keep turning on the IMU heading (no translation)
