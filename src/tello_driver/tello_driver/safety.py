@@ -21,6 +21,7 @@ overshoots 7-9 cm after a key release (old: 24 cm). Height: same loop on the EKF
 import math
 import time
 
+from tello_driver import model as M
 from tello_driver.zone import clearance, wrap
 
 
@@ -31,12 +32,14 @@ class CommandFilter:
                    "height_hold": "hold_z"}
 
     def __init__(self, zone=None, lin_gain=0.38 / 30, yaw_gain=math.radians(18) / 30, max_rc=80, max_height=2.6,
-                 model_K=1.15, model_tau=0.55, model_Lu=0.30, model_Kz=0.9, min_wall=0.7, wall_band=0.15,
+                 model_Kx=M.K_X, model_Ky=M.K_Y, model_tau=M.TAU_XY, model_Lu=M.L_U, model_Kz=M.K_Z,
+                 min_wall=0.7, wall_band=0.15,
                  blind_speed=0.15, hold_enabled=True, hold_kp=0.8, hold_kv=0.4, hold_ki=0.15, hold_vmax=0.4,
                  hold_z=True, hold_kpz=1.0, hold_drift_ff=True, warn=print, clock=time.time):
         self.zone = zone
         self.lin_gain, self.yaw_gain, self.max_rc, self.max_height = lin_gain, yaw_gain, int(max_rc), max_height
-        self.model_K, self.model_tau, self.model_Lu, self.model_Kz = model_K, model_tau, model_Lu, model_Kz
+        self.model_Kx, self.model_Ky, self.model_tau, self.model_Lu, self.model_Kz = model_Kx, model_Ky, model_tau, model_Lu, model_Kz
+        self.model_K = (model_Kx + model_Ky) / 2   # direction-free predictions (zone guard)
         self.min_wall, self.wall_band = min_wall, wall_band   # forward speed shrinks over wall_band above min_wall
         self.blind_speed = blind_speed                        # m/s, horizontal speed allowed without a pose
         self.hold_enabled, self.hold_z, self.hold_drift_ff = hold_enabled, hold_z, hold_drift_ff
@@ -186,10 +189,13 @@ class CommandFilter:
                 self.hold_target = (x + s * vx, y + s * vy, self.pose_yaw)
                 self.hold_i[0] = self.hold_i[1] = 0.0
             tx, ty, tyaw = self.hold_target
-            wx = self.hold_axis(0, tx, x, vx, dx, self.model_K, self.hold_kp, dt)
-            wy = self.hold_axis(1, ty, y, vy, dy, self.model_K, self.hold_kp, dt)
+            # velocity the drone should take (world), then the command per BODY axis: the forward and left gains
+            # differ (0.66 / 0.83, model.py), so the model is inverted after the rotation into the body frame
+            wx = self.hold_axis(0, tx, x, vx, dx, 1.0, self.hold_kp, dt)
+            wy = self.hold_axis(1, ty, y, vy, dy, 1.0, self.hold_kp, dt)
             c, s = math.cos(self.pose_yaw), math.sin(self.pose_yaw)
-            bx, by = c * wx + s * wy, -s * wx + c * wy
+            bx = max(-0.6, min(0.6, (c * wx + s * wy) / self.model_Kx))
+            by = max(-0.6, min(0.6, (-s * wx + c * wy) / self.model_Ky))
             wz = max(-0.3, min(0.3, 0.8 * wrap(tyaw - self.pose_yaw)))
             lr, fb, yw = self.clip(-by / self.lin_gain), self.clip(bx / self.lin_gain), self.clip(-wz / self.yaw_gain)
         if self.hold_z and not ud and not climbing:

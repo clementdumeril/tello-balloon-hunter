@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from aruco_localization.marker_map import load_marker_map
+from tello_driver import model as M
 from tello_driver.step_test import Abort, StepTest, run, wrap
 
 REPO = os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter"))
@@ -244,7 +245,8 @@ class MarkerTour(StepTest):
                 vx, vy = vx - self.drift[0], vy - self.drift[1]
             last_err[0] = (ex, ey, ez, eyaw)
             c, s = math.cos(yaw), math.sin(yaw)
-            self.send(c * vx + s * vy, -s * vx + c * vy, clip(self.kp * ez, self.vz_max),
+            # desired body velocity -> command: the drone reaches K times what is commanded (forward 0.66, left 0.83)
+            self.send((c * vx + s * vy) / M.K_X, (-s * vx + c * vy) / M.K_Y, clip(self.kp * ez, self.vz_max),
                       clip(self.kp_yaw * eyaw, self.w_max))
             return None
         t0 = time.time()

@@ -36,8 +36,11 @@ class DroneEKF:
     # defaults: identification flight of Nov 11 (tau 0.55 s, total delay 0.5 s = 0.30 command + 0.20 video).
     # tau 0.40 fitted the near-hover replays better but made the estimate run ~0.25 s AHEAD of the drone at speed.
     def __init__(self, K_xy=1.15, tau_xy=0.55, K_z=0.9, tau_z=0.45, K_w=1.0, L_u=0.30, L_v=0.20,
-                 accel_noise=0.6, yaw_rate_noise=0.15, drift_noise=0.01, history_s=1.5):
+                 accel_noise=0.6, yaw_rate_noise=0.15, drift_noise=0.01, history_s=1.5, K_x=None, K_y=None):
         self.K_xy, self.tau_xy, self.K_z, self.tau_z, self.K_w = K_xy, tau_xy, K_z, tau_z, K_w
+        # per body axis gains (forward x and left y differ: 0.66 / 0.83, identification Nov 13); K_xy if not given
+        self.K_x = K_xy if K_x is None else K_x
+        self.K_y = K_xy if K_y is None else K_y
         self.L_u, self.L_v = L_u, L_v
         self.qa, self.qw, self.qd = accel_noise, yaw_rate_noise, drift_noise
         self.s = np.zeros(NX)
@@ -71,8 +74,9 @@ class DroneEKF:
     def _step(self, s, P, u, dt):
         x, y, z, vx, vy, vz, yaw, b, dx, dy = s
         c, sn = math.cos(yaw), math.sin(yaw)
-        cx = self.K_xy * (c * u[0] - sn * u[1])
-        cy = self.K_xy * (sn * u[0] + c * u[1])
+        bx, by = self.K_x * u[0], self.K_y * u[1]   # body velocity the command leads to
+        cx = c * bx - sn * by
+        cy = sn * bx + c * by
         cz = self.K_z * u[2]
         a_xy, a_z = dt / self.tau_xy, dt / self.tau_z
         s2 = s.copy()
@@ -88,8 +92,8 @@ class DroneEKF:
         F[IVX, IVX] = F[IVY, IVY] = 1 - a_xy
         F[IVX, IDX] = F[IVY, IDY] = a_xy
         F[IVZ, IVZ] = 1 - a_z
-        F[IVX, IYAW] = a_xy * self.K_xy * (-sn * u[0] - c * u[1])
-        F[IVY, IYAW] = a_xy * self.K_xy * (c * u[0] - sn * u[1])
+        F[IVX, IYAW] = a_xy * (-sn * bx - c * by)
+        F[IVY, IYAW] = a_xy * (c * bx - sn * by)
         Q = np.zeros((NX, NX))
         Q[IVX, IVX] = Q[IVY, IVY] = (self.qa * dt) ** 2 + 1e-6
         Q[IVZ, IVZ] = (0.5 * self.qa * dt) ** 2 + 1e-6

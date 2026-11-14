@@ -28,6 +28,7 @@ from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
 from tello_driver.fake_tello import FakeFrameRead, FakeTello  # noqa: F401  (re-exported for older imports)
+from tello_driver import model as M
 from tello_driver.safety import CommandFilter
 from tello_driver.zone import clearance, load_zone, wrap  # noqa: F401  (re-exported: missions import them here)
 
@@ -84,8 +85,9 @@ class TelloDriver(Node):
         # the hold and the guards (safety.py), on the identified model (Nov 11)
         self.safety = CommandFilter(
             zone=self.zone, lin_gain=self.lin_gain, yaw_gain=self.yaw_gain, max_rc=self.max_rc,
-            max_height=self.max_height, model_K=p("model_K", 1.15).value, model_tau=p("model_tau", 0.55).value,
-            model_Lu=p("model_L_u", 0.30).value, model_Kz=p("model_K_z", 0.9).value,
+            max_height=self.max_height, model_Kx=p("model_K_x", M.K_X).value, model_Ky=p("model_K_y", M.K_Y).value,
+            model_tau=p("model_tau", M.TAU_XY).value, model_Lu=p("model_L_u", M.L_U).value,
+            model_Kz=p("model_K_z", M.K_Z).value,
             min_wall=p("min_wall_distance", 0.7).value, wall_band=p("wall_slow_band", 0.15).value,
             blind_speed=p("blind_speed", 0.15).value, hold_enabled=p("position_hold", True).value,
             hold_kp=p("hold_kp", 0.8).value, hold_kv=p("hold_kv", 0.4).value, hold_ki=p("hold_ki", 0.15).value,
