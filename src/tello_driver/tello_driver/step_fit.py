@@ -302,7 +302,8 @@ def save(folder, res, Lv, has_sent):
         J = r["J"]
         rel = np.log10(J / np.nanmin(J))
         cs = a.contourf(LS_FINE, TAUS_FINE, np.minimum(rel, 1.0), levels=20, cmap="viridis_r")
-        a.contour(LS_FINE, TAUS_FINE, rel, levels=[np.log10(1.1)], colors="w", linewidths=1)
+        if np.nanmax(rel) > np.log10(1.1) > np.nanmin(rel):
+            a.contour(LS_FINE, TAUS_FINE, rel, levels=[np.log10(1.1)], colors="w", linewidths=1)
         a.plot(r["loo"][:, 2], r["loo"][:, 1], "r.", ms=5, label="leave one out")
         a.plot(r["L"], r["tau"], "w*", ms=12, label="best")
         a.set_xlabel("L [s]")

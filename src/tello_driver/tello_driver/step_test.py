@@ -7,7 +7,8 @@
 Each doublet: hover 2 s, +A for T, -A for T (the drone comes back), hover 3 s; the tested axis is open loop, the
 others hold the position; the drone re-centres (middle of the flight zone and of the height band) before each one.
 Several amplitudes AND durations (Nov 13: 2 identical doublets could not separate the delay L from the time
-constant tau), both signs. Up/down: small doublets (A*T <= 12 cm) so that the height-band guard never cuts them
+constant tau), both signs. Up/down: short doublets (A*T <= 12 cm, the height-band guard must not cut them) but strong
+(rc >= 20: the Tello did not react at all to 8-12 rc points up/down, Nov 13); before: the band guard cut them
 (it did on Nov 13 and spoiled the vertical fit). The command REALLY sent by the driver (after its guards) is
 recorded in sent.csv and used by the fit. After landing: identification -> tello_step_fit (model.yaml);
 validation -> the latest identified model is simulated on this flight (validation.txt / .png).
@@ -43,10 +44,10 @@ RATE = 20.0
 # (amplitude, half-duration) of the doublets, per axis kind: m/s or rad/s, s. Signs alternate.
 SCHEDULES = {
     "ident": {"xy": [(0.15, 1.8), (0.25, 1.2), (0.35, 0.8), (0.25, 1.8), (0.35, 1.2), (0.15, 0.8)],
-              "z": [(0.10, 0.6), (0.15, 0.6), (0.10, 0.8), (0.15, 0.4)],
+              "z": [(0.30, 0.4), (0.25, 0.5), (0.30, 0.3), (0.25, 0.4)],  # rc >= 20: the Tello ignored 8-12 (Nov 13)
               "yaw": [(0.3, 1.2), (0.5, 1.0), (0.7, 0.6), (0.5, 0.6)]},
     "valid": {"xy": [(0.20, 1.0), (0.30, 1.5), (0.30, 0.6), (0.20, 1.5)],
-              "z": [(0.12, 0.6), (0.12, 0.8)],
+              "z": [(0.28, 0.4), (0.30, 0.35)],
               "yaw": [(0.4, 0.8), (0.6, 1.0)]},
 }
 
