@@ -1,5 +1,9 @@
 """The Tello's identified response: the ONE place where the model lives (EKF, driver safety chain, missions, fake drone).
 
+WITH THE PROTECTIVE CAGE (the drone always flies with it): the cage adds weight and drag, so the drone is slower for
+the same command (K 0.66-0.83 instead of ~1.15 without it) and drains its battery faster. Flying without the cage
+needs a new identification + validation flight (tello_step_test, then schedule:=valid).
+
 Per axis, from the velocity command u we send to the velocity v the drone reaches (its own flight controller
 included):  tau dv/dt = K u(t - L) - v,  L = L_U (command side) + L_V (video side, command -> marker pose).
 
