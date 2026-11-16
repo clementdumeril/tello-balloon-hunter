@@ -36,7 +36,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px sy
 <div id="p"><h1>Zone de vol proposée</h1>
 <p>Glisser = tourner, clic droit = déplacer, molette = zoom.</p>
 <div id="boxes"></div>
-<label><input type="checkbox" id="old" checked><span class="sw" style="background:#888"></span>zone actuelle (driver)</label>
+<label><input type="checkbox" id="old" checked><span class="sw" style="background:#e6b800"></span>zone actuelle (driver, jaune comme dans RViz)</label>
 <label><span class="sw" style="background:#d9480f"></span>trajet de patrouille (tello_patrol)</label>
 <label><input type="checkbox" id="ceil"><span class="sw" style="background:#bbb"></span>plafond</label>
 <label><input type="checkbox" id="scan" checked><span class="sw" style="background:linear-gradient(90deg,#2b6cb0,#e53e3e)"></span>scan (couleur = hauteur)</label>
@@ -90,7 +90,7 @@ D.boxes.forEach((b, i) => { const g = box(b, greens[i % 4], 0.28, true);
   const lab = document.createElement('label');
   lab.innerHTML = `<input type="checkbox" checked><span class="sw" style="background:#${greens[i%4].toString(16).padStart(6,'0')}"></span>${b.name} : x ${b.x[0]}…${b.x[1]}, y ${b.y[0]}…${b.y[1]}, z ${b.z[0]}…${b.z[1]} m`;
   lab.querySelector('input').onchange = e => g.visible = e.target.checked; div.appendChild(lab); });
-const old = D.old ? box(D.old, 0x888888, 0, false) : null;
+const old = D.old ? box(D.old, 0xe6b800, 0, false) : null;  // same colours as RViz: yellow = driver zone
 if (D.path) { const g = new THREE.BufferGeometry().setFromPoints(D.path.map(p => new THREE.Vector3(p[0], p[1], p[2])));
   scene.add(new THREE.Line(g, new THREE.LineBasicMaterial({color: 0xd9480f})));
   const l = label('patrouille', 0.12, '#d9480f'); l.position.set(D.path[0][0], D.path[0][1], D.path[0][2] + 0.1); scene.add(l); }
