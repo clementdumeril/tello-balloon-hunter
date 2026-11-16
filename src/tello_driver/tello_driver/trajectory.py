@@ -49,7 +49,7 @@ def check(traj, zone, clearance_fn, z_lim=(1.2, 2.1)):
         if not z_lim[0] - 1e-3 <= p[2] <= z_lim[1] + 1e-3:
             return f"height {p[2]:.2f} m outside [{z_lim[0]}, {z_lim[1]}]"
         if zone and "grid" in zone:
-            d, _ = clearance_fn(zone, p[0], p[1])
+            d, _ = clearance_fn(zone, p[0], p[1], p[2])
             if d < zone["margin"]:
                 return f"passes {d:.2f} m from an obstacle at ({p[0]:+.2f}, {p[1]:+.2f})"
     return None

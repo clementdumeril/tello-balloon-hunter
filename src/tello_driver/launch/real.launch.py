@@ -70,6 +70,8 @@ def zone_file(arg, band=False):
     config/flight_zone_band.yaml) if it exists, 'none' = off."""
     if arg == "none":
         return ""
+    if arg == "3d":  # the L-shaped zone (union of boxes, the floor is 2.08 m over the east furniture)
+        return str(Path(REPO) / "config" / "flight_zone_3d.yaml")
     if arg != "auto":
         return arg
     p = Path(REPO) / "config" / ("flight_zone_band.yaml" if band else "flight_zone.yaml")
@@ -94,6 +96,8 @@ def takeoff_height(markers_file, arg, band_zone=""):
     if band_zone:
         try:
             z = yaml.safe_load(open(band_zone, encoding="utf-8"))
+            if "boxes" in z:  # 3D zone: the middle of its full height range
+                z = {"z_min": min(b["z"][0] for b in z["boxes"]), "z_max": max(b["z"][1] for b in z["boxes"])}
             return round((float(z["z_min"]) + float(z["z_max"])) / 2, 2)
         except Exception:  # noqa: BLE001
             pass
@@ -146,7 +150,8 @@ def generate_launch_description():
                               description="band mode (default): fly in the 1.70-2.00 m band (config/flight_zone_band.yaml), "
                                           "takeoff climbs to its middle (1.85 m); band:=false = zone 1.4-2.4 m"),
         DeclareLaunchArgument("flight_zone", default_value="auto",
-                              description="obstacle-free zone YAML; auto = config/flight_zone.yaml; none = no zone"),
+                              description="obstacle-free zone YAML; auto = config/flight_zone.yaml (band: "
+                                          "flight_zone_band.yaml); 3d = the L zone config/flight_zone_3d.yaml; none = no zone"),
         DeclareLaunchArgument("room_mesh", default_value="auto",
                               description="room scan OBJ in the map frame; auto = ~/tello_ws/room_scan/room_map.obj"),
         DeclareLaunchArgument("max_height", default_value="2.6",

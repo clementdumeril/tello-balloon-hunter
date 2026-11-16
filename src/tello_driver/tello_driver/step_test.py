@@ -64,6 +64,23 @@ def wrap(a):
     return math.atan2(math.sin(a), math.cos(a))
 
 
+def driver_zone_file(node, timeout=5.0):
+    """The flight zone file the running driver enforces (its 'flight_zone_file' parameter); '' if no answer."""
+    from rcl_interfaces.srv import GetParameters
+    cli = node.create_client(GetParameters, "/tello_driver/get_parameters")
+    try:
+        if not cli.wait_for_service(timeout_sec=timeout):
+            return ""
+        fut = cli.call_async(GetParameters.Request(names=["flight_zone_file"]))
+        rclpy.spin_until_future_complete(node, fut, timeout_sec=timeout)
+        r = fut.result()
+        return r.values[0].string_value if r and r.values else ""
+    except Exception:  # noqa: BLE001
+        return ""
+    finally:
+        node.destroy_client(cli)
+
+
 class StepTest(Node):
     NODE_NAME = "tello_step_test"
     PREFIX = "step"
@@ -86,8 +103,12 @@ class StepTest(Node):
         # band mode: fly only in a thin height band (config/flight_zone_band.yaml, z 1.70-2.00 m): above all the
         # furniture (bigger free zone), markers of every row in view, far from the ceiling
         self.band = bool(p("band", self.BAND_DEFAULT).value)
-        zf = p("flight_zone_file", os.path.join(os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter")),
-                                                 "config", "flight_zone_band.yaml" if self.band else "flight_zone.yaml")).value
+        zf = p("flight_zone_file", "").value
+        if not zf:  # the zone the driver enforces (launch flight_zone:=3d ...), so that both agree
+            zf = driver_zone_file(self)
+        if not zf:
+            zf = os.path.join(os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter")),
+                              "config", "flight_zone_band.yaml" if self.band else "flight_zone.yaml")
         from tello_driver.zone import load_zone
         self.zone = load_zone(zf)
         self.band_z = None
@@ -218,7 +239,7 @@ class StepTest(Node):
             zn = self.zone
             if zn and "grid" in zn:
                 from tello_driver.zone import clearance
-                d, _ = clearance(zn, x, y)
+                d, _ = clearance(zn, x, y, z)
                 if d < zn["margin"] - 0.2:
                     raise Abort(f"{d:.2f} m from an obstacle at ({x:+.2f}, {y:+.2f}) m")
             elif zn and not (zn["x_min"] - 0.2 <= x <= zn["x_max"] + 0.2 and zn["y_min"] - 0.2 <= y <= zn["y_max"] + 0.2):

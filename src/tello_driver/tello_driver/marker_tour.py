@@ -118,8 +118,14 @@ class MarkerTour(StepTest):
             # a marker higher/lower than the drone can go: back off until it sits in the middle 60 % of the
             # vertical field of view (43 deg); e.g. the west markers at 2.5-2.7 m were cut at the image top
             d_min = abs(m.t[2] - z) / (0.6 * math.tan(math.radians(21.5)))
-            near = self.feasible(m, n, max(self.approach, d_min))
-            x, y = self.feasible(m, n, max(self.standoff, d_min, math.hypot(near[0] - m.t[0], near[1] - m.t[1])))
+            near = self.feasible(m, n, max(self.approach, d_min), z)
+            layers = (self.zone or {}).get("layers")
+            if layers:  # 3D zone: over the east furniture only above 2.08 m; go up there if it gets closer
+                zu = min(max(z, layers[-1][0] + 0.10), self.z_hi)
+                nu = self.feasible(m, n, max(self.approach, d_min), zu)
+                if math.hypot(nu[0] - m.t[0], nu[1] - m.t[1]) < math.hypot(near[0] - m.t[0], near[1] - m.t[1]) - 0.05:
+                    near, z = nu, zu
+            x, y = self.feasible(m, n, max(self.standoff, d_min, math.hypot(near[0] - m.t[0], near[1] - m.t[1])), z)
             yaw = math.atan2(m.t[1] - y, m.t[0] - x)  # facing the marker
             wall = round(math.degrees(math.atan2(n[1], n[0])) / 90) % 4  # which wall (normal direction)
             wps.append({"id": m.id, "p": (x, y, z), "near": (near[0], near[1], z), "yaw": yaw, "wall": wall,
@@ -131,15 +137,15 @@ class MarkerTour(StepTest):
                                                   math.hypot(wps[i]["p"][0] - x0, wps[i]["p"][1] - y0)))
         return wps[k:] + wps[:k]
 
-    def feasible(self, m, n, d):
+    def feasible(self, m, n, d, z=None):
         """Point d m in front of marker m (normal n), moved further back until it is in the obstacle-free space
-        (room scan grid, margin + 10 cm); without grid, clamped into the mission rectangle."""
+        (room scan grid, margin + 10 cm; 3D zone: at height z); without grid, clamped into the mission rectangle."""
         f = self.fence
         if self.zone and "grid" in self.zone:
             from tello_driver.zone import clearance
             for k in range(40):
                 x, y = m.t[0] + (d + 0.05 * k) * n[0], m.t[1] + (d + 0.05 * k) * n[1]
-                if clearance(self.zone, x, y)[0] >= self.zone["margin"] + 0.15:  # +0.10 overshot by 5 cm (sim)
+                if clearance(self.zone, x, y, z)[0] >= self.zone["margin"] + 0.15:  # +0.10 overshot by 5 cm (sim)
                     return x, y
         x = min(max(m.t[0] + d * n[0], f[0]), f[1])
         y = min(max(m.t[1] + d * n[1], f[2]), f[3])

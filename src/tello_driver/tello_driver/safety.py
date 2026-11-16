@@ -22,7 +22,7 @@ import math
 import time
 
 from tello_driver import model as M
-from tello_driver.zone import clearance, wrap
+from tello_driver.zone import clearance, height_limits, wrap
 
 
 class CommandFilter:
@@ -237,16 +237,20 @@ class CommandFilter:
             return rc
         lr, fb, ud, yw = rc
         h = self.pose_z
-        if h < z["z_min"] - 0.25:
+        # 3D zone (L shape): the floor depends on where the drone is (2.08 m over the east furniture, 1.55 m
+        # elsewhere). Over furniture the slack is small: its top is 0.20 m under the zone floor
+        lo, hi = height_limits(z, *self.pose_xy)
+        tight = lo > z["z_min"] + 0.01
+        if h < lo - (0.12 if tight else 0.25):
             ud = max(ud, 12)
             self.note("band: up")
-        elif h < z["z_min"] - 0.10 and ud < 0:
+        elif h < lo - (0.03 if tight else 0.10) and ud < 0:
             ud = 0
             self.note("band: low")
-        if h > z["z_max"] + 0.25:
+        if h > hi + 0.25:
             ud = min(ud, -12)
             self.note("band: down")
-        elif h > z["z_max"] + 0.10 and ud > 0:
+        elif h > hi + 0.10 and ud > 0:
             ud = 0
             self.note("band: high")
         return (lr, fb, ud, yw)
@@ -285,14 +289,15 @@ class CommandFilter:
         position. Closer than the margin: the velocity towards the obstacle is removed and the drone is pushed
         away; approaching it: that velocity shrinks to zero at the margin."""
         mg = self.zone["margin"]
-        d, (gx, gy) = clearance(self.zone, x, y)
+        zh = self.pose_z  # 3D zone: the layer at the drone's height
+        d, (gx, gy) = clearance(self.zone, x, y, zh)
         # where the drone will be in 1 s if this command is kept (identified model: delay L_u, then first-order
         # response): a planned deceleration is not taken for a run at the wall
         K, tau, Lu, H = self.model_K, self.model_tau, self.model_Lu, 1.0
         f = tau * (1 - math.exp(-(H - Lu) / tau))
         px = x + vx * Lu + K * wx * (H - Lu) + (vx - K * wx) * f
         py = y + vy * Lu + K * wy * (H - Lu) + (vy - K * wy) * f
-        dp, (gpx, gpy) = clearance(self.zone, px, py)
+        dp, (gpx, gpy) = clearance(self.zone, px, py, zh)
         if dp < d:
             d_use, (ux, uy) = dp, (gpx, gpy)
         else:

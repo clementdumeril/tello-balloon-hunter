@@ -69,9 +69,12 @@ class MarkerMapPublisher(Node):
                 # faint faces + thick edges, a bare transparent cube vanished inside the textured scan
                 self.pub_zone = self.create_publisher(MarkerArray, "/room/flight_zone", qos)
                 arr = MarkerArray()
-                box_markers(arr, "flight_zone", 0, (z["x_min"], z["x_max"]), (z["y_min"], z["y_max"]),
-                            (z["z_min"], z["z_max"]), (1.0, 0.8, 0.0))
                 z3 = Path(zf).parent / "flight_zone_3d.yaml"
+                if "boxes" in z:  # the driver enforces the 3D zone itself: green only
+                    z3 = Path(zf)
+                else:
+                    box_markers(arr, "flight_zone", 0, (z["x_min"], z["x_max"]), (z["y_min"], z["y_max"]),
+                                (z["z_min"], z["z_max"]), (1.0, 0.8, 0.0))
                 if z3.exists():
                     for i, b in enumerate(yaml.safe_load(open(z3, encoding="utf-8"))["boxes"]):
                         box_markers(arr, "flight_zone_3d", i, b["x"], b["y"], b["z"], (0.1, 0.85, 0.25))

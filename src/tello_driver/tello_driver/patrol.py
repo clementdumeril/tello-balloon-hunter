@@ -146,6 +146,12 @@ class Patrol(MarkerTour):
         _, x, y, _, _ = self.pose
         k = min(range(4), key=lambda i: math.hypot(wps[i][0] - x, wps[i][1] - y))
         z_t = self.z_patrol or (self.band_z[1] - 0.05 if self.band_z else self.p0[2])
+        if self.zone and "grid" in self.zone:  # 3D zone: the path must be free at that height (L shape)
+            from tello_driver.zone import clearance
+            for a, b in wps:
+                if clearance(self.zone, a, b, z_t)[0] < self.zone["margin"] + 0.1:
+                    raise Abort(f"patrol corner ({a:+.2f}, {b:+.2f}) not in the flight zone at {z_t:.2f} m "
+                                "(over the east furniture: height >= 2.15 m, or a larger inset)")
         self.say(f"Patrol: {self.v_patrol:.2f} m/s, turning {math.degrees(self.w_patrol):.0f} deg/s, path "
                  + " -> ".join(f"({a:+.2f}, {b:+.2f})" for a, b in wps) + f" at {z_t:.2f} m. "
                  "Type a marker number + ENTER.")
