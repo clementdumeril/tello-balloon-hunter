@@ -65,13 +65,18 @@ class MarkerMapPublisher(Node):
             import yaml
             try:
                 z = yaml.safe_load(open(zf, encoding="utf-8"))
-                self.pub_zone = self.create_publisher(VizMarker, "/room/flight_zone", qos)
-                cx, cy, cz = (z["x_min"] + z["x_max"]) / 2, (z["y_min"] + z["y_max"]) / 2, (z["z_min"] + z["z_max"]) / 2
-                box = viz(TimeMsg(), "map", "flight_zone", 0, VizMarker.CUBE,
-                          (z["x_max"] - z["x_min"], z["y_max"] - z["y_min"], z["z_max"] - z["z_min"]),
-                          (0.2, 0.9, 0.3, 0.18), x=cx, y=cy, z=cz)
-                self.pub_zone.publish(box)
-                self.zone_marker = box
+                # the zone the driver enforces (yellow) + the proposed 3D zone, config/flight_zone_3d.yaml (green):
+                # faint faces + thick edges, a bare transparent cube vanished inside the textured scan
+                self.pub_zone = self.create_publisher(MarkerArray, "/room/flight_zone", qos)
+                arr = MarkerArray()
+                box_markers(arr, "flight_zone", 0, (z["x_min"], z["x_max"]), (z["y_min"], z["y_max"]),
+                            (z["z_min"], z["z_max"]), (1.0, 0.8, 0.0))
+                z3 = Path(zf).parent / "flight_zone_3d.yaml"
+                if z3.exists():
+                    for i, b in enumerate(yaml.safe_load(open(z3, encoding="utf-8"))["boxes"]):
+                        box_markers(arr, "flight_zone_3d", i, b["x"], b["y"], b["z"], (0.1, 0.85, 0.25))
+                self.zone_marker = arr
+                self.pub_zone.publish(arr)
                 self.create_timer(2.0, lambda: self.pub_zone.publish(self.zone_marker))
                 if z.get("grid_file"):
                     self.publish_free_space(Path(zf).parent / z["grid_file"], float(z.get("margin", 0.35)), qos)
@@ -163,6 +168,21 @@ def viz(stamp, frame, ns, mid, mtype, scale, rgba, x=0.0, y=0.0, z=0.0):
     v.pose.position.x, v.pose.position.y, v.pose.position.z = float(x), float(y), float(z)
     v.pose.orientation.w = 1.0
     return v
+
+
+def box_markers(arr, ns, i, xs, ys, zs, rgb):
+    """A box in the map frame for RViz: translucent faces (id 2i) + 12 thick edges (id 2i+1), appended to arr."""
+    (x0, x1), (y0, y1), (z0, z1) = xs, ys, zs
+    arr.markers.append(viz(TimeMsg(), "map", ns, 2 * i, VizMarker.CUBE, (x1 - x0, y1 - y0, z1 - z0), (*rgb, 0.3),
+                           x=(x0 + x1) / 2, y=(y0 + y1) / 2, z=(z0 + z1) / 2))
+    e = viz(TimeMsg(), "map", ns, 2 * i + 1, VizMarker.LINE_LIST, (0.025, 0, 0), (*rgb, 1.0))
+    c = [(x, y, zz) for x in (x0, x1) for y in (y0, y1) for zz in (z0, z1)]
+    for a in range(8):
+        for b in range(a + 1, 8):
+            if sum(p != q for p, q in zip(c[a], c[b])) == 1:  # corners that differ on one axis = an edge
+                e.points += [Point(x=float(c[a][0]), y=float(c[a][1]), z=float(c[a][2])),
+                             Point(x=float(c[b][0]), y=float(c[b][1]), z=float(c[b][2]))]
+    arr.markers.append(e)
 
 
 def main():

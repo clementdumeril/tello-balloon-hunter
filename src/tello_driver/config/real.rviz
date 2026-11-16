@@ -35,8 +35,8 @@ Visualization Manager:
       Topic:
         Value: /room/free_space
         Durability Policy: Transient Local
-    - Class: rviz_default_plugins/Marker
-      Name: Mission zone
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Flight zone (yellow = driver, green = proposed 3D zone)
       Enabled: true
       Topic:
         Value: /room/flight_zone
