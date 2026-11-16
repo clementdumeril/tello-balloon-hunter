@@ -25,6 +25,9 @@ ros2 launch tello_driver real.launch.py
 ros2 run tello_driver tello_teleop          # t take off, arrows, i/k, j/l, g land, x emergency
 # ...or a mission: go in front of marker 49, then 35 (ENTER takes off, any key lands)
 ros2 run tello_driver tello_goto 49 35
+# ...or the patrol: laps of the zone while turning; type 35 + ENTER = find marker 35 with the camera, go in
+# front of it, patrol again. + / - patrol speed, * / / turning speed, ENTER alone = lap statistics
+ros2 run tello_driver tello_patrol
 
 # after a flight
 python3 tools/flight_report.py --band 1.7 2.0

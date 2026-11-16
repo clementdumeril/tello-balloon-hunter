@@ -81,6 +81,11 @@ class ArucoLocalizer(Node):
         from std_msgs.msg import Float32
         self.Float32 = Float32
         self.pub_near = self.create_publisher(Float32, "/aruco/nearest_marker", 5)
+        # what the camera sees, every frame: "id:u:size_px,..." (u = horizontal image position -1 left .. +1 right,
+        # size_px = longest edge), empty when nothing. The patrol finds a marker with it (camera, not the map).
+        from std_msgs.msg import String
+        self.String = String
+        self.pub_ids = self.create_publisher(String, "/aruco/ids", 5)
         self.pub_path = self.create_publisher(PathMsg, "/aruco/path", 2)
         self.pub_sight = self.create_publisher(VizMarker, "/aruco/sight_lines", 5)
         self.path = PathMsg()
@@ -117,6 +122,14 @@ class ArucoLocalizer(Node):
         img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8") # Convert image to CV2 blue-green-red format - MY
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) # Convert CV2 BGR to grayscale - MY
         corners, ids = self.detector.detect(gray) # Detect corners and IDs of AR tags - MY
+        seen = []
+        if ids is not None:
+            for c, i in zip(corners, ids.flatten()):
+                c = c.reshape(4, 2)
+                u = (float(c[:, 0].mean()) - self.K[0, 2]) / self.K[0, 2]
+                edge = float(np.max(np.linalg.norm(c - np.roll(c, 1, 0), axis=1)))
+                seen.append(f"{int(i)}:{u:.3f}:{edge:.0f}")
+        self.pub_ids.publish(self.String(data=",".join(seen)))
 
         obj, imgp, used = [], [], []
         if ids is not None:

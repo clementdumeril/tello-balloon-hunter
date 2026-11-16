@@ -1,0 +1,14 @@
+# 3D flight zone PROPOSAL (Nov 15): union of boxes (map frame, m), drawn by tools/zone_view.py. Not used by the
+# driver yet (the driver still uses flight_zone_band.yaml) until it is validated.
+#
+# From the room scan (scans/room_20261111b_obj/map/room_map.obj):
+#   walls: west x -1.24, east x 1.65, south y 0.0, north y 3.17; ceiling ~2.78 m
+#   furniture along the east wall (marker wall 34/35/42): front edge x 0.92, top 1.88 m (y 0.2-1.4), 1.2-1.5 m
+#   (y 1.4-3.1) -> above it only from the lowest east marker row (z 2.08: 45/34/35/42/43)
+#   furniture under marker 26 (west wall, y 2.1-3.0): top 1.19 m -> 0.36 m below the zone floor
+# Margins: 0.30 m from the walls, 0.25 m from the furniture front, zone floor = marker row 46/47/39 (z 1.55),
+# zone top 2.30 m (0.5 m under the ceiling). Checked: no scan point inside a box grown by 0.25 m.
+margin: 0.25
+boxes:
+  - {name: main,                 x: [-0.94, 0.67], y: [0.30, 2.87], z: [1.55, 2.30]}
+  - {name: above_east_furniture, x: [0.67, 1.35],  y: [0.30, 2.87], z: [2.08, 2.30]}

@@ -22,6 +22,7 @@ setup(
         "tello_goto = tello_driver.goto_markers:main",
         "tello_ekf = tello_driver.ekf_node:main",
         "tello_strike = tello_driver.strike:main",
+        "tello_patrol = tello_driver.patrol:main",
         "session_recorder = tello_driver.session_recorder:main",
     ]},
 )
