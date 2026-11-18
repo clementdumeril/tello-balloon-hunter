@@ -60,23 +60,29 @@ class CommandFilter:
     def on_pose(self, x, y, z, yaw, sigma_xy, sigma_z):
         # the estimate jumped (markers back after dead reckoning, filter restart) or is uncertain: a hold target
         # taken from the old estimate is meaningless (stress test seed 142: dragged the drone 63 cm to it)
+        
+        """desired pose is set to none if the pose is too different or too 
+        uncertain (sigmaxy is uncertainty of position based on the ekf estimate) - NG"""
         if self.pose_xy is not None and (math.hypot(x - self.pose_xy[0], y - self.pose_xy[1]) > 0.15 or sigma_xy > 0.06):
             self.hold_target = None
         if abs(z - self.pose_z) > 0.15 or sigma_z > 0.08:
             self.hold_zt = None
         now = self.clock()
+        # gets the current pose and uncertainty estimates + stores it - NG
         self.pose_xy, self.pose_z, self.pose_yaw, self.pose_t = (x, y), z, yaw, now
         self.pose_sigma, self.pose_sigma_z = sigma_xy, sigma_z
+        # appends pose estimates into history - NG
         self.xy_hist = [(t, p) for t, p in self.xy_hist if now - t < 0.6] + [(now, (x, y))]
 
     def on_ekf_velocity(self, vx, vy, vz):
-        self.ekf_v, self.ekf_v_t = (vx, vy, vz), self.clock()
+        self.ekf_v, self.ekf_v_t = (vx, vy, vz), self.clock() #estimtated velocity (v_t is the time of velocity) - NG
 
     def on_ekf_drift(self, dx, dy):
-        self.ekf_d = (dx, dy)
+        self.ekf_d = (dx, dy) #estimated horizontal drift (dx, dy) - NG
 
     def on_nearest_marker(self, d):
-        self.near_d, self.near_t = float(d), self.clock()
+        self.near_d, self.near_t = float(d), self.clock() #distance + time estimate of arrival to nearest aruco tag - NG
+        #uses the largest side length to figure out which marker is the cloest - NG
 
     def set_param(self, name, value):
         """A live parameter change; False if the name is not one of LIVE_PARAMS."""
@@ -89,13 +95,14 @@ class CommandFilter:
     def pose_valid(self, max_age, max_sigma):
         """A pose recent enough and certain enough (the EKF keeps publishing without markers, with a growing
         uncertainty: beyond max_sigma it is not trusted)."""
+        #ensure pose used for estimate is valid (recent + certain) - NG
         return self.pose_xy is not None and self.clock() - self.pose_t < max_age and self.pose_sigma < max_sigma
 
     def velocity_xy(self):
         """Velocity from the last 0.6 s of poses (fallback when the EKF velocity is stale)."""
         if len(self.xy_hist) < 2:
             return 0.0, 0.0
-        (t0, (x0, y0)), (t1, (x1, y1)) = self.xy_hist[0], self.xy_hist[-1]
+        (t0, (x0, y0)), (t1, (x1, y1)) = self.xy_hist[0], self.xy_hist[-1] #xy_hist only holds 0.6 s of poses, making this valid - NG
         dt = t1 - t0
         return ((x1 - x0) / dt, (y1 - y0) / dt) if dt > 0.2 else (0.0, 0.0)
 
@@ -104,6 +111,7 @@ class CommandFilter:
         ceiling: over the bed the sensor reads ~0.85 m less). The EKF height is used up to 0.5 m uncertainty: its
         variance grows while the sensor is gated out over furniture (stress test seed 203 reached 2.67 m when it
         was dropped). None if neither is valid."""
+        #tof_cm is time of flight sensor distance (cm) - NG
         c = []
         if isinstance(tof_cm, (int, float)) and 15 <= tof_cm <= 400:
             c.append(tof_cm / 100.0)
@@ -122,10 +130,12 @@ class CommandFilter:
         return hgt, ((hgt - h_old) / (now - t_old) if now - t_old > 0.2 else 0.0)
 
     def clip(self, v):
-        return int(max(-self.max_rc, min(self.max_rc, round(v))))
+        #rc commands are unitless joystick commands, NOT pwm values - NG
+        return int(max(-self.max_rc, min(self.max_rc, round(v)))) #velocity limits + rc commands - NG
 
     def note(self, s):
         """Which guard changed the command (telemetry 'guard', for flight_report / debugging)."""
+        #the guards are defined below: wall, ceiling, band, zone - NG
         self.guard_note, self.guard_note_t = s, self.clock()
 
     def guard_now(self):
@@ -141,6 +151,7 @@ class CommandFilter:
     # ---------------------------------------------------------------- the chain
     def filter(self, rc, hgt, vz, flying, busy=False, climbing=False):
         """The command really sent for the requested rc (see the module docstring for the order)."""
+        #rc command is send through each safety guard to find final rc command which is safe + acceptable - NG
         rc = self.position_hold(rc, flying, busy, climbing)
         rc = self.ceiling(rc, hgt, vz)
         rc = self.band_guard(rc, flying, climbing)
@@ -206,6 +217,9 @@ class CommandFilter:
             ud = self.clip(max(-0.3, min(0.3, uz)) / self.lin_gain)
         return (lr, fb, ud, yw)
 
+    #position_hold calcs the rc commands to hold a certain position - NG (using estimates)
+    #it uses hold_axis to calculate the per-axis calculations
+
     def ceiling(self, rc, hgt, vz):
         """Never above max_height, whatever program sends the commands. The drone needs ~1 s to stop (tau ~0.8 s
         + delay): the guard works on the height predicted 1 s ahead, not on the current one."""
@@ -225,6 +239,7 @@ class CommandFilter:
         else:
             ud = min(ud, int((limit - h_pred) / self.lin_gain))  # slower and slower towards the limit
         return (lr, fb, ud, yw)
+    #safety limits - NG
 
     def band_guard(self, rc, flying, climbing=False):
         """The obstacle grid is only valid in the zone's height band (band mode 1.70-2.00 m): the pilot cannot
@@ -254,6 +269,7 @@ class CommandFilter:
             ud = 0
             self.note("band: high")
         return (lr, fb, ud, yw)
+    #updates as drone moves up/down - NG
 
     def zone_guard(self, rc, flying, climbing=False):
         """Keep the drone inside the flight zone, on the position predicted 1 s ahead (the drone needs ~1 s to
@@ -321,6 +337,7 @@ class CommandFilter:
                 wx, wy = wx + (toward - allowed) * ux, wy + (toward - allowed) * uy
                 self.note("zone: slow")
         return wx, wy
+    #slows near obstacles or moves away - NG
 
     def box_guard(self, x, y, vx, vy, wx, wy):
         """Without the scan grid: the mission rectangle only (same braking on the position predicted 1 s ahead)."""
