@@ -56,5 +56,5 @@ markers:
   - {id: 45, x: 1.700, y: 2.989, z: 2.065, yaw_deg:  178.5, q: [-0.4869, 0.5026, 0.5103, -0.5000]}   # views 22, tilt 1.2 deg
   - {id: 46, x: -1.249, y: 1.333, z: 1.549, yaw_deg:    1.7, q: [0.4896, 0.5000, 0.5149, 0.4952]}   # views 24, tilt 1.3 deg
   - {id: 18, x: -1.251, y: 1.763, z: 1.549, yaw_deg:    1.7, q: [0.4896, 0.5000, 0.5149, 0.4952]}   # added Nov 16 by hand, NOT measured: column of 7, row of 46, orientation of 46
-  - {id: 47, x: -0.791, y: -0.001, z: 1.591, yaw_deg:   90.5, q: [-0.0077, 0.7052, 0.7089, 0.0022]}   # views 66, tilt 0.9 deg
+  - {id: 47, x: -0.717, y: -0.000, z: 1.579, yaw_deg:   90.4, q: [-0.0169, 0.7050, 0.7088, 0.0115]}   # Nov 19: fell and re-stuck, moved 7.4 cm on its wall, measured by the external camera (on-wall fit, 0.4 px); was x -0.791 z 1.591
   - {id: 49, x: 0.000, y: 0.000, z: 1.950, yaw_deg:   90.0, q: [-0.0009, 0.7095, 0.7047, 0.0009]}   # views 130, tilt 0.4 deg

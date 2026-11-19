@@ -7,7 +7,7 @@ and heading in the room. Code: `src/aruco_localization/` (`aruco_localizer.py`, 
 ```
 image (960x720) ─► detect markers ─► look up their 3D corners in the map ─► solve the camera pose (PnP)
                    (ids + 4 corners)   (config/markers.yaml)                 (+ checks: reprojection, ambiguity,
-                                                                               moved markers, jumps)
+                                                                               jumps)
                 ─► camera → drone body ─► /aruco/pose (+ uncertainty) ─► EKF
 ```
 
@@ -102,7 +102,7 @@ one way or the other, "flipped"). OpenCV's IPPE solver returns both. We pick one
 | Check | Rule | Why |
 |---|---|---|
 | Reprojection error | ≤ 3 px for one marker, ≤ 8 px for several | A 1 cm map error is already ~6 px at 1.6 m; a wrong pose is tens of px off |
-| Moved marker | Markers disagree (error > 8 px) and removing one of them fixes it → that one is set aside; after 3 times it is ignored for the run, with a message | Nov 13: marker 39 had fallen and been put back elsewhere; with it in view every pose was rejected (438 px) and the drone flew blind |
+| Moved marker | Not handled in the localizer (removed Nov 19): the markers disagree, the frame is rejected by the 8 px limit. Fix the MAP: measure the new place with the external camera, edit `config/markers.yaml` | Nov 13: marker 39 fell and was put back elsewhere (438 px, drone blind); Nov 19: marker 47, 7.4 cm |
 | Jump | A single-marker pose more than 0.5 m away from a pose less than 0.5 s old is rejected | Catches a flip the rules of section 5 missed |
 
 ## 7. From the camera to the drone, and what is published
@@ -148,7 +148,7 @@ it applies each marker pose at the time the image was taken and re-propagates to
 | Symptom | Cause | Fix |
 |---|---|---|
 | No marker found | Too far, too blurred (fast turn), too dark, or out of the camera's 55° field | Fly facing a marker wall, slower turns, more light |
-| "REJECTED" with a large error, several markers in view | A marker moved since the map was made | Handled automatically (section 6); then re-locate it from a flight or re-run `tools/room_mapper.py` |
+| "REJECTED" with a large error, several markers in view | A marker moved since the map was made | Fix its entry in `config/markers.yaml` (external camera), or re-run `tools/room_mapper.py` |
 | Pose jumps between two places with one marker in view | Mirror ambiguity | Keep 2+ markers in view (handled by the rules of section 5) |
 | All distances a few % off | Wrong printed marker size in the map | Measure the black square; the map's `marker_size` must match |
 | Height disagrees with the distance sensor | Map error (a marker's height), or furniture under the drone | `tools/flight_report.py` reports the ArUco height minus the sensor |

@@ -59,6 +59,8 @@ def setup(context):
     ]
     if lc("record") == "true":
         nodes.append(Node(package="tello_driver", executable="session_recorder", output="screen"))
+    if lc("balloons") == "true":  # balloons from the external camera (tools/ext_camera.py detect, Windows side)
+        nodes.append(Node(package="tello_driver", executable="tello_balloons", output="screen"))
     if lc("rviz") == "true":
         nodes.append(Node(package="rviz2", executable="rviz2", output="log",
                           arguments=["-d", rviz_config_centred_on_markers(os.path.join(share, "config", "real.rviz"), lc("markers"))]))
@@ -144,6 +146,8 @@ def generate_launch_description():
         *[SetEnvironmentVariable(k, v) for k, v in LOCAL_ROS_ENV.items()],
         DeclareLaunchArgument("mock", default_value="false"),
         DeclareLaunchArgument("rviz", default_value="true"),
+        DeclareLaunchArgument("balloons", default_value="true",
+                              description="tello_balloons: external-camera balloons (UDP 9870) -> /balloons + RViz"),
         DeclareLaunchArgument("record", default_value="true", description="save images, poses, telemetry in ~/tello_ws/sessions"),
         DeclareLaunchArgument("markers", default_value=os.path.join(REPO, "config", "markers.yaml")),
         DeclareLaunchArgument("band", default_value="true",

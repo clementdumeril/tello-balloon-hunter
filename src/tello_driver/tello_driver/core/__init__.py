@@ -11,5 +11,6 @@
     video_reader.py      optional low-latency video decoder (driver low_latency_video:=true)
     ros_env.py           local-only DDS settings (loopback, small packets) for every node
     session_recorder.py  records each flight (video, poses, commands) in ~/tello_ws/sessions
+    balloons_node.py     red/blue balloons from the external camera (UDP from tools/ext_camera.py) -> /balloons, RViz
     teleop.py            keyboard flight; its read_key() is also the "any key = land" of the missions
 """

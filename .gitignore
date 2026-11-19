@@ -33,3 +33,7 @@ logs/
 
 # takeoff pad learnt from the flights (tools/set_home.py): local to the flying machine
 config/home.yaml
+
+# downloaded model weights
+models/
+*.pt

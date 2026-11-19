@@ -48,6 +48,11 @@ Visualization Manager:
         Value: /aruco/map_markers
         Durability Policy: Transient Local
     - Class: rviz_default_plugins/MarkerArray
+      Name: Balloons (external camera) + its position
+      Enabled: true
+      Topic:
+        Value: /balloons/markers
+    - Class: rviz_default_plugins/MarkerArray
       Name: Drone (body + camera view)
       Enabled: true
       Topic:

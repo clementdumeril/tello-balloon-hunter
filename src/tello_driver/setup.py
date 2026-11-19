@@ -20,6 +20,7 @@ setup(
         "tello_ekf = tello_driver.core.ekf_node:main",
         "session_recorder = tello_driver.core.session_recorder:main",
         "tello_teleop = tello_driver.core.teleop:main",
+        "tello_balloons = tello_driver.core.balloons_node:main",
         # missions
         "tello_marker_tour = tello_driver.missions.tour:main",
         "tello_goto = tello_driver.missions.tour:goto_main",

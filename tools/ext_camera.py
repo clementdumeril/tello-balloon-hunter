@@ -5,6 +5,8 @@ Runs on Windows (the USB camera is a Windows device; WSL has no /dev/video):
     python tools/ext_camera.py list                       which camera index is which
     python tools/ext_camera.py locate --cam 1             intrinsics AND pose in `map` from the wall markers
     python tools/ext_camera.py detect --cam 1             balloons in `map` -> UDP -> WSL (tello_balloons node)
+    python tools/ext_camera.py detect --cam 1 --record    same + raw video in logs/balloons/ (offline tuning)
+    python tools/ext_camera.py detect --source logs/balloons/rec_<time>.mp4    replay a recording (or an image)
 
 locate: no checkerboard and no tape measure. The camera sees markers on several walls whose corners are known in
 `map` (config/markers.yaml). Those 3D<->pixel pairs are NOT on one plane, so a single (averaged) view is enough
@@ -173,8 +175,14 @@ def detect_colour(img, min_px=12):
 class YoloWorld:
     def __init__(self, weights):
         from ultralytics import YOLO
-        self.m = YOLO(weights)
-        self.m.set_classes(["balloon"])
+        if not Path(weights).exists() and Path(weights).name == "yolo_world_balloon.pt":
+            # first run: the open-vocabulary model, frozen on the word "balloon" (needs CLIP once, ~340 MB)
+            m = YOLO(str(Path(weights).with_name("yolov8s-worldv2.pt")))
+            m.set_classes(["balloon"])
+            m.save(str(weights))
+        self.m = YOLO(str(weights))
+        if list(self.m.names.values()) != ["balloon"]:
+            self.m.set_classes(["balloon"])
 
     def __call__(self, img, conf=0.15):
         r = self.m.predict(img, conf=conf, verbose=False)[0]
@@ -198,28 +206,79 @@ def to_map(cal, box, diameter):
     return np.array(cal["C_map"]) + np.array(cal["R_cam_to_map"]) @ (ray * d), d
 
 
+class ImageSource:
+    """A still image as an endless video (offline tests)."""
+    def __init__(self, path):
+        self.img = cv2.imread(str(path))
+        if self.img is None:
+            raise SystemExit(f"cannot read {path}")
+
+    def read(self):
+        time.sleep(0.03)
+        return True, self.img.copy()
+
+    def release(self):
+        pass
+
+
+def open_source(a):
+    if a.source is None:
+        return open_cam(a.cam), True
+    if Path(a.source).suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp"):
+        return ImageSource(a.source), False
+    cap = cv2.VideoCapture(a.source)
+    if not cap.isOpened():
+        raise SystemExit(f"cannot open {a.source}")
+    return cap, False
+
+
 def cmd_detect(a):
-    cal = yaml.safe_load(CALIB_OUT.read_text()) if CALIB_OUT.exists() else None
+    calib = Path(a.calib)
+    cal = yaml.safe_load(calib.read_text()) if calib.exists() else None
     if cal is None:
         print("no config/ext_camera.yaml: run 'locate' first (balloons shown in pixels only)")
+    # the room = the box of the wall markers (+0.2 m), floor to ceiling: anything found outside is dropped
+    mm = yaml.safe_load(open(REPO / "config" / "markers.yaml"))
+    P = np.array([[e["x"], e["y"], e["z"]] for e in mm["markers"]])
+    lo = np.array([*(P[:, :2].min(0) - 0.2), 0.1])
+    hi = np.array([*(P[:, :2].max(0) + 0.2), mm["room"]["height"]])
     yolo = YoloWorld(a.weights) if a.method in ("yolo", "compare") else None
-    cap = open_cam(a.cam)
+    cap, live = open_source(a)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rec_dir = REPO / "logs" / "balloons"
+    rec_dir.mkdir(parents=True, exist_ok=True)
+    rec = None
     t_last, fps = time.time(), 0.0
+    stats = {"frames": 0, "colour": {"red": 0, "blue": 0}, "yolo": {"red": 0, "blue": 0}}
     while True:
         ok, img = cap.read()
         if not ok:
-            continue
+            if live:
+                continue
+            break  # end of the recording
+        raw = img.copy()
+        if a.record and live:
+            if rec is None:
+                path = rec_dir / time.strftime("rec_%Y%m%d_%H%M%S.mp4")
+                rec = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 15, (img.shape[1], img.shape[0]))
+                print(f"recording the raw video to {path}")
+            rec.write(raw)
         t = time.time()
         dets = {"colour": detect_colour(img) if a.method in ("colour", "compare") else [],
                 "yolo": yolo(img) if yolo else []}
         fps = 0.9 * fps + 0.1 / max(time.time() - t_last, 1e-3)
         t_last = time.time()
+        stats["frames"] += 1
+        for name in ("colour", "yolo"):
+            for c in {d[0] for d in dets[name]}:
+                stats[name][c] += 1
         main = dets["yolo"] if a.method == "yolo" else dets["colour"]
         balloons = []
         for c, box, s in main:
             if cal:
                 p, d = to_map(cal, box, a.diameter)
+                if not (lo <= p).all() or not (p <= hi).all():
+                    continue  # outside the room (a blue sheet, a red poster): not a balloon
                 balloons.append({"colour": c, "x": round(float(p[0]), 3), "y": round(float(p[1]), 3),
                                  "z": round(float(p[2]), 3), "dist": round(float(d), 2), "score": round(s, 2)})
         sock.sendto(json.dumps({"t": t, "balloons": balloons}).encode(), UDP)
@@ -238,9 +297,19 @@ def cmd_detect(a):
             if k == 27:
                 break
             if k in (ord("s"), ord("S")):
-                (REPO / "logs" / "balloons").mkdir(parents=True, exist_ok=True)
-                cv2.imwrite(str(REPO / "logs" / "balloons" / f"{time.time():.0f}.jpg"), img)
+                stamp = f"{time.time():.0f}"
+                cv2.imwrite(str(rec_dir / f"{stamp}_raw.jpg"), raw)
+                cv2.imwrite(str(rec_dir / f"{stamp}_annotated.jpg"), img)
+                print(f"saved {rec_dir / stamp}_raw.jpg / _annotated.jpg")
+        if a.max_frames and stats["frames"] >= a.max_frames:
+            break
     cap.release()
+    if rec is not None:
+        rec.release()
+    n = max(stats["frames"], 1)
+    print(f"{stats['frames']} frames, {fps:.1f} fps. Share of frames where each balloon was found:")
+    for name in ("colour", "yolo"):
+        print(f"  {name:6s}  red {100 * stats[name]['red'] / n:5.1f} %   blue {100 * stats[name]['blue'] / n:5.1f} %")
 
 
 def main():
@@ -254,7 +323,12 @@ def main():
     p = sub.add_parser("detect")
     p.add_argument("--cam", type=int, default=1)
     p.add_argument("--method", choices=["colour", "yolo", "compare"], default="compare")
-    p.add_argument("--weights", default="yolov8s-worldv2.pt")
+    p.add_argument("--calib", default=str(CALIB_OUT), help="camera intrinsics + pose (written by 'locate')")
+    p.add_argument("--source", help="video or image file instead of the camera (replay a recording)")
+    p.add_argument("--record", action="store_true", help="save the raw camera video in logs/balloons/")
+    p.add_argument("--max-frames", type=int, default=0, help="stop after N frames (0: Esc)")
+    p.add_argument("--weights", default=str(REPO / "models" / "yolo_world_balloon.pt"),
+                   help="downloaded automatically by ultralytics the first time")
     p.add_argument("--diameter", type=float, default=0.28, help="balloon diameter (m), measure it")
     p.add_argument("--no-show", action="store_true")
     a = ap.parse_args()

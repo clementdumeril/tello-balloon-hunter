@@ -361,7 +361,7 @@ Parameter & Default & Meaning \\
 \midrule
 \code{markers\_file} & \code{""} & YAML map, loaded at once by \code{load\_marker\_map} \\
 \code{max\_reprojection\_px} & 3.0 & RMS limit for a single-marker pose \\
-\code{max\_reprojection\_px\_multi} & 8.0 & RMS limit with 2+ markers, and the ``moved marker'' test \\
+\code{max\_reprojection\_px\_multi} & 8.0 & RMS limit with 2+ markers \\
 \code{debug\_every\_n} & 5 (launch: 3) & one debug image every $n$ frames; 0 = never \\
 \code{debug\_scale} & 1.0 (launch: 0.5) & resize factor of the debug image \\
 \code{debug\_dir} & \code{""} & if set, save the first 40 debug JPEGs \\
@@ -374,8 +374,7 @@ The two thresholds are commented in the code: with several markers, a 1~cm map e
 1.6~m ($910\times0.01/1.6=5.7$), while a wrong multi-marker pose is tens of px off; with one marker a mirror pose can
 reproject within a few pixels, hence the stricter 3~px. It then builds the \code{Detector} with
 \code{cfg.get("dictionary", "DICT\_6X6\_50")}, a \code{CvBridge}, sets \code{K = D = T\_base\_cam = None}, the counters
-\code{n} (processed images), \code{ambiguous}, \code{saved} and the dict \code{moved} (marker id $\to$ number of times it
-was found inconsistent). It creates a TF \code{Buffer} + \code{TransformListener} (to read the camera mount), a
+\code{n} (processed images), \code{ambiguous} and \code{saved}. It creates a TF \code{Buffer} + \code{TransformListener} (to read the camera mount), a
 \code{TransformBroadcaster}, the publishers listed earlier (with depths 10, 2, 5, 5, 2, 5), an empty \code{Path} in
 frame \topic{map}, and the two subscriptions: \topic{/tello/camera\_info} (depth 5, \code{on\_info}) and
 \topic{/tello/image\_raw} with \textbf{depth 1} (\code{on\_image}) so that only the most recent frame waits.
@@ -419,14 +418,13 @@ the four sides are measured). It publishes the string \code{"id:u:size,..."}, e.
 or an empty string. This is published on every processed frame, so an empty string means ``nothing seen now''.
 \file{missions/patrol.py} uses it to turn towards a marker using the camera only, independently of the map and the pose.
 
-\paragraph{3. Correspondences (lines 134--142).} For each detected id present in the map and not blacklisted
-(\code{self.moved.get(id,0) >= 3}), it appends the four map corners \code{mk.corners\_map()} to \code{obj}, the four
+\paragraph{3. Correspondences (lines 134--142).} For each detected id present in the map, it appends the four map corners \code{mk.corners\_map()} to \code{obj}, the four
 image corners to \code{imgp} and the id to \code{used}. Detected ids absent from the map (e.g. 13--16, 48) are
 ignored here. The corner order is consistent on both sides: the detector returns them top-left first in the marker's
 own orientation, and \code{corners\_map} uses the same order.
 
-\paragraph{4. Moved marker (lines 143--144).} With at least 3 markers, \code{drop\_moved\_marker} may remove one
-marker inconsistent with the others (section~\ref{sec:moved}).
+\paragraph{4. Moved marker: fixed in the map, not here.} A marker that is no longer where the map says simply
+makes the joint pose fail the 8~px test, and the frame is rejected (section~\ref{sec:moved}).
 
 \paragraph{5. Nearest marker (lines 146--150).}\label{sec:nearest} If at least one marker is used:
 \begin{equation}
@@ -494,27 +492,16 @@ single-marker disambiguation), \code{publish(...)} and \code{publish\_viz(...)},
 
 \subsection{Rejections and safeguards}
 
-\func{reprojection}{(self, obj: list, imgp: list) -> float}
-Helper for the moved-marker test: concatenates the given markers' points, runs the same SQPnP + LM pipeline as the
-main path and returns $e_{\text{RMS}}$ (equation~\eqref{eq:rms}), or $+\infty$ if \code{solvePnP} fails.
-
-\func{drop\_moved\_marker}{(self, obj, imgp, used) -> (obj, imgp, used)}\label{sec:moved}
-Handles a marker that is no longer where the map says. Such a marker poisons the joint PnP: on Nov~13 marker 39 had
-fallen and been put back elsewhere; facing that wall, 6 markers gave 438~px, every pose was rejected, the drone flew
-4.5~s blind, then 39 alone gave a pose 0.8~m too high and the mission landed. The algorithm, for $n\geq3$ markers:
-\begin{enumerate}
-\item $e_{\text{all}}=$ \code{reprojection}(all). If $e_{\text{all}}\leq 8$~px, keep everything.
-\item Otherwise compute the leave-one-out errors $e_{-k}$ for $k=1..n$ (PnP without marker $k$), and
-  $k^\ast=\arg\min_k e_{-k}$.
-\item If $e_{-k^\ast} > 8$~px, removing one marker does not fix it (bad frame, several errors): return everything and let
-  the normal rejection discard the frame.
-\item Otherwise marker $k^\ast$ is the culprit: increment \code{moved[k*]}; at exactly 3 it logs a warning
-  (``does not match the map (moved since the capture?): ignored from now on. Re-map it''), and from then on line 138
-  skips it for the rest of the run. Return the lists without $k^\ast$.
-\end{enumerate}
-Why at least 3 markers: with 2, removing either one leaves a single marker that always fits itself, so the test
-cannot tell which one is wrong; with 3 or more the remaining ones must agree with each other. The cost is $n+1$ PnP
-solves when the markers disagree and 1 extra solve when they agree (step 1 is repeated by the main path afterwards).
+\paragraph{A moved marker.}\label{sec:moved}
+Such a marker poisons the joint PnP: on Nov~13 marker 39 had fallen and been put back elsewhere; facing that wall,
+6 markers gave 438~px, every pose was rejected, the drone flew 4.5~s blind, then 39 alone gave a pose 0.8~m too high
+and the mission landed. Until November 19 the localizer tried to find the culprit itself (\code{drop\_moved\_marker}:
+PnP without each marker in turn, the one whose removal fixed the error set aside, ignored after 3 times). It was
+removed: it cost $n+1$ extra PnP solves per frame, could blacklist a good marker after three blurred frames, and could
+not decide with two markers. The rule is now simpler: \textbf{the map is fixed, not the localizer}. When a marker
+falls, the external camera (\file{tools/ext\_camera.py}, already calibrated on the other markers) measures its new
+place on its wall and \file{config/markers.yaml} is edited (Nov~19: marker 47, moved 7.4~cm, from 13.3 to 2.7~px);
+before the demo the whole room is mapped again (\file{tools/room\_mapper.py}).
 
 \func{single\_marker\_pose}{(self, corners, mk, min\_ratio=3.0, max\_tilt\_deg=30.0) -> (ok, rvec, tvec)}\label{sec:single}
 \textbf{The ambiguity.} Four coplanar points of a small square seen from a distance project almost affinely. Under an
@@ -703,8 +690,7 @@ Same pattern as the localizer.
   pose rate simply drops below 30~Hz if processing is slow.
 \item \textbf{Cheap per-frame work.} The mount TF is read once and cached; the map corners are computed with one
   $3\times3$ product per marker; PnP on 8--24 points costs well under a millisecond. The dominant costs are the
-  colour conversions and \code{detectMarkers} on the $960\times720$ image, plus the extra PnP solves of
-  \code{drop\_moved\_marker}.
+  colour conversions and \code{detectMarkers} on the $960\times720$ image,.
 \item \textbf{Throttled visual outputs.} Debug image every \code{debug\_every\_n} = 3 frames, scaled by 0.5, publisher
   depth 2; path at 5~Hz; sight lines expire after 0.5~s. The recorder subscribes the debug image with depth 1 and saves
   at most one per second.
@@ -757,17 +743,8 @@ All items were checked in the current code; none was changed.
 \item \textbf{Stale comment} -- \file{aruco\_localizer.py}:62--63 says the real-drone launch sets \code{child\_frame}
   to \code{base\_link} ``until the EKF exists''; \file{real.launch.py}:57 sets \code{base\_link\_aruco} and the EKF is
   always launched. Misleading when debugging TF.
-\item \textbf{Duplicate PnP solve (latency)} -- \file{aruco\_localizer.py}:143--144 with 197 and 160--163: with 3+
-  markers, \code{drop\_moved\_marker} solves SQPnP+LM on all markers, then the main path solves exactly the same problem
-  again; when markers disagree, $n+2$ solves per frame. Returning the pose from \code{reprojection} would remove one
-  solve every frame.
-\item \textbf{Moved-marker counter never decays} -- \file{aruco\_localizer.py}:204--205, 138: three transient
-  mismatches (motion blur, a bad corner) at any moment of the run blacklist a correct marker until restart; nothing
-  resets \code{self.moved}. A decay or ``consecutive frames'' rule would be safer. Also, with exactly 2 disagreeing
-  markers (line 143) there is no recovery: the frame is lost.
 \item \textbf{Proximity sensor depends on the map} -- \file{aruco\_localizer.py}:146--150 versus the comment at 79--80
-  (``no map, no pose''): $d_{\text{near}}$ is computed only over \code{used}, i.e. mapped and non-blacklisted markers,
-  after \code{drop\_moved\_marker}. A blacklisted or unmapped marker on a wall no longer feeds the wall guard; using
+  (``no map, no pose''): $d_{\text{near}}$ is computed only over \code{used}, i.e. mapped markers. An unmapped marker on a wall no longer feeds the wall guard; using
   all detections with the default \code{marker\_size} would match the stated intent.
 \item \textbf{Silent startup drop} -- \file{aruco\_localizer.py}:119--120: without \code{camera\_info} or the mount TF
   every frame is discarded without any log; a throttled warning would make a missing \code{marker\_map\_publisher}
@@ -801,7 +778,7 @@ All items were checked in the current code; none was changed.
   \file{markers.yaml} (e.g. id 1: $\lVert q\rVert^2=1.00008$) gives a slightly non-orthonormal $\mathbf R_k$ (scale
   error $\sim10^{-4}$, i.e. $<0.02$~mm on a corner). Negligible, but normalising costs one line.
 \item \textbf{Unmeasured marker} -- \file{config/markers.yaml}:58 (id 18) was placed by hand; any error in it raises the
-  joint reprojection error and may make \code{drop\_moved\_marker} blacklist it (or, with 2 markers, lose frames).
+  joint reprojection error (11~px seen by the external camera on Nov~19, about 2.5~cm).
   Re-measure it with \file{tools/room\_mapper.py}.
 \item \textbf{Unclosed files} -- \file{marker\_map\_publisher.py}:67, 79 use \code{yaml.safe\_load(open(...))}
   without closing; use \code{with open(...)}.

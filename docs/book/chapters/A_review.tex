@@ -81,8 +81,6 @@ the chapters mark them \textcolor{OliveGreen}{\textbf{[Fixed in v1.1]}}.
   proportional law. Rest-to-rest approach legs could use \code{Quintic} + \code{track}.
 \item Three different turn-in-place controllers and two different ``point in front of a marker'' functions
   (\file{missions/tour.py}:140, \file{missions/strike.py}:167) should be merged.
-\item The localizer solves the same PnP twice per frame with 3+ markers; the ``moved marker'' counter never decays
-  (\file{aruco\_localizer.py}:204--205).
 \item \file{tools/ekf\_replay.py} uses old model constants and the mission's request instead of what was really
   sent; \file{identification/step\_fit.py} validates against a stale hard-coded model.
 \end{itemize}

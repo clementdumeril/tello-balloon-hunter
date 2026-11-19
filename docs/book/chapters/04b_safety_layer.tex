@@ -89,8 +89,9 @@ Guard & What it does & Why & Switch / tune \\
 \midrule
 \endhead
 \textbf{Reprojection limit} & reject a pose whose RMS reprojection error exceeds 3~px (one marker) or 8~px
-(several); with several, try again without the worst marker & a single marker has two mirror solutions
-(Section~\ref{sec:pnp-steps}, \ref{sec:single}); a marker moved since the map & \code{max\_reprojection\_}\newline\code{\ px(\_multi)} \\
+(several) & a single marker has two mirror solutions
+(Section~\ref{sec:pnp-steps}, \ref{sec:single}); a marker moved since the map (then fix the map,
+Section~\ref{sec:moved}) & \code{max\_reprojection\_}\newline\code{\ px(\_multi)} \\
 \textbf{Chi-square gate} & an EKF update whose innovation is too unlikely is dropped & the same flips, seen by the
 filter & in \file{core/ekf\_core.py} \\
 \textbf{Uncertain pose} (\code{Mission.on\_pose}) & missions ignore an EKF pose with $\sigma > 0.15$~m & after a few
