@@ -262,6 +262,8 @@ Orientation: the roll, pitch, yaw of the drone are those of ${}^m\mathbf R_b$. T
 quaternion; the EKF extracts only the yaw, $\psi = \operatorname{atan2}(2(q_wq_z+q_xq_y),\,1-2(q_y^2+q_z^2))$
 (\file{ekf\_node.py}:70), which equals $\operatorname{atan2}(R_{21},R_{11})$ of ${}^m\mathbf R_b$.
 
+\input{chapters/02b_pnp}
+
 \section{\texttt{marker\_map.py}: the map, without ROS}
 
 This module has no ROS dependency, so it is shared by the localizer, the map publisher, the fake world and the tools.
