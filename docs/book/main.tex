@@ -1,0 +1,28 @@
+\documentclass[11pt,openany]{book}
+\input{preamble}
+\begin{document}
+\frontmatter
+\begin{titlepage}
+\centering\vspace*{4cm}
+{\Huge\bfseries Tello Balloon Hunter\par}
+\vspace{1em}
+{\Large The code book: every node, every function, every equation\par}
+\vspace{3em}
+{\large EECS C106A/206A, Fall 2026 final project\par}
+\vspace{4em}
+\includegraphics[width=0.85\textwidth]{figures/ros_graph.pdf}
+\vfill
+{Version 1.1 --- November 18, 2026 --- code at commit \texttt{aab4639} + the v1.1 fixes (Appendix~A)\par}
+\end{titlepage}
+\tableofcontents
+\mainmatter
+\input{chapters/01_overview}
+\input{chapters/02_aruco}
+\input{chapters/03_ekf}
+\input{chapters/04_driver}
+\input{chapters/05_missions}
+\input{chapters/06_identification}
+\input{chapters/07_mapping}
+\appendix
+\input{chapters/A_review}
+\end{document}

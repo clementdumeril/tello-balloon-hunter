@@ -416,6 +416,8 @@ class StepTest(Node):
                 raise Abort("cancelled")
             r = self.call("takeoff", timeout=3.0)
             self.say(f"takeoff: {r.message if r else '?'}")
+            if r is not None and not r.success:  # battery low, zone file unreadable...: nothing will take off
+                raise Abort(f"takeoff refused by the driver ({r.message})")
             # the driver takes off then climbs to the height where the markers are visible: wait for both
             t0 = time.time()
             self.spin(0.5)

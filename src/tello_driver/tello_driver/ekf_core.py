@@ -48,7 +48,8 @@ class DroneEKF:
         self.t = None
         self.initialised = False
         self.inputs = deque()                     # (t, u) commands, to apply them L_u later
-        self.hist = deque()                       # (t, s, P, u_applied) for delayed measurements
+        self.hist = deque()                       # (t, s, P) for delayed measurements
+        self.meas = deque()                       # (t, kind, args) height / IMU updates, replayed after a rewind
         self.history_s = history_s
         self.rejected = 0
         self.d_max = 0.10      # m/s, largest drift believed
@@ -127,6 +128,8 @@ class DroneEKF:
             self.hist.append((self.t, self.s.copy(), self.P.copy()))
         while self.hist and self.hist[0][0] < t - self.history_s:
             self.hist.popleft()
+        while self.meas and self.meas[0][0] < t - self.history_s:
+            self.meas.popleft()
 
     # ------------------------------------------------------------------ updates
     def _update(self, s, P, z, h, H, R, angle_rows=()):
@@ -144,6 +147,10 @@ class DroneEKF:
         """The SDK takeoff lifts the drone to ~0.8 m without any rc command: the height is unknown again (with the
         5 cm of the pad prior, every distance-sensor reading was then gated out as furniture: sim, the estimate
         stayed at 0.8 m while the drone climbed to 1.8 m)."""
+        self.meas.append((self.t if self.t is not None else -1e18, "t", ()))
+        self._takeoff()
+
+    def _takeoff(self):
         self.P[IZ, IZ] = max(self.P[IZ, IZ], 1.0)
         self.P[IVZ, IVZ] = max(self.P[IVZ, IVZ], 1.0)
 
@@ -155,6 +162,7 @@ class DroneEKF:
         self.P = np.diag([sigma_p ** 2] * 2 + [0.05 ** 2] + [0.1 ** 2] * 3 + [sigma_yaw ** 2, 1.0] + [0.08 ** 2] * 2)
         self.t = t
         self.hist.clear()
+        self.meas.clear()
         self.initialised = True
         self.b_init = False
 
@@ -183,6 +191,7 @@ class DroneEKF:
             self.P = np.diag([0.05 ** 2] * 3 + [0.2 ** 2] * 3 + [0.05 ** 2, 1.0] + [0.08 ** 2] * 2)
             self.t = t_recv
             self.hist.clear()
+            self.meas.clear()
             self.initialised = True
             self.b_init = False
             self.t_pose = t_recv
@@ -211,16 +220,27 @@ class DroneEKF:
         self.rejected = 0
         self.t_pose = t_recv
         # re-propagate from the image time to now with the stored commands
+        # (the distance-sensor and IMU updates of that window are applied again in their order: without this, every
+        # marker pose threw them away and with poses at 20-30 Hz the height came from the markers only, code book
+        # v1.0 appendix A)
         t_now = self.t
         self.s, self.P, self.t = s1, P1, t0
         self.hist = deque(h for h in self.hist if h[0] <= t0)
+        for tm, kind, args in [m for m in self.meas if m[0] > t0]:
+            self.predict(tm)
+            {"h": self._height, "w": self._imu_yaw, "t": self._takeoff}[kind](*args)
         self.predict(t_now)
         return True
 
     def update_height(self, z_meas, sigma=0.05, gate=6.6):
-        """Distance sensor: height above what is below (gated: over the bed it reads ~0.85 m less)."""
+        """Distance sensor: height above what is below (gated: over the bed it reads ~0.85 m less). Call after
+        predict(now): it is applied at the filter time and kept to be replayed after a marker-pose rewind."""
         if not self.initialised:
             return False
+        self.meas.append((self.t, "h", (z_meas, sigma, gate)))
+        return self._height(z_meas, sigma, gate)
+
+    def _height(self, z_meas, sigma, gate):
         H = np.zeros((1, NX))
         H[0, IZ] = 1.0
         s1, P1, d2 = self._update(self.s, self.P, np.array([z_meas]), np.array([self.s[IZ]]), H, np.array([[sigma ** 2]]))
@@ -233,8 +253,13 @@ class DroneEKF:
         return True
 
     def update_imu_yaw(self, yaw_imu, sigma=math.radians(1.0)):
+        """IMU heading = yaw + b. Call after predict(now); kept to be replayed after a marker-pose rewind."""
         if not self.initialised:
             return False
+        self.meas.append((self.t, "w", (yaw_imu, sigma)))
+        return self._imu_yaw(yaw_imu, sigma)
+
+    def _imu_yaw(self, yaw_imu, sigma):
         if not getattr(self, "b_init", False):  # the offset can be anything in [-pi, pi]: take it directly
             self.s[IB] = wrap(yaw_imu - self.s[IYAW])
             self.P[IB, :] = self.P[:, IB] = 0.0

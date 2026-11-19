@@ -131,6 +131,8 @@ class CommandFilter:
 
     def clip(self, v):
         #rc commands are unitless joystick commands, NOT pwm values - NG
+        if not math.isfinite(v):  # round(nan) raises: never let a bad value stop the 20 Hz loop
+            return 0
         return int(max(-self.max_rc, min(self.max_rc, round(v)))) #velocity limits + rc commands - NG
 
     def note(self, s):

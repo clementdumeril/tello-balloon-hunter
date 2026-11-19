@@ -79,7 +79,14 @@ class TelloDriver(Node):
         self.max_height = p("max_height", 2.6).value
         # obstacle-free flight zone from the room scan (tools/free_zone.py): commands that would take the drone
         # out of it are cut, whatever program sends them (Nov 10: a test drifted 1 m back towards furniture)
-        self.zone = load_zone(p("flight_zone_file", "").value)
+        zone_path = p("flight_zone_file", "").value
+        self.zone = load_zone(zone_path)
+        # a zone file that is set but cannot be read must not mean "fly with no zone" (code book v1.0, app. A):
+        # takeoff is refused until the path is fixed (flight_zone:=none in the launch = fly without a zone)
+        self.zone_error = (f"flight zone file '{zone_path}' could not be read: takeoff refused"
+                           if zone_path and not self.zone else "")
+        if self.zone_error:
+            self.get_logger().error(self.zone_error)
         if self.zone:
             self.get_logger().info("flight zone x [{x_min:.2f}, {x_max:.2f}] y [{y_min:.2f}, {y_max:.2f}]".format(**self.zone))
         # the hold and the guards (safety.py), on the identified model (Nov 11)
@@ -319,6 +326,11 @@ class TelloDriver(Node):
                             math.sqrt(max(m.pose.covariance[14], 0.0)))
 
     def on_cmd(self, m):
+        # a NaN / inf request (a mission dividing by zero...) raised in round() and killed the driver: drop it,
+        # the previous request then times out (cmd_timeout) like a silent mission
+        if not all(math.isfinite(v) for v in (m.linear.x, m.linear.y, m.linear.z, m.angular.z)):
+            self.get_logger().warn("non-finite velocity request ignored", throttle_duration_sec=2.0)
+            return
         clip = self.safety.clip
         # Tello rc: (left/right, forward/back, up/down, yaw), right/forward/up/clockwise positive.
         # ROS body frame: x forward, y LEFT, z up, yaw counter-clockwise positive.
@@ -375,6 +387,10 @@ class TelloDriver(Node):
 
     # ---------------------------------------------------------------- takeoff / landing
     def srv_takeoff(self, req, res):
+        if self.zone_error:
+            res.success, res.message = False, self.zone_error
+            self.get_logger().error(self.zone_error)
+            return res
         bat = self.state.get("bat", 100)
         if isinstance(bat, (int, float)) and bat < 25:
             res.success, res.message = False, f"battery {bat} % < 25 %: takeoff refused"

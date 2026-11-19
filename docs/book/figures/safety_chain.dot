@@ -1,0 +1,12 @@
+digraph S {
+  rankdir=TB; node [fontname="Helvetica", fontsize=10.5, shape=box, style="rounded,filled", fillcolor="#eef4ff"]; edge [color="#555555"];
+  req [label="velocity request on /tello/cmd_vel_safe\n(mission or teleop; zeroed after 0.5 s of silence)", fillcolor="#ffd9d9"];
+  climb [label="1. climb after takeoff (Tello stops at ~0.8 m)"];
+  hold [label="2. position / height hold\n(predict 0.3 s ahead, invert model, cancel EKF drift)"];
+  ceil [label="3. ceiling (predicted height 1 s ahead)"];
+  band [label="4. height band / per-point height limits (band_guard)"];
+  grid [label="5. flight zone: slow, brake, push back (grid_guard, clearance)\nblind (no fresh pose): 0.15 m/s max"];
+  wall [label="6. wall ahead: marker < 0.7 m in the image → no forward, back off"];
+  out [label="rc command to the Tello (20 Hz)\n+ /tello/rc_sent (the EKF input)", fillcolor="#fde2c8"];
+  req -> climb -> hold -> ceil -> band -> grid -> wall -> out;
+}

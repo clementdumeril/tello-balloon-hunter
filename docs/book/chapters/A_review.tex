@@ -1,0 +1,110 @@
+\chapter{Consolidated code review}\label{app:review}
+\sloppy
+
+Each chapter ends with its own ``Code review notes''. This appendix ranks the findings across the whole
+code base so that the next version of the code (and of this book) knows where to start. Version~1.0 of the book
+changed no code. Version~1.1 fixes the four most important findings (Section~\ref{sec:fixed}); the review boxes of
+the chapters mark them \textcolor{OliveGreen}{\textbf{[Fixed in v1.1]}}.
+
+\section{Fixed in version 1.1}\label{sec:fixed}
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Clearance over the east furniture in the 3D zone} (Chapter~\ref{ch:mapping}).
+  The single upper box ($x$ up to 1.35\,m along the whole east wall, floor 2.08\,m) came within
+  \textbf{0.16\,m} of the scan: the top of the high furniture, 1.92\,m at $x=1.38$, $y$ 0.33--1.25 (measured on
+  $\approx 480\,000$ points sampled on the scan triangles). The furniture is high only in the south part of the
+  wall (1.2--1.5\,m in the north part), so the box is split in two:
+  \begin{center}\small
+  \begin{tabular}{@{}lllll@{}}
+  \toprule
+  Box & $x$ & $y$ & $z$ & Closest scan point \\
+  \midrule
+  \code{main} & $[-0.94, 0.67]$ & $[0.30, 2.87]$ & $[1.55, 2.30]$ & 0.27\,m \\
+  \code{above\_east\_south} & $[0.67, 1.15]$ & $[0.30, 1.55]$ & $[2.08, 2.30]$ & 0.27\,m \\
+  \code{above\_east\_north} & $[0.67, 1.35]$ & $[1.55, 2.87]$ & $[2.08, 2.30]$ & 0.32\,m \\
+  \bottomrule
+  \end{tabular}
+  \end{center}
+  Every box is now more than the 0.25\,m margin from the scan. The approach point of marker 35 ($x\approx 0.78$,
+  $y=2.06$) is unchanged. The stale ``not used by the driver yet'' header of the file is corrected.
+\item \textbf{A zone file that fails to load no longer means ``fly with no zone''}
+  (\file{driver.py}, \code{\_\_init\_\_} and \code{srv\_takeoff}). When \code{flight\_zone\_file} is set but
+  \code{load\_zone} returns \code{None}, the driver logs an error and \emph{refuses every takeoff} with that message
+  (\code{flight\_zone:=none} still flies without a zone, on purpose). The missions now stop at once when the driver
+  refuses a takeoff (\file{step\_test.py}, \code{prepare}), instead of waiting for a takeoff that never comes.
+\item \textbf{NaN in \topic{/tello/cmd\_vel\_safe} no longer kills the driver.} \code{on\_cmd} drops a request with
+  a non-finite component (warning, throttled to one every 2\,s); the previous request then times out after
+  \code{cmd\_timeout} like a silent mission. \code{CommandFilter.clip} also returns 0 for a non-finite value, so no
+  internal NaN can stop the 20\,Hz loop either.
+\item \textbf{ToF, IMU and takeoff updates survive the marker-pose rewind} (\file{ekf\_core.py}). The filter keeps
+  a short log \code{meas} of the distance-sensor and IMU-heading updates (and of the takeoff covariance reset),
+  with their times. After a marker pose is applied at the image time, the re-propagation to now re-applies them in
+  order, each at its own time: $t_0 \to t_1$ (predict), height update, $t_1\to t_2$, IMU update, \dots, $\to$ now.
+  The log is cleared at (re)initialisation and trimmed to \code{history\_s} like the state history.
+  Offline (hover at 1.85\,m, poses with $\sigma = 0.10$\,m, ToF $\sigma = 0.01$\,m at 10\,Hz): height RMS error
+  1.7\,cm $\to$ 0.6\,cm with poses at 10\,Hz, 1.7 $\to$ 1.0\,cm at 30\,Hz. With precise poses the estimate is
+  the expected information-weighted mean (1.807 vs 1.804\,m before), and ToF readings over furniture (0.85\,m
+  less) are still gated out.
+\end{enumerate}
+
+\textbf{Tests run for v1.1} (fake drone only, ROS domains 79--80, never the real drone):
+\begin{itemize}[leftmargin=*]
+\item Offline guard checks on the new 3D zone: east command at $z=2.0$ under the upper floor pushed back west, allowed
+  at 2.2\,m; descent over the furniture blocked at 2.04\,m, allowed over \code{main}; band zone unchanged.
+\item Driver with \code{flight\_zone\_file} pointing to a missing file: \code{takeoff} answers
+  \code{success=False} with the error message.
+\item Driver with the 3D zone, 5 NaN commands at 10\,Hz: one warning, driver alive, takeoff accepted afterwards.
+\item Full patrol in the 3D zone (0.30\,m/s, 10$^\circ$/s), then ``35'': markers in view 100\,\% of the time, path
+  error RMS 4\,cm, marker 35 found after 21\,s and reached to 2\,cm. True fake-drone path: never outside the zone,
+  lowest point over the east furniture 2.08\,m, maximum $x$ 0.77\,m.
+\end{itemize}
+
+\section{Priority 1: still open}
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Band guard uses the 3D height limits without checking $\sigma_{xy}$} (\file{safety.py}:235--242):
+  with a wrong $x,y$ estimate the wrong floor (1.55 vs 2.08\,m) is applied. Use the stricter limits when
+  $\sigma_{xy}$ is large.
+\item \textbf{The mock start point with the 3D zone is over the furniture} (\file{driver.py}:141--146): the fake
+  drone starts at $x\approx 1.05$\,m, in a no-fly cell at the takeoff height. Only affects simulation.
+\end{enumerate}
+
+\section{Priority 2: estimation and control quality}
+
+\begin{itemize}[leftmargin=*]
+\item The EKF ignores the image timestamp and assumes a fixed 0.20\,s video delay (\file{ekf\_node.py}:73).
+\item Process noise for velocity and yaw is $(q\Delta t)^2$, so it depends on the step size (\file{ekf\_core.py}:98--101).
+\item The filter restarts after 8 consecutive rejected poses ($\approx 0.27$\,s at 30\,fps) (\file{ekf\_core.py}:205).
+\item \file{strike.py} uses one mean gain $K=0.745$ for both axes while the identified gains are 0.66 forward
+  and 0.83 left; its integral term is never reset between legs; its speed is capped at $\approx 0.66$\,m/s.
+\item \file{trajectory.py} (minimum-jerk) is used only by \file{strike.py}; patrol and marker tour fly a saturated
+  proportional law. Rest-to-rest approach legs could use \code{Quintic} + \code{track}.
+\item Three different turn-in-place controllers and two different ``point in front of a marker'' functions
+  (\file{marker\_tour.py}:140, \file{strike.py}:167) should be merged.
+\item The localizer solves the same PnP twice per frame with 3+ markers; the ``moved marker'' counter never decays
+  (\file{aruco\_localizer.py}:204--205).
+\item \file{tools/ekf\_replay.py} uses old model constants and the mission's request instead of what was really
+  sent; \file{step\_fit.py} validates against a stale hard-coded model.
+\end{itemize}
+
+\section{Priority 3: clarity, dead code, stale comments}
+
+Stale docstrings and comments (\file{flight\_zone\_3d.yaml} ``not used yet'', \file{free\_zone.py} defaults,
+\file{real.launch.py} 0.5 vs 0.3\,m, \file{make\_print\_sheets.py}), dead code (\code{self.ambiguous},
+\code{rpy\_from\_matrix}, unused imports kept as re-exports in \file{driver.py}, an unused \code{state} dict in
+\file{strike.py}), files opened without being closed, and lone Esc not landing in the key readers
+(\file{teleop.py}:144--148). See each chapter's review box for the complete list with line numbers.
+
+\section{Versions of this book}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Version & Date & Code \\
+\midrule
+1.0 & November 18, 2026 & \code{aab4639}: first complete documentation, review collected, no code change \\
+1.1 & November 18, 2026 & 3D zone split, zone-file and NaN guards, EKF measurement replay \\
+\bottomrule
+\end{tabular}
+\end{center}
+\fussy

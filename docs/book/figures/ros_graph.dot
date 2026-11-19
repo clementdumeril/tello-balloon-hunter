@@ -1,0 +1,34 @@
+digraph G {
+  rankdir=LR; nodesep=0.35; ranksep=0.9; splines=true;
+  node [fontname="Helvetica", fontsize=11];
+  edge [fontname="Helvetica", fontsize=8.5, color="#555555"];
+  tello [label="DJI Tello\n(Wi-Fi UDP)", shape=doublecircle, style=filled, fillcolor="#fde2c8"];
+  subgraph cluster_launch { label="real.launch.py"; fontname="Helvetica-Bold"; fontsize=11; style=dashed; color="#888888";
+    driver [label="tello_driver\n(driver.py + safety.py + zone.py)", shape=box, style="rounded,filled", fillcolor="#cfe3ff"];
+    loc [label="aruco_localizer\n(aruco_localizer.py)", shape=box, style="rounded,filled", fillcolor="#d7f2d0"];
+    ekf [label="tello_ekf\n(ekf_node.py + ekf_core.py)", shape=box, style="rounded,filled", fillcolor="#f6d6f2"];
+    mmp [label="marker_map_publisher", shape=box, style="rounded,filled", fillcolor="#e9e9e9"];
+    rec [label="session_recorder", shape=box, style="rounded,filled", fillcolor="#e9e9e9"];
+    rviz [label="RViz 2", shape=box, style="rounded,filled", fillcolor="#fff6c0"];
+  }
+  mission [label="mission / teleop\n(2nd terminal)\ntello_patrol, tello_strike,\ntello_marker_tour, tello_goto,\ntello_teleop, tello_step_test", shape=box, style="rounded,filled", fillcolor="#ffd9d9"];
+
+  tello -> driver [label="H.264 video 30 fps\ntelemetry 10 Hz"];
+  driver -> tello [label="rc a b c d  20 Hz"];
+  driver -> loc [label="/tello/image_raw\n/tello/camera_info"];
+  mmp -> loc [label="static TF map→aruco_i\nbase_link→tello_camera_optical", style=dashed];
+  loc -> ekf [label="/aruco/pose"];
+  driver -> ekf [label="/tello/telemetry\n/tello/rc_sent"];
+  ekf -> driver [label="/ekf/pose /ekf/velocity\n/ekf/drift"];
+  loc -> driver [label="/aruco/nearest_marker"];
+  ekf -> mission [label="/ekf/pose"];
+  loc -> mission [label="/aruco/pose, /aruco/ids"];
+  mission -> driver [label="/tello/cmd_vel_safe\n~/takeoff ~/land (services)"];
+  driver -> mission [label="/tello/telemetry\nparam flight_zone_file", style=dashed];
+  ekf -> rviz [label="TF map→base_link\n/ekf/path"];
+  loc -> rviz [label="/aruco/debug_image\n/aruco/sight_lines"];
+  mmp -> rviz [label="/aruco/map_markers /room/mesh\n/room/free_space /room/flight_zone\n/tello/body_markers"];
+  driver -> rec [label="telemetry, rc_sent", style=dotted];
+  loc -> rec [label="pose, debug image", style=dotted];
+  ekf -> rec [label="/ekf/pose", style=dotted];
+}

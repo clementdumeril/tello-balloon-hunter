@@ -1,0 +1,7 @@
+digraph T { rankdir=TB; node [fontname="Helvetica", fontsize=11, shape=ellipse, style=filled, fillcolor="#f2f2f2"]; edge [fontname="Helvetica", fontsize=8.5];
+  map [fillcolor="#fff6c0", label="map\n(floor under marker 49, z up)"];
+  map -> "aruco_<id>" [label="static, marker_map_publisher\n(config/markers.yaml)"];
+  map -> base_link [label="tello_ekf (filtered)"];
+  map -> base_link_aruco [label="aruco_localizer (raw)"];
+  base_link -> tello_camera_optical [label="static, camera mount\n(5 cm ahead, optical axes)"];
+}

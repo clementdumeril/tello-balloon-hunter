@@ -1,0 +1,778 @@
+\chapter{State estimation: the drone model and the EKF}
+\label{ch:ekf}
+\sloppy
+
+The ArUco localizer (previous chapter) tells where the drone \emph{was} when an image was taken, a few tens of
+milliseconds at a time, with gaps whenever no marker is in view. Nothing in the system can fly on that alone: the pose
+is about $0.2$~s old when it arrives, it jitters, it can be plain wrong (a wrong marker match, a yaw flipped by
+$180^\circ$), and it disappears as soon as the camera looks at a blank wall. The node \code{tello\_ekf} turns it into a
+continuous, smooth, delay-compensated estimate of the drone's state, published at $30$~Hz, with an honest uncertainty
+that grows when the markers are lost.
+
+This chapter goes through the four files of the estimator, function by function:
+\begin{itemize}[nosep]
+  \item \file{src/tello\_driver/tello\_driver/model.py}: the identified response of the drone (the numbers);
+  \item \file{src/tello\_driver/tello\_driver/ekf\_core.py}: the filter itself, pure \code{numpy}, no ROS;
+  \item \file{src/tello\_driver/tello\_driver/ekf\_node.py}: the ROS~2 wrapper (topics, timers, TF);
+  \item \file{src/tello\_driver/tello\_driver/home.py} and \file{tools/ekf\_replay.py}: the takeoff pad and the offline replay.
+\end{itemize}
+
+\begin{intuition}
+Your memory is right: the EKF keeps two things, a best guess $\hat{\mathbf s}$ of the state and a covariance
+$\mathbf P$ that says how wrong that guess may be. Every $20$~ms the \emph{prediction} pushes the guess forward with
+the drone model (``I sent $0.3$~m/s forward, so in $20$~ms the velocity rises a little and the position moves a
+little''); the matrix $\mathbf F$ says how the errors are carried along by that motion and $\mathbf Q$ adds the
+uncertainty of the model itself, so $\mathbf P$ grows. Every \emph{measurement} (marker pose, distance sensor, IMU
+heading) is compared with what the state predicts it should read; the difference pulls the guess towards the
+measurement by an amount set by the ratio of the two uncertainties, and $\mathbf P$ shrinks. Without markers only the
+prediction runs: the drone ``knows roughly how it will evolve'', and $\mathbf P$ tells everybody else how roughly.
+\end{intuition}
+
+%=====================================================================================================================
+\section{Where the EKF sits in the graph}
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+Direction & Topic & Content and use \\
+\midrule
+in  & \topic{/tello/rc\_sent} (\code{Twist}) & the body-frame velocity command \emph{really} sent to the Tello by the driver, after
+      its position hold and guards (published at $20$~Hz by \code{send\_rc}, \file{driver.py}:344--347). This is the input $\mathbf u$. \\
+in  & \topic{/aruco/pose} (\code{PoseWithCovarianceStamped}) & marker pose of \code{base\_link} in \topic{map}, with a diagonal covariance. Measurement. \\
+in  & \topic{/tello/telemetry} (\code{String}, JSON) & $10$~Hz state of the Tello: \code{tof} (distance sensor, cm), \code{yaw} (IMU heading, degrees clockwise),
+      \code{flying}. Measurements and takeoff detection. \\
+out & \topic{/ekf/pose} (\code{PoseWithCovarianceStamped}) & $x,y,z,\psi$ and their covariance, $30$~Hz. \\
+out & \topic{/ekf/velocity} (\code{TwistStamped}) & $v_x,v_y,v_z$ in the \topic{map} frame. \\
+out & \topic{/ekf/drift} (\code{Vector3Stamped}) & the learnt drift velocity $d_x,d_y$. \\
+out & \topic{/ekf/path} (\code{nav\_msgs/Path}) & trail for RViz, one pose every $0.2$~s, at most 3000. \\
+out & TF \topic{map} $\to$ \topic{base\_link} & the drone in RViz follows the filter, not the raw markers (those go to \topic{base\_link\_aruco}). \\
+\bottomrule
+\end{tabularx}
+\caption{Interface of \code{tello\_ekf} (\file{ekf\_node.py}:45--58).}
+\end{table}
+
+The important design choice is the input: the filter is fed the command the driver \emph{actually} transmitted, not
+what the mission asked for. The driver's safety chain (chapter on the driver) can replace the mission's request by a
+hold command, clip it, or zero it in front of a wall; if the EKF predicted with the request, it would believe the drone
+moves while the driver is braking it.
+
+%=====================================================================================================================
+\section[The identified model: model.py]{The identified model: \file{model.py}}
+
+\file{model.py} contains no function: it is the single place where the numbers of the drone's response live. It is
+imported by the EKF node, the safety chain (\file{safety.py}:35), the missions (\file{marker\_tour.py}, \file{strike.py},
+\file{patrol.py}) and the simulated drone (\file{fake\_world.py}:21--24), so the estimator, the controllers and the
+simulator always agree on one model.
+
+Per horizontal body axis, from the commanded velocity $u$ to the velocity $v$ the drone reaches (the Tello's own
+flight controller included), the model is a first-order lag after a pure delay:
+\begin{equation}
+  \tau \,\dot v(t) = K\,u(t-L) - v(t), \qquad L = L_U + L_V .
+  \label{eq:fo}
+\end{equation}
+$K$ is the static gain (real speed over commanded speed), $\tau$ the time constant, $L$ the dead time. Here $L_U$ is the
+command side (radio, flight controller) and $L_V$ the video side (image taken $\to$ marker pose computed): when the model
+was identified, the measured output was the marker pose, so the identification only sees their sum.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}llll@{}}
+\toprule
+Constant & Value & Meaning & EKF symbol \\
+\midrule
+\code{K\_X} & $0.66$ & forward gain (with the cage) & $K_x$ \\
+\code{K\_Y} & $0.83$ & left gain & $K_y$ \\
+\code{TAU\_XY} & $0.25$~s & horizontal time constant & $\tau_{xy}$ \\
+\code{L\_V} & $0.20$~s & image taken $\to$ marker pose & $L_v$ (measurement delay) \\
+\code{L\_U} & $0.35$~s & command $\to$ motion & $L_u$ (input delay) \\
+\code{K\_Z}, \code{TAU\_Z} & $0.9$, $0.45$~s & vertical (not re-identified) & $K_z$, $\tau_z$ \\
+\code{K\_W} & $1.0$ & yaw-rate gain & $K_\omega$ \\
+\code{K\_MEAN} & $0.745$ & mean of $K_x$, $K_y$ (code wanting one $K$) & \code{K\_xy} (fallback) \\
+\bottomrule
+\end{tabular}
+\caption{Constants of \file{model.py}:18--25.}
+\label{tab:model}
+\end{table}
+
+Where the numbers come from (docstring, \file{model.py}:1--17): identification flight \code{step\_20261113\_180041}
+(six velocity doublets per horizontal axis), validated on a separate flight with fit scores of $81\,\%$ forward, $67\,\%$ left,
+$87\,\%$ yaw. The fit determines well only $L+\tau$ (a delay and a lag look alike on noisy data): $0.73$~s forward and
+$0.85$~s left. The code therefore uses one $\tau$ for both axes and chooses $L_U$ so that
+$L_U + L_V + \tau_{xy} = 0.35+0.20+0.25 = 0.80$~s sits inside the measured range. The gains are lower than the
+$K\approx1.15$ of the first identification (Nov~11) because the drone now always flies with its protective cage (more
+weight, more drag); flying without it would need a new identification.
+
+\begin{keypoint}
+The \code{DroneEKF} constructor still has the \emph{old} defaults (\code{K\_xy=1.15}, \code{tau\_xy=0.55},
+\code{L\_u=0.30}, \file{ekf\_core.py}:38). The node overrides all of them with the \file{model.py} values
+(\file{ekf\_node.py}:34--37), but anything that builds a \code{DroneEKF()} without arguments (the replay tool, see
+Section~\ref{sec:replay}) runs the old, cage-less model.
+\end{keypoint}
+
+%---------------------------------------------------------------------------------------------------------------------
+\subsection[The takeoff pad: home.py]{The takeoff pad: \file{home.py}}
+
+The drone always takes off from the same spot, a marker (id 48) lying on the floor. Its camera looks forward, so it never
+sees that marker; instead \file{tools/set\_home.py} learns the pad position from the first wall-marker poses after each
+climb and writes \file{config/home.yaml} (a local file, not committed). Two constants and one function:
+
+\code{REPO} is the environment variable \code{TELLO\_REPO} or \code{\~{}/tello\_ws/src/tello-balloon-hunter};
+\code{HOME\_FILE} is \code{REPO/config/home.yaml} (\file{home.py}:14--15).
+
+\func{load\_home}{(path=HOME\_FILE) -> dict | None}
+Reads the YAML file and returns \code{\{x, y, yaw\_deg, marker, samples\}} with \code{yaw\_deg} defaulting to $0$,
+\code{marker} to $48$ (key \code{pad\_marker}) and \code{samples} to $1$. It returns \code{None} if \code{x} or \code{y}
+is missing, and also on any I/O, parse or type error (\file{home.py}:18--28): a missing pad file is not an error, it
+just means the EKF will wait for markers. Users: the EKF node (start on the pad) and the missions (land back on it,
+\file{step\_test.py}:341--342).
+
+%=====================================================================================================================
+\section{State, input and conventions}
+
+\subsection{The state vector}
+
+\file{ekf\_core.py}:27--28 defines $N_X = 10$ and the index constants \code{IX, IY, IZ, IVX, IVY, IVZ, IYAW, IB, IDX, IDY}
+used everywhere (also imported by the node and the replay tool). The state is
+\begin{equation}
+  \mathbf s = \begin{bmatrix} x & y & z & v_x & v_y & v_z & \psi & b & d_x & d_y \end{bmatrix}^{\!\top}.
+\end{equation}
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}clllX@{}}
+\toprule
+Index & Symbol & Code & Unit & Meaning \\
+\midrule
+0--2 & $x,y,z$ & \code{IX..IZ} & m & position of \topic{base\_link} in \topic{map} (origin on the floor below marker 49, $z$ up) \\
+3--5 & $v_x,v_y,v_z$ & \code{IVX..IVZ} & m/s & velocity, \emph{map frame} \\
+6 & $\psi$ & \code{IYAW} & rad & heading in \topic{map}, counter-clockwise positive, wrapped to $(-\pi,\pi]$ \\
+7 & $b$ & \code{IB} & rad & IMU heading offset: $\psi_{\text{IMU}} = \psi + b$ \\
+8--9 & $d_x,d_y$ & \code{IDX, IDY} & m/s & drift velocity (map frame): how the Tello moves with a zero command \\
+\bottomrule
+\end{tabularx}
+\caption{The EKF state.}
+\end{table}
+
+Roll and pitch are not estimated: the Tello stabilises them itself and the camera pose is computed for
+\topic{base\_link} in the level frame. The drift $(d_x,d_y)$ exists because the Tello's optical-flow position hold does
+not work on the plain floor of this room: with a zero command it slides at $5$--$10$~cm/s (flight of Nov~11). It is a
+slowly varying velocity the filter learns while it sees markers.
+
+\subsection{The input}
+
+\begin{equation}
+  \mathbf u = \begin{bmatrix} u_x & u_y & u_z & \omega_z \end{bmatrix}^{\!\top}
+\end{equation}
+is the \emph{body-frame} command really sent (m/s forward, m/s left, m/s up, rad/s counter-clockwise), rebuilt by the driver
+from the integer rc values: $u_x = \text{fb}\cdot g$, $u_y = -\text{lr}\cdot g$, $u_z = \text{ud}\cdot g$,
+$\omega_z = -\text{yaw}\cdot g_\omega$ with $g = 0.38/30$~m/s per rc point and $g_\omega = 18^\circ/30$ per point
+(\file{driver.py}:70--71, 344--346). It is not a state and has no noise of its own: all the uncertainty about what the
+command does is put into $\mathbf Q$.
+
+\subsection{Yaw wrapping}
+
+\func{wrap}{(a) -> float}
+\code{atan2(sin a, cos a)} (\file{ekf\_core.py}:31--32): brings any angle back to $(-\pi,\pi]$. It is applied to the
+predicted yaw after every step, to every angle innovation (so that $179^\circ$ measured against $-179^\circ$ predicted is an
+error of $-2^\circ$, not $358^\circ$), and to the yaw after every update. $b$ is wrapped when it is initialised and is
+not re-wrapped afterwards; it is only ever used inside \code{wrap(}$\psi+b$\code{)}, so that is harmless.
+
+%=====================================================================================================================
+\section{The filter in equations}
+\label{sec:equations}
+
+\subsection{Continuous model}
+
+Write $\mathbf R(\psi)$ for the planar rotation and $\mathbf K_{xy} = \operatorname{diag}(K_x,K_y)$. The command takes effect
+$L_u$ later, $\bar{\mathbf u}(t) = \mathbf u(t-L_u)$. The model behind \code{\_step} is
+\begin{align}
+  \dot x &= v_x, \qquad \dot y = v_y, \qquad \dot z = v_z, \\
+  \tau_{xy}\begin{bmatrix}\dot v_x\\ \dot v_y\end{bmatrix} &= \mathbf R(\psi)\,\mathbf K_{xy}
+     \begin{bmatrix}\bar u_x\\ \bar u_y\end{bmatrix} + \begin{bmatrix} d_x\\ d_y\end{bmatrix}
+     - \begin{bmatrix} v_x\\ v_y\end{bmatrix},
+  \qquad \mathbf R(\psi) = \begin{bmatrix}\cos\psi & -\sin\psi\\ \sin\psi & \cos\psi\end{bmatrix}, \label{eq:vxy}\\
+  \tau_z\,\dot v_z &= K_z\,\bar u_z - v_z, \\
+  \dot\psi &= K_\omega\,\bar\omega_z, \qquad \dot b = w_b, \qquad \dot d_x = w_{d}, \qquad \dot d_y = w_{d},
+\end{align}
+with $w_b,w_d$ white noises (random walks). In steady state with a constant command, \eqref{eq:vxy} gives
+$\mathbf v = \mathbf R(\psi)\mathbf K_{xy}\bar{\mathbf u} + \mathbf d$: the drone flies at $66\,\%$ of the forward command,
+rotated into the map, plus the drift. This is exactly \eqref{eq:fo} per body axis, with the drift added.
+
+\subsection{Why an \emph{extended} Kalman filter}
+
+Everything above is linear in the state except one term: the body-frame command is rotated by $\mathbf R(\psi)$, and
+$\psi$ is a state. The velocity derivative contains $\cos\psi\,K_x\bar u_x - \sin\psi\,K_y\bar u_y$, a product of a
+function of the state with the input. A linear Kalman filter cannot propagate the covariance through that, so the EKF
+linearises around the current estimate: $\mathbf F$ is the Jacobian of the discrete step with respect to the state. The
+consequence is physical: an error in heading becomes an error in velocity (you think you fly north, you fly a bit
+north-east), which over time becomes an error in position. The two Jacobian entries
+$\partial v_x/\partial\psi$ and $\partial v_y/\partial\psi$ below are what transport heading uncertainty into position
+uncertainty; with a zero command they vanish, because a hovering drone does not care about its heading. The
+measurement models are all linear (they select components), so the ``extended'' part is in the prediction only, plus the
+angle wrapping.
+
+\subsection{Discretisation: the step \code{\_step}}
+
+The filter integrates with explicit Euler steps of at most $\Delta t = 0.02$~s (\code{predict}). Define
+\begin{equation}
+  \alpha = \frac{\Delta t}{\tau_{xy}}, \quad \beta = \frac{\Delta t}{\tau_z}, \quad
+  b_x = K_x\bar u_x,\; b_y = K_y\bar u_y,\quad
+  c_x = \cos\psi\,b_x - \sin\psi\,b_y,\; c_y = \sin\psi\,b_x + \cos\psi\,b_y .
+\end{equation}
+With the model numbers, $\alpha = 0.02/0.25 = 0.08$ and $\beta = 0.02/0.45 \approx 0.044$. (Careful: in the code $b_x,b_y$
+are the body velocities \code{bx, by}, not the IMU offset $b$.) The discrete state update $\mathbf s_{k+1} = f(\mathbf s_k,\bar{\mathbf u}_k)$ is
+\begin{equation}
+\begin{aligned}
+  x^+ &= x + v_x\Delta t, & y^+ &= y + v_y\Delta t, & z^+ &= z + v_z\Delta t,\\
+  v_x^+ &= v_x + \alpha\,(c_x + d_x - v_x), & v_y^+ &= v_y + \alpha\,(c_y + d_y - v_y), & v_z^+ &= v_z + \beta\,(K_z\bar u_z - v_z),\\
+  \psi^+ &= \operatorname{wrap}(\psi + K_\omega\bar\omega_z\Delta t), & b^+ &= b, & d_{x,y}^+ &= d_{x,y}.
+\end{aligned}
+\end{equation}
+Note that positions use the \emph{old} velocity (pure forward Euler).
+
+\paragraph{The Jacobian $\mathbf F$.} Differentiating $f$ with respect to $\mathbf s$:
+\begin{equation}
+\mathbf F = \frac{\partial f}{\partial \mathbf s} =
+\begin{bmatrix}
+1 & 0 & 0 & \Delta t & 0 & 0 & 0 & 0 & 0 & 0\\
+0 & 1 & 0 & 0 & \Delta t & 0 & 0 & 0 & 0 & 0\\
+0 & 0 & 1 & 0 & 0 & \Delta t & 0 & 0 & 0 & 0\\
+0 & 0 & 0 & 1-\alpha & 0 & 0 & J_x & 0 & \alpha & 0\\
+0 & 0 & 0 & 0 & 1-\alpha & 0 & J_y & 0 & 0 & \alpha\\
+0 & 0 & 0 & 0 & 0 & 1-\beta & 0 & 0 & 0 & 0\\
+0 & 0 & 0 & 0 & 0 & 0 & 1 & 0 & 0 & 0\\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 1 & 0 & 0\\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 1 & 0\\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 1
+\end{bmatrix},
+\end{equation}
+\begin{equation}
+J_x = \frac{\partial v_x^+}{\partial\psi} = \alpha\,(-\sin\psi\,b_x - \cos\psi\,b_y) = -\alpha\,c_y,\qquad
+J_y = \frac{\partial v_y^+}{\partial\psi} = \alpha\,(\cos\psi\,b_x - \sin\psi\,b_y) = \alpha\,c_x .
+\end{equation}
+I checked $J_x,J_y$ against a finite difference of \code{\_step} (at $\psi=0.7$, $u=(0.3,0.2)$): they agree to $10^{-8}$.
+
+\paragraph{Where is $\mathbf B$?} The code builds no $\mathbf B$ matrix: the input enters $f$ directly. For intuition,
+the part of the step that the command adds is
+\begin{equation}
+\begin{bmatrix} \Delta v_x\\ \Delta v_y\\ \Delta v_z\\ \Delta\psi\end{bmatrix}_{\text{from }\bar{\mathbf u}}
+= \underbrace{\begin{bmatrix}
+\alpha K_x\cos\psi & -\alpha K_y\sin\psi & 0 & 0\\
+\alpha K_x\sin\psi & \alpha K_y\cos\psi & 0 & 0\\
+0 & 0 & \beta K_z & 0\\
+0 & 0 & 0 & K_\omega\Delta t
+\end{bmatrix}}_{\mathbf B(\psi)}
+\begin{bmatrix}\bar u_x\\ \bar u_y\\ \bar u_z\\ \bar\omega_z\end{bmatrix},
+\end{equation}
+a $\mathbf B$ that depends on the state through $\psi$, which is again the reason for the EKF. Since $\mathbf u$ is treated
+as exactly known, $\partial f/\partial\mathbf u$ never enters the covariance.
+
+\paragraph{The process noise $\mathbf Q$.} Diagonal, built per step with $q_a = $ \code{accel\_noise} $=0.6$,
+$q_\omega = $ \code{yaw\_rate\_noise} $=0.15$, $q_d = $ \code{drift\_noise} $=0.01$:
+\begin{equation}
+\begin{aligned}
+\mathbf Q = \operatorname{diag}\Big(&
+\underbrace{10^{-6},\,10^{-6},\,10^{-6}}_{x,y,z},\\
+&\underbrace{(q_a\Delta t)^2{+}10^{-6},\,(q_a\Delta t)^2{+}10^{-6},\,(\tfrac12 q_a\Delta t)^2{+}10^{-6}}_{v_x,v_y,v_z},\\
+&\underbrace{(q_\omega\Delta t)^2}_{\psi},\;
+\underbrace{(0.002\,\Delta t)^2}_{b},\;
+\underbrace{q_d^2\Delta t,\,q_d^2\Delta t}_{d_x,d_y}\Big).
+\end{aligned}
+\end{equation}
+Numbers for a full step $\Delta t=0.02$: velocity variance $+1.45\times10^{-4}$ (m/s)$^2$ per step, i.e.\ $7.3\times10^{-3}$ per
+second ($50$ steps), a standard deviation growing like $8.5$~cm/s per $\sqrt{\text{s}}$; yaw $+9\times10^{-6}$ rad$^2$ per
+step; drift $+2\times10^{-6}$ per step, i.e.\ $1$~cm/s per $\sqrt{\text{s}}$, a genuine random walk ($q_d^2\Delta t$ is
+proportional to $\Delta t$). The velocity and yaw terms scale with $\Delta t^2$ instead, which makes them step-size
+dependent (see the review notes). $q_a$ can be read as ``unmodelled acceleration of $0.6$~m/s$^2$''; the factor
+$\frac12$ on $z$ says the vertical axis is believed to be twice as calm.
+
+\paragraph{Covariance prediction.}
+\begin{equation}
+  \mathbf P^+ = \mathbf F\,\mathbf P\,\mathbf F^\top + \mathbf Q .
+\end{equation}
+
+\subsection{Measurement update}
+
+Every measurement is linear, $\mathbf z = \mathbf H\mathbf s + \mathbf n$, $\mathbf n\sim\mathcal N(0,\mathbf R)$, and goes
+through the same function \code{\_update}:
+\begin{align}
+  \mathbf y &= \mathbf z - h(\hat{\mathbf s}) \quad\text{(angle rows wrapped)}, \label{eq:innov}\\
+  \mathbf S &= \mathbf H\mathbf P\mathbf H^\top + \mathbf R, \\
+  \mathbf K &= \mathbf P\mathbf H^\top\mathbf S^{-1}, \\
+  \hat{\mathbf s}^+ &= \hat{\mathbf s} + \mathbf K\mathbf y, \qquad \psi^+ \leftarrow \operatorname{wrap}(\psi^+), \\
+  \mathbf P^+ &= \tfrac12\big[(\mathbf I - \mathbf K\mathbf H)\mathbf P + ((\mathbf I - \mathbf K\mathbf H)\mathbf P)^\top\big], \\
+  d^2 &= \mathbf y^\top\mathbf S^{-1}\mathbf y \quad\text{(Mahalanobis distance, returned for the gate)}.
+\end{align}
+The covariance update is the short form $(\mathbf I-\mathbf K\mathbf H)\mathbf P$, \emph{not} the Joseph form
+$(\mathbf I-\mathbf K\mathbf H)\mathbf P(\mathbf I-\mathbf K\mathbf H)^\top+\mathbf K\mathbf R\mathbf K^\top$; it is
+symmetrised afterwards. If the innovation $\mathbf y$ is consistent with $\mathbf S$, $d^2$ follows a $\chi^2$
+distribution with $m$ degrees of freedom ($m$ = size of $\mathbf z$), which gives the gates.
+
+The three measurement models:
+\begin{equation}
+\mathbf H_{\text{pose}} =
+\begin{bmatrix}
+1&0&0&0&0&0&0&0&0&0\\
+0&1&0&0&0&0&0&0&0&0\\
+0&0&1&0&0&0&0&0&0&0\\
+0&0&0&0&0&0&1&0&0&0
+\end{bmatrix},
+\end{equation}
+\begin{equation}
+\mathbf R_{\text{pose}} = \operatorname{diag}\big(\sigma_p^2,\sigma_p^2,\sigma_p^2,\sigma_\psi^2\big),
+\end{equation}
+\begin{equation}
+\mathbf H_{\text{ToF}} = \begin{bmatrix}0&0&1&0&0&0&0&0&0&0\end{bmatrix},\; R = 0.05^2;
+\end{equation}
+\begin{equation}
+\mathbf H_{\text{IMU}} = \begin{bmatrix}0&0&0&0&0&0&1&1&0&0\end{bmatrix},\; R = (1^\circ)^2 .
+\end{equation}
+The IMU row is the only one that couples two states: the IMU reads $\psi+b$, so one reading alone cannot separate the
+heading from the offset; the markers (which see $\psi$ only) make $b$ observable.
+
+\subsection{From equations to code}
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}lX@{}}
+\toprule
+Equation & Code (\file{ekf\_core.py}) \\
+\midrule
+delayed input $\bar{\mathbf u}=\mathbf u(t-L_u)$ & \code{command\_at}, lines 58--67; called at line 113 \\
+$\alpha$, $\beta$, $b_x,b_y$, $c_x,c_y$ & lines 76--81 \\
+$f(\mathbf s,\bar{\mathbf u})$ & lines 82--89 \\
+$\mathbf F$ & lines 90--96 ($J_x$, $J_y$ at 95--96) \\
+$\mathbf Q$ & lines 97--103 \\
+$\mathbf P^+ = \mathbf F\mathbf P\mathbf F^\top+\mathbf Q$ & line 104 \\
+steps of $\le 0.02$~s, drift clamp and fade, history & \code{predict}, lines 106--129 \\
+innovation, $\mathbf S$, $\mathbf K$, update, $d^2$ & \code{\_update}, lines 132--141 \\
+$\mathbf H_{\text{pose}}$, $\mathbf R_{\text{pose}}$, gate $16.3$ & \code{update\_pose}, lines 164--166, 202--206 \\
+$\mathbf H_{\text{ToF}}$, gate $6.6$ & \code{update\_height}, lines 224--231 \\
+$\mathbf H_{\text{IMU}}$ & \code{update\_imu\_yaw}, lines 244--248 \\
+\bottomrule
+\end{tabularx}
+\caption{Map from the equations of Section~\ref{sec:equations} to the code.}
+\end{table}
+
+%=====================================================================================================================
+\section[ekf\_core.py, function by function]{\file{ekf\_core.py}, function by function}
+
+The module docstring (lines 1--21) summarises the design; the class \code{DroneEKF} is all of the rest.
+
+\func{DroneEKF.\_\_init\_\_}{(K\_xy, tau\_xy, K\_z, tau\_z, K\_w, L\_u, L\_v, accel\_noise, ...)}
+Full signature and defaults: \code{K\_xy=1.15, tau\_xy=0.55, K\_z=0.9, tau\_z=0.45, K\_w=1.0, L\_u=0.30, L\_v=0.20,
+accel\_noise=0.6, yaw\_rate\_noise=0.15, drift\_noise=0.01, history\_s=1.5, K\_x=None, K\_y=None}.
+Stores the model ($K_x$, $K_y$ default to \code{K\_xy} if not given), the delays and the noise levels, and creates:
+\begin{itemize}[nosep]
+\item \code{s} $=\mathbf 0$ and a vague \code{P} $=\operatorname{diag}(10^3,10^3,10^3,1,1,1,10,10,0.01,0.01)$:
+  $\sigma\approx 32$~m on the position, $1$~m/s on the velocity, $3.2$~rad on yaw and $b$, $10$~cm/s on the drift.
+  It is never used to fly: the filter is not \code{initialised} and the node publishes nothing until an initialisation replaces it.
+\item \code{t} $=$ \code{None}: the filter time (the first \code{predict} only sets it);
+\item \code{inputs}: a deque of \code{(t, u)}, the received commands, kept so they can be applied $L_u$ later and re-applied
+  after a delayed update;
+\item \code{hist}: a deque of \code{(t, s, P)} snapshots after every step, covering \code{history\_s} $=1.5$~s, for the delayed
+  marker poses (the comment on line 51 says a 4-tuple with \code{u\_applied}; the code stores 3 elements);
+\item \code{rejected} $=0$ (consecutive gated poses), \code{d\_max} $=0.10$~m/s (largest believable drift),
+  \code{t\_pose} $=-10^{18}$ (time of the last accepted marker pose: ``never'').
+\end{itemize}
+
+\func{command\_at}{(t) -> np.ndarray(4)}
+Returns the command in force at time $t-L_u$ under a zero-order hold: it scans \code{inputs} (ordered by time) and keeps
+the last \code{u} whose stamp is $\le t - L_u$; zero if there is none. This one line of logic implements the input delay:
+a command received at $t_0$ starts acting on the model at $t_0 + 0.35$~s. The scan is linear; the deque holds about
+$(L_u + 1.5 + 1)\times 20 \approx 57$ commands at $20$~Hz.
+
+\func{add\_command}{(t, u) -> None}
+Appends \code{(t, u)} and drops the oldest entries while the \emph{second} one is older than $t - L_u - $
+\code{history\_s} $- 1$~s (about $2.85$~s). Testing the second entry keeps the last command that started before that
+horizon, so \code{command\_at} still finds the value in force at the beginning of the history window. At least two entries
+are always kept.
+
+\func{\_step}{(s, P, u, dt) -> (s2, P2)}
+One Euler step of the model and of the covariance, exactly the equations of Section~\ref{sec:equations}. The excerpt
+that encodes the nonlinearity:
+\begin{lstlisting}
+c, sn = math.cos(yaw), math.sin(yaw)
+bx, by = self.K_x * u[0], self.K_y * u[1]   # body velocity the command leads to
+cx = c * bx - sn * by
+cy = sn * bx + c * by
+...
+s2[IVX] += a_xy * (cx + dx - vx)
+s2[IVY] += a_xy * (cy + dy - vy)
+...
+F[IVX, IYAW] = a_xy * (-sn * bx - c * by)
+F[IVY, IYAW] = a_xy * (c * bx - sn * by)
+\end{lstlisting}
+It is a pure function (it works on copies), which is what lets \code{update\_pose} replay the past.
+
+\func{predict}{(t) -> None}
+Advances the filter from \code{self.t} to $t$. On the very first call it only sets \code{self.t}. Otherwise it loops while
+$\texttt{self.t} < t - 10^{-6}$:
+\begin{enumerate}[nosep]
+\item $\Delta t = \min(0.02, t - \texttt{self.t})$: steps of $20$~ms, the last one shorter;
+\item $\bar{\mathbf u}$ = \code{command\_at(self.t)}, the delayed command at the \emph{start} of the step;
+\item \code{s, P = \_step(s, P, u, dt)};
+\item clamp $d_x,d_y$ to $[-0.10, 0.10]$~m/s (\code{d\_max});
+\item if no marker pose has been accepted for more than $1$~s ($\texttt{self.t} - \texttt{t\_pose} > 1$): fade the drift,
+  $d \leftarrow d(1 - \Delta t/2)$, i.e.\ exponential decay with a $2$~s time constant, and pull its variance towards
+  $d_{\max}^2$: $P_{dd} \leftarrow P_{dd} + (d_{\max}^2 - P_{dd})\,\Delta t/2$;
+\item \code{self.t += dt} and append \code{(t, s, P)} to \code{hist}.
+\end{enumerate}
+Finally, snapshots older than $t - 1.5$~s are dropped.
+
+\begin{intuition}
+Why bound and forget the drift? While markers are seen, any systematic model error (a wrong $K$ during fast flight, a
+draught) is absorbed by $d$, because $d$ is the only state that can explain a persistent velocity mismatch. That is
+useful while it is corrected every frame, and dangerous when it is extrapolated: in flight \code{225048} the estimate ran
+$5$~m away during a long blind period while the drone stayed in place (comment, lines 115--117). So the drift is capped
+at the physically believable $10$~cm/s, and after $1$~s blind it decays towards zero (``I no longer know it'') while its
+variance goes back to $(10\text{ cm/s})^2$ (``\ldots and I admit it''). The second part matters for the users: the
+position uncertainty must keep up with the real error, otherwise the guards trust a stale pose too long (comment, lines
+122--123).
+\end{intuition}
+
+How fast the uncertainty grows without markers, measured by running the filter offline with the \file{model.py}
+parameters after a steady hover on markers (\code{sigma\_xy} $=\sqrt{\max(P_{xx},P_{yy})}$):
+\begin{center}
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+time without markers (s) & 0 & 0.5 & 1 & 2 & 3 & 5 \\
+\code{sigma\_xy} (cm) & 1.2 & 5.6 & 9.3 & 17.2 & 25.6 & 43.6 \\
+\bottomrule
+\end{tabular}
+\end{center}
+With the driver's thresholds (Section~\ref{sec:users}) this means: the position hold keeps working about $1.3$~s after
+the markers are lost ($\sigma < 12$~cm), the flight-zone guard about $3$~s ($\sigma<25$~cm).
+
+\func{\_update}{(s, P, z, h, H, R, angle\_rows=()) -> (s, P, d2)}
+The generic linear update, equations \eqref{eq:innov} and following. The caller passes the measurement \code{z}, the
+predicted measurement \code{h}, \code{H} and \code{R}; rows listed in \code{angle\_rows} have their innovation wrapped.
+The gain uses \code{np.linalg.inv(S)} and $d^2$ uses \code{np.linalg.solve(S, y)} (same thing, $\mathbf S$ is at most
+$4\times4$). It returns the new state, the symmetrised covariance and $d^2$. It does not decide anything: the callers gate
+on $d^2$ and choose whether to keep the result, which is why it works on copies when called from \code{update\_pose}.
+
+\func{takeoff}{() -> None}
+Called by the node on the rising edge of \code{flying}. The SDK takeoff lifts the drone to about $0.8$~m without any rc
+command, so the model knows nothing about it. It raises $P_{zz}$ and $P_{v_zv_z}$ to at least $1$ ($\sigma=1$~m,
+$1$~m/s). Without it the pad prior ($z=0$, $\sigma_z=5$~cm) made the gate of \code{update\_height} reject every
+distance reading as ``furniture'' and the estimate stayed at $0$--$0.8$~m while the drone climbed to $1.8$~m (docstring,
+found in simulation).
+
+\func{init\_at}{(t, x, y, z, yaw, sigma\_p=0.25, sigma\_yaw=15 deg) -> None}
+Initialisation on a known spot, the takeoff pad: state zero except $x,y,z,\psi$; covariance
+\begin{equation}
+\mathbf P_0 = \operatorname{diag}\big(0.25^2,\,0.25^2,\,0.05^2,\,0.1^2,\,0.1^2,\,0.1^2,\,(15^\circ)^2,\,1,\,0.08^2,\,0.08^2\big).
+\end{equation}
+Sets \code{t}, clears the history, marks the filter \code{initialised} and \code{b\_init = False} (the next IMU reading
+will set $b$). The $25$~cm position $\sigma$ is the tolerance on where the drone was put; if it was not on the pad at all,
+the first marker poses will be rejected by the gate and after 8 rejections the filter restarts from the markers.
+
+\func{update\_pose}{(t\_recv, pose, sigma\_p, sigma\_yaw, gate=16.3) -> bool}
+The marker update; \code{pose} $=(x,y,z,\psi)$ received at \code{t\_recv}. First the noise:
+$\mathbf R = \operatorname{diag}(\max(\sigma_p,0.02)^2\times3,\ \max(\sigma_\psi,1.5^\circ)^2)$ (line 164). The floors
+matter: the localizer's own estimate is often $1$~cm (its lower bound), and the EKF refuses to believe a marker pose better
+than $2$~cm and $1.5^\circ$. Then three cases.
+
+\emph{(a) Not initialised: start on 3 consistent poses} (lines 167--189). Each pose is appended to \code{init\_buf}, from
+which entries older than $1$~s are dropped. With at least three, the last three are tested: the spread
+(\code{np.ptp}, max minus min) of $x$ and of $y$ must be $\le 15$~cm and each yaw within $10^\circ$ of the last one. If so:
+position = median of the three (robust to one outlier in $z$), velocity and drift zero, yaw = the last one, and
+\begin{equation}
+\mathbf P_0 = \operatorname{diag}\big(0.05^2,\,0.05^2,\,0.05^2,\,0.2^2,\,0.2^2,\,0.2^2,\,0.05^2,\,1,\,0.08^2,\,0.08^2\big),
+\end{equation}
+history cleared, \code{t\_pose} set, returns \code{True}. Motivation (comment): a single wrong pose (wrong marker match,
+yaw flipped by $180^\circ$) taken as the start sent the position hold the wrong way in the offline stress tests.
+
+\emph{(b) Initialised: delayed update} (lines 190--218). The image was taken $L_v = 0.2$~s before it arrived. The
+procedure, illustrated by the timeline below:
+\begin{enumerate}[nosep]
+\item \code{predict(t\_recv)}: bring the filter to now;
+\item $t_{\text{meas}} = t_{\text{recv}} - L_v$; search \code{hist} backwards for the last snapshot with
+  $t_k \le t_{\text{meas}}$ (snapshots are $20$~ms apart, so the error in timing is below $20$~ms). If none (history too
+  short, e.g.\ right after an init), use the current state;
+\item run \code{\_update} on \emph{copies} of that past $(\mathbf s_k,\mathbf P_k)$, with $h = (x,y,z,\psi)_k$ and the yaw row wrapped;
+\item gate: if $d^2 > 16.3$ reject (next paragraph);
+\item accept: \code{rejected = 0}, \code{t\_pose = t\_recv}; replace the filter by the corrected past state
+  ($\mathbf s,\mathbf P,t \leftarrow \mathbf s_k^+,\mathbf P_k^+,t_k$), cut the history after $t_k$, and \code{predict(t\_now)}:
+  re-propagate the $\approx 0.2$~s to now with the \emph{same stored commands} (\code{command\_at} reads \code{inputs},
+  which were not touched).
+\end{enumerate}
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+time & event & filter \\
+\midrule
+$t_k \approx t_{\text{recv}}-0.20$ & image taken & snapshot $(\mathbf s_k,\mathbf P_k)$ in \code{hist} \\
+$t_k \ldots t_{\text{recv}}$ & commands keep arriving & predicted with the model, snapshots every $20$~ms \\
+$t_{\text{recv}}$ & pose arrives & correct $\mathbf s_k$, discard the newer snapshots, re-run $\approx10$ steps \\
+\bottomrule
+\end{tabularx}
+\end{center}
+The result: the correction is computed against the state the drone really had when the picture was taken, and its
+effect is carried forward through the dynamics (a position correction at $t_k$ also changes nothing else, but a correction
+of $v$ or $\psi$ at $t_k$ moves the position at $t_{\text{recv}}$). Without this, a moving drone would always be
+``corrected backwards'' by $v\,L_v$ (e.g.\ $6$~cm at $0.3$~m/s).
+
+\paragraph{The chi-square gate.} For $m=4$ the $\chi^2$ tail is $P(d^2>16.3) = e^{-8.15}(1+8.15) \approx 0.26\,\%$: the
+gate keeps $99.7\,\%$ of consistent poses, a ``3-sigma'' gate in four dimensions. With the steady covariance of a hover
+on markers ($\sigma_{xy}\approx1.2$~cm) and $\sigma_p=2$~cm, a jump of about $9.4$~cm along one axis is already rejected
+($d^2=18.4$ at $10$~cm). A rejected pose increments \code{rejected} and returns \code{False} without touching the
+state. On the 8th consecutive rejection the filter declares itself lost (long dead reckoning, wrong pad, or the markers
+are right and the filter is wrong): it sets \code{initialised = False} and calls itself again with the same pose, which
+lands in case (a), i.e.\ it waits for 3 consistent poses and restarts from the markers. At $30$~fps, 8 rejections is
+about $0.27$~s.
+
+\func{update\_height}{(z\_meas, sigma=0.05, gate=6.6) -> bool}
+The distance sensor measures the height above whatever is below: the floor ($z_{\text{map}}=0$ at floor level, so it reads
+$z$) or a piece of furniture (the bed reads about $0.85$~m less). Update with $\mathbf H_{\text{ToF}}$, $R=0.05^2$, applied
+at the current time (no delay compensation). Gate $6.6$: for $m=1$, $P(\chi^2_1>6.63)=1\,\%$. On rejection the
+measurement is ignored, but $P_{zz}$ is increased by $0.03^2$:
+\begin{lstlisting}
+if d2 > gate:
+    self.P[IZ, IZ] += 0.03 ** 2
+    return False
+\end{lstlisting}
+This is a deliberate leak so that a wrong height cannot lock the sensor out forever. The numbers: to accept a disagreement
+of $0.85$~m one needs $0.85^2/(P_{zz}+0.05^2) < 6.6$, i.e.\ $P_{zz} > 0.107$~m$^2$, that is about $119$ rejections of
+$9\times10^{-4}$, $\approx 12$~s at $10$~Hz (the docstring's figure). Over the bed for a few seconds, nothing changes;
+after a real height error, the sensor wins after $\sim12$~s. While markers are visible, $z$ is also measured by the pose
+update, so the leak is mostly relevant when blind.
+
+\func{update\_imu\_yaw}{(yaw\_imu, sigma=1 deg) -> bool}
+The Tello's IMU heading is precise in the short term but has an arbitrary zero: $\psi_{\text{IMU}} = \psi + b$.
+\emph{First reading after an initialisation} (\code{b\_init} false): $b$ can be anything in $[-\pi,\pi]$, so it is not
+estimated by a linearised update (a $180^\circ$ innovation would be meaningless); it is set directly,
+$b = \operatorname{wrap}(\psi_{\text{IMU}} - \hat\psi)$, its row and column of $\mathbf P$ are zeroed and
+$P_{bb} = P_{\psi\psi} + \sigma^2$. \emph{Afterwards} a normal update with $\mathbf H_{\text{IMU}} = [\ldots,1_\psi,1_b,\ldots]$,
+$h = \operatorname{wrap}(\psi+b)$, innovation wrapped, $R = (1^\circ)^2$, no gate. The update spreads the innovation over
+$\psi$ and $b$ in proportion to their variances and correlations. When markers are in view they pin $\psi$, so the IMU
+readings mostly refine $b$; when they are not, $b$ barely changes ($Q_{bb}=(0.002\Delta t)^2$, a few hundredths of a degree
+per minute) and the IMU holds the heading: this is what lets the drone turn on the spot to look for markers without losing
+its yaw.
+
+\func{sigma\_xy}{() -> float}
+$\sqrt{\max(P_{xx},P_{yy})}$, the horizontal standard deviation (worst axis), used for logs and the replay.
+
+%=====================================================================================================================
+\section[ekf\_node.py: the ROS wrapper]{\file{ekf\_node.py}: the ROS wrapper}
+
+The node owns one \code{DroneEKF} and calls it from its callbacks. All callbacks run in one single-threaded executor
+(\code{rclpy.spin}), so there are no races on the filter. The filter time is the wall clock \code{time.time()}, not the
+message stamps.
+
+\func{quat\_yaw}{(yaw) -> (qx, qy, qz, qw)}
+The quaternion of a pure rotation about $z$: $(0, 0, \sin\frac\psi2, \cos\frac\psi2)$.
+
+\func{EkfNode.\_\_init\_\_}{() -> None}
+Node name \code{tello\_ekf}. Builds the filter from \file{model.py} with ROS parameters to override:
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Parameter & Default & Passed as \\
+\midrule
+\code{K\_x}, \code{K\_y} & \code{M.K\_X}$=0.66$, \code{M.K\_Y}$=0.83$ & per-axis gains \\
+\code{tau\_xy}, \code{K\_z}, \code{tau\_z} & $0.25$, $0.9$, $0.45$ & model \\
+\code{L\_u}, \code{L\_v} & $0.35$, $0.20$ & delays \\
+\code{accel\_noise}, \code{drift\_noise} & $0.6$, $0.01$ & $q_a$, $q_d$ \\
+\code{child\_frame} & \code{base\_link} & TF child \\
+\code{home\_file} & \code{HOME\_FILE} & takeoff pad \\
+\bottomrule
+\end{tabular}
+\end{center}
+\code{K\_xy} is set to \code{M.K\_MEAN} and \code{K\_w} to \code{M.K\_W} (not parameters); \code{yaw\_rate\_noise} and
+\code{history\_s} keep the core defaults. It loads the pad with \code{load\_home} and logs it, creates the four publishers and
+the TF broadcaster, the three subscriptions (queue depths: pose 20, telemetry 10, commands 20), a $30$~Hz timer on
+\code{publish} and a $10$~s timer on \code{report}.
+
+\func{now}{() -> float}
+\code{time.time()}: the single time base of all filter calls.
+
+\func{on\_cmd}{(m: Twist) -> None}
+On each \topic{/tello/rc\_sent} ($20$~Hz): \code{predict(now)} first, so that the old command is applied up to now, then
+\code{add\_command(now, [linear.x, linear.y, linear.z, angular.z])}. The order matters only for bookkeeping, because the
+new command will act $L_u$ later anyway.
+
+\func{on\_pose}{(m: PoseWithCovarianceStamped) -> None}
+Extracts yaw from the quaternion with the standard formula
+$\psi = \operatorname{atan2}(2(q_wq_z+q_xq_y),\ 1-2(q_y^2+q_z^2))$, $\sigma_p = \sqrt{\text{cov}[0]}$ (the $xx$ term, floor
+$10^{-6}$ on the variance), $\sigma_\psi=\sqrt{\text{cov}[35]}$ (the yaw--yaw term of the $6\times6$ matrix), then
+\code{update\_pose(now, ...)}. The image time is taken as $\texttt{now} - L_v$ inside the core; the header stamp of the message
+(which the localizer sets to the image stamp) is ignored. Counts \code{n\_pose} and \code{n\_rej} (every \code{False}, which
+includes the poses buffered during the 3-pose initialisation).
+
+\func{on\_tel}{(m: String) -> None}
+Parses the JSON (ignores malformed messages), then, in this order:
+\begin{enumerate}[nosep]
+\item \emph{pad initialisation}: if a pad is known, it has not been used yet, the drone is not flying and no marker pose has
+  been accepted yet ($n_{\text{pose}}-n_{\text{rej}}=0$), call \code{init\_at(now, home.x, home.y, 0, home.yaw)}, at every
+  telemetry message ($10$~Hz) while on the floor. Re-initialising repeatedly keeps the prior tight while the drone sits still
+  (otherwise the uncertainty would grow on the ground and the prior would be lost by takeoff, comment lines 83--84). Once
+  flying, \code{home\_used = True}: the pad is never used again in this run;
+\item \emph{takeoff edge}: if \code{flying} switched from false to true and the filter is initialised, \code{ekf.takeoff()};
+\item \code{predict(now)};
+\item \emph{distance sensor}: if \code{tof} is a number in $[15, 400]$~cm and the drone flies, \code{update\_height(tof/100)};
+\item \emph{IMU}: if \code{yaw} is a number, \code{update\_imu\_yaw(-radians(yaw))}: the Tello reports clockwise-positive
+  degrees, ROS uses counter-clockwise radians.
+\end{enumerate}
+
+\func{publish}{() -> None}
+Every $1/30$~s, if initialised: \code{predict(now)}, then
+\begin{itemize}[nosep]
+\item \topic{/ekf/pose}: position, \code{quat\_yaw}$(\psi)$, and a $6\times6$ covariance with the $3\times3$ position block of
+  $\mathbf P$, $P_{\psi\psi}$ at $[5,5]$ and a token $10^{-4}$ on roll and pitch $[3,3],[4,4]$;
+\item \topic{/ekf/velocity}: $(v_x,v_y,v_z)$ in \topic{map} (note: a \code{TwistStamped} with \code{frame\_id = map}, not body);
+\item \topic{/ekf/drift}: $(d_x,d_y,0)$;
+\item TF \topic{map}$\to$\code{child\_frame} with the same pose;
+\item every $0.2$~s, append to the path (trimmed to the last 3000 poses, $10$~min) and publish \topic{/ekf/path}.
+\end{itemize}
+All messages share the stamp \code{get\_clock().now()}, i.e.\ the estimate is stamped ``now'', which it is, thanks to the
+delay compensation.
+
+\func{report}{() -> None}
+Every $10$~s: logs $\sigma_{xy}$ in cm, the drift, $b$ in degrees and the counts of poses received and gated.
+
+\func{main}{() -> None}
+Sets the local ROS environment (\code{local\_ros\_env}), spins the node, shuts down cleanly on Ctrl+C. Installed as the
+executable \code{tello\_ekf} and started by \file{real.launch.py}:55.
+
+%=====================================================================================================================
+\section{Who uses the estimate}
+\label{sec:users}
+
+A grep for \topic{/ekf/} over \file{src/} gives the consumers:
+\begin{itemize}
+\item \textbf{The driver's safety chain.} \file{driver.py}:124--128 subscribes to \topic{/ekf/pose} (parameter
+  \code{pose\_topic}), \topic{/ekf/velocity} and \topic{/ekf/drift}. \code{on\_pose} (lines 315--319) passes
+  $x,y,z,\psi$, $\sigma_{xy} = \sqrt{\max(\text{cov}[0],\text{cov}[7])}$ and $\sigma_z = \sqrt{\text{cov}[14]}$ to
+  \code{CommandFilter.on\_pose} (\file{safety.py}:60), which drops the hold target when the estimate jumps by more than
+  $15$~cm or $\sigma_{xy} > 6$~cm. The position hold needs a pose younger than $0.4$~s with $\sigma_{xy}<12$~cm
+  (\code{pose\_valid(0.4, 0.12)}, line 176), takes a new hold target only if $\sigma_{xy}<6$~cm, predicts the position
+  $L_u$ ahead with the EKF velocity and subtracts the EKF drift as a feed-forward (\code{hold\_axis}, lines 150--157):
+  \[ u = \big(v_d - d + k_v(v_d - v)\big)/K + i . \]
+  The flight-zone guard needs $\sigma_{xy}<25$~cm (\code{pose\_valid(0.5, 0.25)}, line 264), otherwise blind mode
+  ($0.15$~m/s max); the height band needs $\sigma_z \le 10$~cm (line 236). This is why an honest $\mathbf P$ matters: the
+  growing covariance is what switches these guards off.
+\item \textbf{The missions.} \code{StepTest.on\_pose} (\file{step\_test.py}:159--170) ignores any pose with
+  $\sigma_{xy} > $ \code{max\_pose\_sigma} $=0.15$~m, ``treated like no pose''. \code{MarkerTour} (and its subclasses
+  \code{GotoMarkers}, \code{Patrol}) and \code{Strike} set \code{POSE\_TOPIC = "/ekf/pose"} (\file{marker\_tour.py}:38,
+  \file{strike.py}:37); \code{MarkerTour} also subscribes to \topic{/ekf/drift} (line 74) and subtracts it from its velocity
+  request (lines 250--251). The identification flight \code{tello\_step\_test} deliberately uses the raw
+  \topic{/aruco/pose} (\file{step\_test.py}:88): identifying the model with an estimate that already contains the model
+  would be circular.
+\item \textbf{Recording.} \file{session\_recorder.py}:60 writes \topic{/ekf/pose} to \code{ekf.csv} ($t,x,y,z,\sigma_{xy}$) next
+  to \code{rc\_sent.csv}, for flight reports and replays.
+\item \textbf{RViz} shows \topic{base\_link} from the EKF TF and \topic{/ekf/path}.
+\end{itemize}
+
+%=====================================================================================================================
+\section[Replaying a flight: ekf\_replay.py]{Replaying a flight: \file{tools/ekf\_replay.py}}
+\label{sec:replay}
+
+Because \file{ekf\_core.py} has no ROS dependency, a recorded flight can be fed through it offline. The tool answers one
+question: \emph{how long can the drone fly without markers?} It hides the marker poses periodically and compares the dead
+reckoning with the hidden poses.
+
+\func{load}{(folder) -> list of (t, kind, value)}
+Reads three CSV files written by \code{tello\_step\_test} / \code{tello\_marker\_tour} sessions:
+\code{poses.csv} ($t,x,y,z,\psi$) as \code{"pose"} events, \code{commands.csv} ($c_x,c_y,c_z,c_w$) as \code{"cmd"},
+\code{telemetry.csv} (\code{tof}, \code{yaw}) as \code{"tel"} (rows that fail to parse are skipped). Merges them sorted by time
+and drops everything earlier than $1$~s before the first command.
+
+\func{replay}{(ev, blackout, every, ekf\_kwargs=None) -> (rows, track)}
+Builds \code{DroneEKF(**ekf\_kwargs)} (default: no arguments) and processes the events in order, mimicking the node:
+\code{cmd} $\to$ \code{predict}, \code{add\_command}; \code{tel} $\to$ \code{predict}, \code{update\_height} if
+$15\le\text{tof}\le400$, \code{update\_imu\_yaw(-radians(yaw))}; \code{pose} $\to$ either an update with fixed
+$\sigma_p = 2$~cm and $\sigma_\psi=1.5^\circ$ (the EKF floors), or, during the last \code{blackout} seconds of each
+\code{every}-second period (and once initialised), \emph{hidden}: the filter is only predicted, and the EKF state at the image
+time ($t - L_v$, looked up in \code{hist}) is compared with the hidden pose. Each hidden pose gives a row (time since the
+blackout began, EKF error, error of the naive ``last known pose'', current \code{sigma\_xy}); every pose gives a track entry
+for the plot.
+
+\func{main}{() -> None}
+Arguments: \code{folder}, \code{--blackout} ($2$~s), \code{--every} ($6$~s), \code{--plot} (PNG path). Prints, per $0.5$~s bin
+of time without markers, the median horizontal error of the EKF, of the last pose, and the median EKF $\sigma$, so one can
+check that $\sigma$ really tracks the error. With \code{--plot}, draws $x(t)$ and $y(t)$: ArUco dots, the EKF line, and the
+hidden poses in red.
+
+%=====================================================================================================================
+\section{Summary of the numbers}
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Quantity & Value \\
+\midrule
+integration step & $\le 20$~ms (Euler) \\
+input delay $L_u$ / measurement delay $L_v$ & $0.35$~s / $0.20$~s \\
+history & $1.5$~s of snapshots, commands kept $\approx 2.85$~s \\
+marker noise floor & $2$~cm, $1.5^\circ$ \\
+marker gate & $\chi^2_4 = 16.3$ ($99.7\,\%$), restart after 8 rejections \\
+ToF noise, gate, leak & $5$~cm, $\chi^2_1=6.6$ ($99\,\%$), $+0.03^2$ per rejection \\
+IMU noise & $1^\circ$, no gate \\
+drift bound, fade & $0.10$~m/s, $\tau=2$~s after $1$~s without markers \\
+3-pose start & spread $\le15$~cm, yaw $\le10^\circ$, within $1$~s \\
+publication & $30$~Hz pose/velocity/drift/TF, path every $0.2$~s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%=====================================================================================================================
+\section{Code review notes}
+
+\begin{review}
+\begin{enumerate}[leftmargin=*]
+\item \textcolor{OliveGreen}{\textbf{[Fixed in v1.1, see Appendix~\ref{app:review}.]}} \textbf{ToF and IMU updates are erased by the next marker pose.} \file{ekf\_core.py}:214--217 rewinds to the snapshot
+  at $t_{\text{recv}}-L_v$ and re-propagates with the model only. \code{update\_height} and \code{update\_imu\_yaw}
+  (lines 232, 247) modify only the current state, not the history, so any of them that happened in the last $0.2$~s is
+  discarded by the rewind. With poses arriving faster than every $0.2$~s (the normal case with markers in view) these
+  updates have essentially no lasting effect. Verified offline: with $30$~Hz poses at $z=1.80$ and ToF readings at $1.90$,
+  the final estimate is exactly $1.800$; with $2$~Hz poses it is $1.885$. Fix: store measurements in the history and
+  re-apply them during re-propagation, or apply ToF/IMU with their own delay into the past.
+\item \textbf{Image stamp ignored.} \file{ekf\_node.py}:73 passes \code{self.now()} and the core assumes the image is exactly
+  $L_v$ old (\file{ekf\_core.py}:191), although \file{aruco\_localizer.py}:276 stamps \topic{/aruco/pose} with the image
+  time. Any variation of the video/detection latency (Wi-Fi, CPU load) becomes a timing error. Using the header stamp
+  (same clock) would make the delay compensation exact.
+\item \textbf{Replay uses the old model.} \file{tools/ekf\_replay.py}:40 builds \code{DroneEKF()} with the constructor
+  defaults (\file{ekf\_core.py}:38: $K=1.15$, $\tau=0.55$, $L_u=0.30$), not the caged-drone values of \file{model.py}
+  ($0.66/0.83$, $0.25$, $0.35$) that the node uses. Replay results do not describe the flying filter. Fix: default
+  \code{ekf\_kwargs} from \file{model.py} as in \file{ekf\_node.py}:34--37, or move those defaults into the core.
+\item \textbf{Replay of a tour session feeds the EKF its own output.} \file{tools/ekf\_replay.py}:24 reads \code{poses.csv}
+  as marker poses, but \code{MarkerTour} records whatever arrives on its \code{POSE\_TOPIC}, which is \topic{/ekf/pose}
+  (\file{marker\_tour.py}:38, written at \file{step\_test.py}:170). Only \code{tello\_step\_test} sessions contain raw ArUco
+  poses, although the replay docstring (line 2) also names marker-tour sessions.
+\item \textbf{Replay input is the request, not the command sent.} \file{tools/ekf\_replay.py}:26 uses \code{commands.csv},
+  the mission's request (\file{step\_test.py}:270), whereas the live EKF uses \topic{/tello/rc\_sent}, recorded in
+  \code{sent.csv} (\file{step\_test.py}:151). Hold corrections and guards are therefore missing in the replay. Also, the
+  replay applies \code{update\_height} on the ground (\file{tools/ekf\_replay.py}:52, no \code{flying} test, unlike
+  \file{ekf\_node.py}:93) and never calls \code{takeoff()} nor \code{init\_at}.
+\item \textbf{$\mathbf Q$ depends on the step size.} \file{ekf\_core.py}:98--101 use $(q\Delta t)^2$: the variance added per
+  second is $q^2\Delta t_{\text{step}}$, so it changes with the step length (a filter run with $0.1$~s steps would add $5\times$
+  more). The drift term (line 103, $q_d^2\Delta t$) is the consistent random-walk form. Harmless today because steps are
+  almost always $20$~ms, but the tuning of \code{accel\_noise} is tied to that number.
+\item \textbf{No Joseph form.} \file{ekf\_core.py}:140 uses $(\mathbf I-\mathbf K\mathbf H)\mathbf P$, which is only optimal
+  for the exact gain and can lose positive definiteness numerically; the symmetrisation does not fix that. With
+  $\mathbf P$ entries ranging from $10^3$ (uninitialised) to $10^{-6}$, the Joseph form is cheap insurance
+  ($10\times10$ matrices).
+\item \textbf{Cross-covariance of $b$ zeroed at initialisation.} \file{ekf\_core.py}:240 sets the row and column of $b$
+  to zero, although $b = \psi_{\text{IMU}} - \hat\psi$ implies $\operatorname{cov}(b,\psi) = -P_{\psi\psi}$. The filter
+  therefore believes $\psi$ and $b$ are independent, and the first IMU updates move $\psi$ more than they should.
+  Setting \code{P[IB, IYAW] = P[IYAW, IB] = -P[IYAW, IYAW]} (and the other cross terms with the opposite sign of
+  $\psi$'s) would be exact.
+\item \textbf{Fast restart.} \file{ekf\_core.py}:205: 8 consecutive rejections ($\approx0.27$~s at $30$~fps) reset the filter.
+  A short burst of a wrong marker match can therefore throw away a good estimate; a time-based criterion or requiring the
+  rejected poses to be mutually consistent would be more robust.
+\item \textbf{Same delay for yaw as for translation.} \file{ekf\_core.py}:113 delays all four inputs by $L_u = 0.35$~s,
+  while \file{model.py}:13 reports for yaw ``$L$ $0.20$~s, $\tau\approx0$'' (and for the other axes $L$ is the total
+  command $\to$ pose delay). If that $0.20$~s is the total, the yaw command acts in the model about $0.35$~s too late.
+  Worth checking against the identification data.
+\item \textbf{Stale comment and unused code.} \file{ekf\_core.py}:51 documents \code{hist} as \code{(t, s, P, u\_applied)};
+  the code stores \code{(t, s, P)} (line 127). \code{init\_buf} and \code{b\_init} are created lazily with
+  \code{getattr} (lines 170, 238) instead of in \code{\_\_init\_\_}, and \code{init\_buf} keeps growing (up to $\sim30$
+  entries per second) while only its last three are tested. Minor.
+\item \textbf{Parameters not exposed.} \file{ekf\_node.py}:34--37 exposes \code{accel\_noise} and \code{drift\_noise}
+  but not \code{yaw\_rate\_noise}, \code{history\_s}, the gates or the measurement noises, so tuning those needs a code
+  change.
+\end{enumerate}
+\end{review}
+\fussy

@@ -1,0 +1,36 @@
+% Shared preamble of the Tello Balloon Hunter book. Chapters use ONLY these packages and macros.
+\usepackage[a4paper,margin=2.3cm]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs,longtable,tabularx,array}
+\usepackage{graphicx}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{tcolorbox}
+\tcbuselibrary{breakable,skins}
+\usepackage[hidelinks]{hyperref}
+\setcounter{secnumdepth}{2}
+\setcounter{tocdepth}{1}
+\setlength{\parskip}{0.45em}\setlength{\parindent}{0pt}
+\lstset{language=Python,basicstyle=\ttfamily\small,keywordstyle=\color{NavyBlue}\bfseries,
+  commentstyle=\color{OliveGreen},stringstyle=\color{BrickRed},breaklines=true,columns=fullflexible,
+  frame=single,rulecolor=\color{black!20},backgroundcolor=\color{black!3},showstringspaces=false,
+  literate={-}{-}1 {→}{$\rightarrow$}2 {×}{$\times$}2 {°}{$^\circ$}1 {±}{$\pm$}2 {≈}{$\approx$}2 {≥}{$\geq$}2 {≤}{$\leq$}2}
+% inline code: \code{some\_name} (escape _ # % & $ { } as usual in LaTeX)
+\newcommand{\code}[1]{\texttt{\small #1}}
+% a file: \file{src/tello\_driver/tello\_driver/driver.py}
+\newcommand{\file}[1]{\texttt{\small\color{NavyBlue}#1}}
+% a ROS topic / service / frame
+\newcommand{\topic}[1]{\texttt{\small\color{Plum}#1}}
+% one documented function or method:  \func{name}{(arg1, arg2) -> result}  then a paragraph of text
+\newcommand{\func}[2]{\par\medskip\noindent{\large\texttt{\textbf{#1}}}\texttt{\small\color{black!60}#2}\par\nopagebreak\smallskip}
+% boxes
+\newtcolorbox{intuition}{breakable,colback=blue!4,colframe=blue!40!black,title=Intuition,fonttitle=\bfseries}
+\newtcolorbox{review}{breakable,colback=orange!6,colframe=orange!60!black,title=Code review,fonttitle=\bfseries}
+\newtcolorbox{keypoint}{breakable,colback=green!5,colframe=green!40!black,title=Key point,fonttitle=\bfseries}
+% running heads without \MakeUppercase (it broke \file / \code colour names in titles)
+\makeatletter
+\renewcommand{\chaptermark}[1]{\markboth{\if@mainmatter\chaptername\ \thechapter.\ \fi #1}{}}
+\renewcommand{\sectionmark}[1]{\markright{\thesection.\ #1}}
+\makeatother
+\pdfstringdefDisableCommands{\def\code#1{#1}\def\file#1{#1}\def\topic#1{#1}}

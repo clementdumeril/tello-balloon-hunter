@@ -1,0 +1,880 @@
+\chapter{System identification, recording and flight analysis}\label{ch:ident}
+\sloppy
+
+The EKF, the position hold of the driver, the zone guard, the missions and the fake drone of the simulator all
+rely on the same few numbers: how fast the Tello really goes for a given velocity command, how quickly it gets
+there, and how late. This chapter explains where those numbers come from and how the project checks, after
+every flight, that the whole chain still behaves. Six programs are involved:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Program & Role & Main output \\
+\midrule
+\file{tello\_driver/step\_test.py} & identification / validation flight & \file{step\_<time>/*.csv} \\
+\file{tello\_driver/step\_fit.py} & fits $\tau \dot v = K u(t-L) - v$ per axis & \file{model.yaml}, plots \\
+\file{tello\_driver/session\_recorder.py} & records every flight (ROS node) & \file{sessions/<time>/} \\
+\file{tools/flight\_report.py} & after-flight metrics and verdicts & \file{report.txt}, \file{report.png} \\
+\file{tools/calibrate\_camera.py} & checkerboard calibration & \file{tello\_camera.yaml} \\
+\file{tools/make\_print\_sheets.py} & printable markers and checkerboard & \file{docs/print/*.pdf} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The identified constants are copied by hand into \file{tello\_driver/model.py}, ``the ONE place where the
+model lives''. Section~\ref{sec:ident-use} shows every place that reads them.
+
+% =====================================================================================================
+\section{The model being identified}\label{sec:ident-model}
+
+The Tello hides its motors and its own flight controller: the only input we have is the \code{rc} velocity
+command (sent at 20\,Hz by the driver), and the only accurate output is the ArUco pose. So the project identifies
+the \emph{closed loop} ``Tello + its own controller'', from the command $u$ (m/s or rad/s) to the velocity $v$
+actually reached, per axis (forward $x$, left $y$, up $z$, yaw), as a first order system with a pure delay:
+$$
+\tau \frac{dv}{dt}(t) = K\,u(t-L) - v(t), \qquad p(t) = p(0) + \int_0^t v(s)\,ds .
+$$
+\begin{itemize}[nosep]
+\item $K$ (dimensionless): steady-state ratio real speed / commanded speed;
+\item $\tau$ (s): time constant of the velocity response;
+\item $L$ (s): total delay from the command to the \emph{marker pose}, i.e.\ $L = L_u + L_v$ with $L_u$ the
+command side (Wi-Fi, flight controller) and $L_v$ the video side (image transport and detection).
+\end{itemize}
+
+\paragraph{Step response.} For a unit step of $u$ at $t=0$ and $v(0)=0$, the velocity is
+$v(t) = K(1-e^{-(t-L)/\tau})$ for $t>L$ and the displacement is
+$$
+p(t) - p(0) = K\Big[(t-L) - \tau\big(1 - e^{-(t-L)/\tau}\big)\Big] \xrightarrow[t \gg L+\tau]{} K\,\big(t - (L+\tau)\big).
+$$
+After the transient the position is a ramp of slope $K$ that is \emph{late by exactly $L+\tau$}.
+
+\begin{intuition}
+A delay $L$ and a lag $\tau$ look alike in a position trace: both make the drone ``arrive late''. Only the
+curvature of the first few tenths of a second distinguishes them, and that part is buried in the
+$\sim$1--2\,cm noise of the ArUco pose. Hence the fit determines $L+\tau$ well and $L$, $\tau$ separately
+poorly: in the $(\tau, L)$ plane the cost has a long valley along the line $L+\tau = \text{const}$.
+This is why \file{step\_fit.py} draws \file{cost\_map.png} and reports the spread of $L+\tau$, and why
+\file{model.py} chose $\tau_{xy}=0.25$\,s ``to keep the measured $L+\tau$''.
+\end{intuition}
+
+\paragraph{The excitation: doublets.} A doublet of amplitude $A$ and half-duration $T$ is $u=+A$ during $T$,
+then $u=-A$ during $T$. Ideally the drone goes $\approx KAT$ away and comes back, so it stays in a small box,
+and the two edges give two transients per test. Several $(A,T)$ pairs are used because, as the source notes
+(Nov 13), two identical doublets ``could not separate the delay $L$ from the time constant $\tau$''.
+
+\paragraph{Three design decisions} recur in the code, each motivated by a real failure:
+\begin{enumerate}[nosep]
+\item \textbf{Input = the command really sent} (\topic{/tello/rc\_sent}, after the driver's guards), not the
+command asked. On Nov 13 the height-band guard cut an up pulse from 0.30 to 0.08\,m/s and the fit on the
+requested command found $K_z = 0.43$.
+\item \textbf{Output = raw ArUco position} (\topic{/aruco/pose}), not the EKF (which itself uses the model
+being identified: circular) and not a velocity (differentiating a noisy pose amplifies the noise).
+\item \textbf{Per-doublet nuisance terms} $c_j + d_j(t-t_j)$: an offset and a linear drift absorb where the
+doublet starts and the Tello's slow drift ($\sim$10\,cm/s on its own, Nov 10).
+\end{enumerate}
+
+% =====================================================================================================
+\section{The identification flight: \texorpdfstring{\texttt{step\_test.py}}{step\_test.py}}\label{sec:steptest}
+
+Run with \code{ros2 run tello\_driver tello\_step\_test} while \code{real.launch.py} runs in another terminal
+(the driver, localizer and EKF must be up). The parameter \code{schedule:=valid} flies a shorter
+\emph{validation} flight with different doublets. The class \code{StepTest} is also the base class of the
+missions (\code{MarkerTour} in \file{marker\_tour.py} inherits it), which explains a few hooks
+(\code{fence}, \code{MOVE\_TO\_ZONE\_CENTRE}, \code{POSE\_TOPIC}, \code{PREFIX}) that the identification itself
+does not use.
+
+\subsection{Module level}
+
+\code{RATE = 20.0} Hz is the control loop rate (the driver's rate too). \code{SCHEDULES} holds the
+$(A, T)$ pairs, in m/s (rad/s for yaw) and seconds:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & \code{ident} & \code{valid} \\
+\midrule
+x, y & (0.15,1.8) (0.25,1.2) (0.35,0.8) & (0.20,1.0) (0.30,1.5) \\
+ & (0.25,1.8) (0.35,1.2) (0.15,0.8) & (0.30,0.6) (0.20,1.5) \\
+z & (0.30,0.4) (0.25,0.5) (0.30,0.3) (0.25,0.4) & (0.28,0.4) (0.30,0.35) \\
+yaw & (0.3,1.2) (0.5,1.0) (0.7,0.6) (0.5,0.6) & (0.4,0.8) (0.6,1.0) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+With the default \code{axes = x,y,z,yaw}, the identification flight has $6+6+4+4 = 20$ doublets. Each lasts
+$2 + 2T + 3$\,s (hover, pulses, hover), i.e.\ $\sum (5 + 2T) = 45.2 + 45.2 + 23.2 + 26.8 = 140.4$\,s, plus a
+re-centring of up to 7\,s before each: the ``$\sim$3.5\,min'' of the docstring. The vertical doublets are short
+but strong: $AT \le 0.125$\,m so that the band guard (band $1.70$--$2.00$\,m) does not cut them, and
+$A \ge 0.25$\,m/s because the Tello ``did not react at all to 8--12 rc points up/down''.
+
+\func{Abort}{(Exception)}
+Raised for every reason to stop the test (key pressed, low battery, out of the box, \dots). Caught in
+\code{run()}, which then lands.
+
+\func{Lost}{(Exception)}
+Raised when the markers are lost for more than 1\,s \emph{during a doublet}: the doublet is abandoned, its
+segment number is marked as failed, and it is repeated (up to 3 attempts).
+
+\func{wrap}{(a) -> float}
+Wraps an angle into $(-\pi, \pi]$ with $\operatorname{atan2}(\sin a, \cos a)$.
+
+\func{driver\_zone\_file}{(node, timeout=5.0) -> str}
+Asks the running driver which flight-zone file it enforces, so that the test and the driver agree. It creates a
+client of the standard parameter service of the driver node, \topic{/tello\_driver/get\_parameters}, of type
+\code{rcl\_interfaces/srv/GetParameters}. It waits up to 5\,s for it, requests the single parameter
+\code{flight\_zone\_file}, spins until the future completes (5\,s again), and returns
+\code{values[0].string\_value}. Any failure (no driver, timeout, exception) returns \code{''}; the client is
+destroyed in a \code{finally}.
+
+\subsection{Construction}
+
+\func{StepTest.\_\_init\_\_}{(self)}
+Declares the parameters and opens the log files. In order:
+\begin{itemize}[nosep]
+\item \code{schedule} (\code{ident}/\code{valid}, anything else exits), \code{axes} (comma-separated list),
+\code{box = 0.8} m (half-size of the horizontal safety box around the start point), \code{z\_min = 0.4},
+\code{z\_max = 2.4} m, \code{lost\_timeout = 15} s (blind for that long: land).
+\item \textbf{Flight zone.} \code{band} defaults to \code{True}. The zone file is, by priority: the parameter
+\code{flight\_zone\_file}; else the driver's, via \code{driver\_zone\_file()}; else
+\file{\$TELLO\_REPO/config/flight\_zone\_band.yaml} (or \file{flight\_zone.yaml} when \code{band:=false}). It is
+loaded with \code{zone.load\_zone()} (rectangle, margin, free-space grid). In band mode a missing zone is fatal;
+the band $(z_{\min}, z_{\max}) = (1.70, 2.00)$ is read from it and the abort limits become the band
+$\pm 0.3$\,m, i.e.\ $[1.40, 2.30]$\,m.
+\item \code{min\_battery}: 50\,\% for the identification (\code{PREFIX == "step"}), 30\,\% for subclasses
+(``at 32\,\% the Tello only climbed to 1.28\,m'').
+\item Output folder \file{\textasciitilde/tello\_ws/sessions/step\_YYYYmmdd\_HHMMSS} (\code{stepval\_\dots}
+for a validation flight).
+\item Publisher on \topic{/tello/cmd\_vel\_safe}, \code{Trigger} clients for \topic{/tello\_driver/takeoff}
+and \topic{/tello\_driver/land}, subscriptions to the pose (\topic{/aruco/pose} by default, parameter \code{pose\_topic}),
+\topic{/tello/telemetry}, \topic{/tello/camera\_info} (only used as a ``video is alive'' heartbeat) and
+\topic{/tello/rc\_sent} (written straight to \file{sent.csv} by a lambda).
+\end{itemize}
+
+The four CSV files of the step folder:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+File & Columns & Written by \\
+\midrule
+\file{poses.csv} & \code{t, x, y, z, yaw, t\_image} (epoch s, m, rad) & \code{on\_pose} \\
+\file{commands.csv} & \code{t, segment, axis, u, cx, cy, cz, cw} & \code{send} \\
+\file{sent.csv} & \code{t, cx, cy, cz, cw} (what the driver really sent) & \topic{/tello/rc\_sent} lambda \\
+\file{telemetry.csv} & every key of the telemetry JSON, plus \code{t} & \code{on\_tel} \\
+\file{failed\_segments.txt} & segment numbers abandoned (markers lost) & \code{close} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+All times \code{t} are \code{time.time()} at \emph{reception}; \code{t\_image} is the header stamp of the pose
+(time the image was taken). \code{segment} is $-1$ outside the doublets.
+
+\subsection{Inputs}
+
+\func{on\_pose}{(self, m)}
+Rejects the pose when $\sqrt{\max(\Sigma_{xx}, \Sigma_{yy})} > 0.15$\,m (\code{max\_pose\_sigma}); this matters
+for the missions that subscribe to the EKF, whose covariance grows without markers. Extracts the yaw from the
+quaternion, $\psi = \operatorname{atan2}(2(q_wq_z + q_xq_y),\ 1 - 2(q_y^2+q_z^2))$, stores
+\code{self.pose = (t\_received, x, y, z, yaw)}, updates the offset ArUco yaw minus IMU yaw
+(\code{yaw\_offset}, used when the markers disappear) and writes one row of \file{poses.csv}.
+
+\func{on\_tel}{(self, m)}
+Parses the telemetry JSON (ignores malformed messages), keeps it in \code{self.tel} with its reception time, and
+appends it to \file{telemetry.csv}; the CSV header is the key set of the first message.
+
+\func{on\_video}{(self, m)}
+Records the time of the last \code{camera\_info} (one per frame): if it is older than 1\,s the Wi-Fi video is
+considered lost.
+
+\func{imu\_yaw}{(self) -> float or None}
+The Tello reports \code{yaw} in clockwise-positive degrees; the map convention is counter-clockwise radians, so
+it returns $-\text{yaw}\cdot\pi/180$ (checked on 4 sessions: slope $-0.93$ to $-1.08$). \code{None} if the
+telemetry is older than 0.5\,s.
+
+\func{yaw\_estimate}{(self) -> float or None}
+The ArUco yaw when the pose is younger than 0.5\,s, else $\operatorname{wrap}(\psi_{\text{IMU}} + \text{offset})$.
+
+\func{in\_air}{(self) -> bool}
+\code{flying} in the telemetry, or a height \code{h} $\ge$ 20\,cm.
+
+\func{pose\_age}{(self) -> float}
+Seconds since the last accepted pose ($\infty$ if none).
+
+\subsection{Helpers and the built-in safety}
+
+\func{say}{(self, text)}
+Prints with carriage returns around (the terminal is in cbreak mode).
+
+\func{spin}{(self, seconds)}
+\code{spin\_once} with a 20\,ms timeout until \code{seconds} have passed: processes callbacks while waiting.
+
+\func{call}{(self, name, timeout=5.0) -> Trigger.Response}
+Calls \topic{/tello\_driver/takeoff} or \topic{/tello\_driver/land}; raises \code{Abort} if the service does not appear within
+2\,s.
+
+\func{check\_keys}{(self)}
+Non-blocking \code{read\_key(0)} (from \file{teleop.py}); any key returns a value and raises
+\code{Abort("key pressed")}.
+
+\func{safety}{(self)}
+Called at every control tick, independently of the driver's own safety chain (defence in depth). It raises
+\code{Abort} when:
+\begin{enumerate}[nosep]
+\item a key is pressed;
+\item the battery is below 20\,\%;
+\item with a fresh pose ($<0.5$\,s) and a start point: the free-space clearance (from the grid) is below
+\code{margin} $- 0.2$\,m (with the band zone's margin 0.25\,m: closer than 5\,cm to a scanned obstacle); or,
+without grid, the drone is more than 0.2\,m outside the zone rectangle;
+\item the drone leaves the \code{fence} rectangle $\pm$ \code{fence\_tol} (missions only), or else the box
+$|x - x_0| > 0.8$ or $|y - y_0| > 0.8$\,m around the start point $p_0$;
+\item the height leaves $[z_{\min}, z_{\max}]$ \emph{after having once been inside} (\code{z\_reached}): a weak
+climb must not abort the test on the way up;
+\item no pose for more than \code{lost\_timeout} (15\,s).
+\end{enumerate}
+
+\func{send}{(self, cx=0, cy=0, cz=0, cw=0, segment=-1, axis="", u=0, blind=False)}
+Publishes a \code{Twist} on \topic{/tello/cmd\_vel\_safe} (body frame: \code{linear.x} forward, \code{linear.y}
+left, \code{linear.z} up, \code{angular.z} yaw rate) and logs it in \file{commands.csv}. If the pose is older
+than 0.7\,s and \code{blind} is false, everything (including the logged \code{u}) is zeroed: the drone hovers
+rather than continuing a test blind.
+
+\func{search\_heading}{(self, base\_yaw)}
+Markers out of view: yaw-only search (the driver blocks horizontal motion without a pose anyway). For a loss of
+$\ell$ seconds the target heading is
+$\psi^\star = \psi_0 + 40^\circ \sin\big(2\pi(\ell-3)/6\big)$ once $\ell>3$\,s (a $\pm40^\circ$ sweep of period
+6\,s), and the command is $\omega = \operatorname{clip}(0.9\,\operatorname{wrap}(\psi^\star - \hat\psi), \pm 0.5)$\,rad/s
+sent with \code{blind=True}, $\hat\psi$ from \code{yaw\_estimate()}.
+
+\func{search\_until\_found}{(self, base\_yaw, timeout=None) -> bool}
+Loops \code{safety()} + \code{search\_heading()} at 20\,Hz until a pose younger than 0.3\,s arrives (\code{True})
+or the optional timeout expires (\code{False}). The overall limit is the 15\,s \code{lost\_timeout} of
+\code{safety()}.
+
+\func{run}{(self, seconds, fn, restart\_on\_loss=False, search\_on\_loss=True)}
+The control loop: for \code{seconds}, at 20\,Hz on a fixed schedule (\code{nxt += 1/RATE}, spinning in the
+remaining time), call \code{safety()} then \code{fn()}; \code{fn()} returning \code{False} ends the loop early.
+If the pose is older than 1\,s (and a start point exists): during a doublet (\code{restart\_on\_loss}) raise
+\code{Lost}; otherwise search on the spot and resume.
+
+\subsection{Flight phases}
+
+\func{recentre}{(self, timeout=6.0, target=None)}
+Proportional return to $p_0$ (or \code{target}) in position and heading. With the world errors
+$e_x, e_y, e_z, e_\psi$ and the current yaw $\psi$, the horizontal error is rotated into the body frame,
+$$
+\begin{bmatrix} b_x \\ b_y \end{bmatrix} =
+\begin{bmatrix} \cos\psi & \sin\psi \\ -\sin\psi & \cos\psi \end{bmatrix}
+\begin{bmatrix} e_x \\ e_y \end{bmatrix},
+$$
+and the command is $(\operatorname{clip}(0.6b_x, 0.25), \operatorname{clip}(0.6b_y, 0.25),
+\operatorname{clip}(0.6e_z, 0.25), \operatorname{clip}(0.8e_\psi, 0.4))$. It stops when
+$\lVert e_{xy}\rVert < 8$\,cm, $|e_z|<8$\,cm and $|e_\psi|<5^\circ$, then sends zero for 1\,s.
+
+\func{return\_home}{(self)}
+After the tests: flies back above the takeoff pad of \file{config/home.yaml} at the current height (timeout
+15\,s), so that the landing ends on it. Falls back to \code{recentre()} if the pad is unknown, the pose is
+stale, or the pad's clearance in the free-space grid is below the margin.
+
+\func{hold\_cmd}{(self) -> dict}
+The ``other axes hold the position'' command used during the doublets: same structure as \code{recentre}
+toward $p_0$ with gains 0.6 (position) and 0.8 (yaw) but tighter limits (0.2\,m/s, 0.3\,rad/s), and zero
+without a fresh pose. Needed because the Tello drifts by itself (37\,cm in 4\,s of ``hover'' on Nov 10).
+
+\func{doublet}{(self, segment, axis, sign, amp, dur)}
+The core of the experiment. Four phases run through \code{run(\dots, restart\_on\_loss=True)}:
+\begin{lstlisting}
+for u, d in ((None, 2.0), (sign * amp, dur), (-sign * amp, dur), (None, 3.0)):
+    self.run(d, lambda u=u: cmd(u), restart_on_loss=True)
+\end{lstlisting}
+At each tick \code{cmd(u)} takes \code{hold\_cmd()} for all axes and overrides the tested one with $u$ when it is
+not \code{None}: during the pulses the tested axis is \emph{open loop}, during the two hovers it is held like the
+others. The logged \code{u} is the value of the tested axis in both cases, with the \code{segment} number and the
+axis. (Note the default argument \code{u=u}: it freezes the loop variable inside the lambda.)
+
+\func{wait\_ready}{(self)}
+Waits up to 10\,s for telemetry, then checks: no other publisher on \topic{/tello/cmd\_vel\_safe} (via
+\code{get\_publishers\_info\_by\_topic}: a running teleop would mix its commands into the test), video alive
+(a \code{camera\_info} less than 1\,s old), battery $\ge$ \code{min\_battery}. Each failure is an \code{Abort}.
+
+\func{main}{(self)}
+\code{prepare()} then \code{run\_tests()}.
+
+\func{prepare}{(self)}
+\begin{enumerate}[nosep]
+\item \code{wait\_ready()}. If on the ground: wait for ENTER (any other key cancels), call takeoff, then wait up
+to 25\,s until the telemetry says flying and not \code{busy} (the driver takes off, then climbs to the band
+itself).
+\item \textbf{Start point}: collect up to 15 poses younger than 0.2\,s (within 30\,s). If no marker is seen after
+2\,s, turn on the spot at 0.5\,rad/s (\code{blind}) until some appear. Fewer than 5 samples: abort. $p_0$ is the
+per-coordinate \emph{median} of the samples (robust to a wrong pose).
+\item \textbf{Move to the centre} (\code{MOVE\_TO\_ZONE\_CENTRE}): the target is the middle of the zone rectangle,
+$((x_{\min}+x_{\max})/2, (y_{\min}+y_{\max})/2) = (0.04, 1.56)$\,m for the band zone, at the middle of the band
+(1.85\,m), via \code{recentre(timeout=12)}. Then $p_0$ becomes the reached pose (with $z_0 = 1.85$).
+\item Height check: $p_0$ inside the abort limits (band mode), or 0.3\,m inside them otherwise.
+\end{enumerate}
+
+\func{run\_tests}{(self)}
+Builds the plan \code{[(axis, A, T)]} from the schedule, axis by axis. The sign alternates per axis
+(+ for the 1st, 3rd, \dots\ doublet of an axis, $-$ otherwise) so that both directions are excited. For each
+doublet, up to 3 attempts: \code{recentre()}, then \code{doublet()}; on \code{Lost} the segment number goes to
+\code{failed\_segments}, a new number is used for the retry, and the drone searches for the markers. Segment
+numbers are therefore unique and \file{step\_fit.py} can simply skip the failed ones. Ends with
+\code{return\_home()}.
+
+\func{close}{(self)}
+Closes the four CSV files and writes \file{failed\_segments.txt} (space-separated numbers).
+
+\subsection{Entry points}
+
+\func{main}{() -> None}
+\code{run(StepTest, fit\_after=True)}.
+
+\func{run}{(cls, fit\_after=False)}
+Shared by the step test and the missions. Forces local-only DDS discovery
+(\code{ROS\_AUTOMATIC\_DISCOVERY\_RANGE=LOCALHOST}, \code{local\_ros\_env()}), initialises rclpy with
+\code{SignalHandlerOptions.NO} so that Ctrl+C raises \code{KeyboardInterrupt} in Python instead of shutting
+rclpy down (the node must still be able to call \emph{land}), prints paragraphs 3--4 of the module docstring,
+puts the terminal in cbreak mode, and runs \code{node.main()}. Whatever happens (\code{Abort}, Ctrl+C, normal end)
+the \code{finally} publishes a zero \code{Twist}, calls land if \code{in\_air()}, restores the terminal and closes
+the files. Only after a \emph{successful} run with \code{fit\_after}: an identification flight is fitted at once
+(\code{step\_fit.fit}), a validation flight is validated against the latest earlier identification
+(\code{step\_fit.validate}).
+
+\begin{keypoint}
+The test has three safety layers: (1) the driver's chain (\topic{/tello/cmd\_vel\_safe} is filtered: hold, ceiling,
+band, zone, wall), whose output is exactly what \file{sent.csv} records; (2) the test's own \code{safety()} with
+its box, height limits and blind timeout; (3) any key or Ctrl+C lands. The driver's guards may modify a pulse,
+which is why the fit uses \file{sent.csv}.
+\end{keypoint}
+
+% =====================================================================================================
+\section{Fitting the model: \texorpdfstring{\texttt{step\_fit.py}}{step\_fit.py}}\label{sec:stepfit}
+
+\code{ros2 run tello\_driver tello\_step\_fit [folder]} fits the latest (or the given) \file{step\_*} folder;
+\code{--validate <ident> <valid>} simulates an identified model on another flight. Module constants: the axes
+\code{x, y, z, yaw} and their column in \file{sent.csv} (\code{cx, cy, cz, cw}), the simulation step
+$\Delta = $ \code{DT} $= 0.01$\,s, the search grids
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+grid & $\tau$ (s) & $L$ (s) \\
+\midrule
+fine & $0.05:0.025:1.5$ (59 values) & $0:0.01:0.9$ (91 values) \\
+coarse (leave-one-out) & $0.05:0.05:1.5$ (30 values) & $0:0.02:0.9$ (46 values) \\
+\bottomrule
+\end{tabular}
+\end{center}
+and \code{MODEL\_IN\_USE}, the reference model the validation compares with (see the review).
+
+\subsection{Data}
+
+\func{rows}{(path) -> list[dict]}
+\code{csv.DictReader} rows, or \code{[]} if the file does not exist.
+
+\func{load}{(folder) -> (segs, poses, has\_sent)}
+Reads \file{poses.csv} into an array $[t, x, y, z, \psi]$; reads \file{commands.csv} and groups the rows by
+\code{segment}, skipping $-1$ and the failed segments, into \code{segs[sid] = \{axis, t, u\}}. If
+\file{sent.csv} exists, the asked \code{u} is kept as \code{u\_asked} and replaced by the \emph{really sent}
+command on the segment's axis, by zero-order hold: for each command time $t_k$, the last \file{sent.csv} row with
+$t \le t_k$ (\code{searchsorted(\dots, side="right") - 1}). \code{has\_sent} tells whether this was possible (older
+flights had no \file{sent.csv}).
+
+\func{measured}{(seg, poses) -> (t, y) or (None, None)}
+The output signal of one doublet: the pose samples between the first and last command of the segment (at least
+10, else \code{None}). The reference heading $\psi_0$ is the median yaw over the first second (the hover), and the
+position is projected on the \emph{body axis at the start}:
+$$
+y_x = x\cos\psi_0 + y\sin\psi_0, \qquad y_y = -x\sin\psi_0 + y\cos\psi_0, \qquad y_z = z, \qquad y_\psi = \operatorname{unwrap}(\psi).
+$$
+Using a fixed axis is valid because the other axes are held (the yaw hold keeps $\psi \approx \psi_0$).
+
+\func{response}{(t\_cmd, u, t\_eval, tau, L) -> array}
+Simulates the position for $K = 1$, $g_{\tau,L}(t)$, sampled at the pose times. On a uniform grid
+$t_k = t_0 + k\Delta$ starting at the first command:
+\begin{enumerate}[nosep]
+\item delayed input by zero-order hold: $\tilde u_k = u(t_k - L)$ (last command at or before $t_k-L$; $0$ before
+the first command);
+\item forward-Euler discretisation of $\tau\dot v = \tilde u - v$ with $a = \Delta/\tau$:
+$$
+v_k = (1-a)\,v_{k-1} + a\,\tilde u_{k-1}, \qquad v_0 = 0,
+$$
+implemented as the IIR filter \code{lfilter([0, a], [1, -(1-a)], ug)} (transfer function $a z^{-1}/(1-(1-a)z^{-1})$),
+with a pure-Python loop if SciPy is missing;
+\item position by rectangle integration $p_0 = 0$, $p_k = \Delta\sum_{i<k} v_i$, then linear interpolation at
+\code{t\_eval}.
+\end{enumerate}
+The scheme is stable for $a<1$, i.e.\ always on the grid ($\tau \ge 0.05 > \Delta$).
+
+\subsection{Least squares and the grid search}
+
+For an axis with doublets $j = 1..n$, samples $(t_{ji}, y_{ji})$ and simulated responses $g_{ji} = g_{\tau,L}(t_{ji})$,
+the model is
+$$
+y_{ji} \approx K\,g_{ji} + c_j + d_j\,(t_{ji} - t_{j1}).
+$$
+For \emph{fixed} $(\tau, L)$ it is linear in $\theta = (K, c_1, d_1, \dots, c_n, d_n)$: one shared gain, and one
+offset and drift per doublet. Stacking all samples, $A\theta \approx b$ with
+$$
+A = \begin{bmatrix}
+\mathbf g_1 & \mathbf 1 & \mathbf t_1 - t_{11} & & & \\
+\mathbf g_2 & & & \mathbf 1 & \mathbf t_2 - t_{21} & \\
+\vdots & & & & & \ddots
+\end{bmatrix},\qquad b = \begin{bmatrix}\mathbf y_1\\ \mathbf y_2\\ \vdots\end{bmatrix},
+$$
+and the cost is the residual sum of squares
+$$
+J(\tau, L) = \min_\theta \lVert A(\tau, L)\,\theta - b\rVert^2 .
+$$
+This is a \emph{separable} least-squares problem: the linear parameters are eliminated exactly and only the two
+nonlinear ones are searched, here exhaustively on the grid, $(\hat\tau, \hat L) = \arg\min J$.
+
+\func{solve}{(data, g, K=None) -> (K, sse, model, meas)}
+Builds $A$ and $b$ as above and solves with \code{np.linalg.lstsq}. With \code{K} given (validation), the
+$K$ column is dropped and $K g$ is subtracted from $b$: only $c_j, d_j$ are fitted; \code{model} and \code{meas}
+are then shifted back by $Kg$ so that both cases return the model and the measured positions. Returns the gain,
+$J$ (\code{sse}), and the two stacked vectors.
+
+\func{fit\_percent}{(data, model, meas) -> float}
+The normalised-RMSE fit used by MATLAB's \code{compare}:
+$$
+\text{fit} = 100\left(1 - \frac{\lVert \mathbf y - \hat{\mathbf y}\rVert}{\lVert \mathbf y - \bar{\mathbf y}\rVert}\right),
+$$
+where $\bar{\mathbf y}$ is the mean \emph{of each doublet} (so the reference is ``a constant per doublet'').
+100 is perfect, 0 is no better than a constant, negative is worse.
+
+\func{grid\_fit}{(data, taus, Ls, cache=None) -> (K, tau, L, J)}
+Double loop over the grid: simulate every doublet, \code{solve}, store $J$ in a map of size
+\code{len(taus)} $\times$ \code{len(Ls)} ($59 \times 91 = 5369$ evaluations per axis on the fine grid), keep the
+minimum. The optional \code{cache} memoises the simulated responses with the key
+\code{(id(seg), i, k, len(taus))}: during leave-one-out the same doublet is simulated at the same grid point in
+every subset, so each response is computed once.
+
+\func{fit\_axis}{(segs, poses) -> dict or None}
+Needs at least two usable doublets. Fine-grid fit, then the final \code{solve} at the optimum (for the RMS and the
+fit \%). \textbf{Uncertainty} by leave-one-out on the coarse grid: refit $n$ times with doublet $j$ removed,
+giving $(K_{(j)}, \tau_{(j)}, L_{(j)})$, and report the standard deviation of each column and of
+$L_{(j)}+\tau_{(j)}$. Returns $K$, $\tau$, $L$, $\text{rms} = \sqrt{J/N}$ ($N$ samples), fit \%, $n$, the spreads,
+the leave-one-out table, the $J$ map, and the stacked signals for the plots.
+
+\begin{intuition}
+If $\tau_{(j)}$ and $L_{(j)}$ jump around while $L_{(j)}+\tau_{(j)}$ stays put, the doublets agree on the
+total lateness but each one picks a different point of the valley. The red leave-one-out dots on
+\file{cost\_map.png} line up along the valley in that case.
+\end{intuition}
+
+\func{video\_delay}{(folder) -> float or None}
+Estimates $L_v$ from the yaw doublets. The IMU yaw (telemetry, converted to map convention) does not go through
+the video, the ArUco yaw does, so the ArUco yaw lags by $L_v$. With the unwrapped signals $\psi_A$ and $\psi_I$
+and, for each yaw window $[a, b]$, a grid $t_i \in [a+0.5, b-0.5)$ of step 0.02\,s:
+$$
+\hat L_v = \arg\min_{\ell \in \lbrace -0.2, -0.19, \dots, 0.99\rbrace}
+\frac{1}{N}\sum_{\text{windows}}\sum_i \Big[\big(\psi_A(t_i+\ell) - \overline{\psi_A}\big) - \big(\psi_I(t_i) - \overline{\psi_I}\big)\Big]^2 ,
+$$
+the means being taken per window (this removes the unknown heading offset). Requires 50 samples of each and at
+least one yaw segment. Then $L_u = L - L_v$.
+
+\func{fit}{(folder, verbose=True) -> dict}
+\code{load}, \code{fit\_axis} for each axis, \code{video\_delay}, prints a table
+($K \pm \text{sd}$, $\tau$, $L$, $L+\tau$, fit \%, rms, number of doublets), then \code{save}.
+
+\func{save}{(folder, res, Lv, has\_sent)}
+Writes \file{model.yaml}, one flow-mapping line per axis:
+\begin{lstlisting}
+# Tello response per axis, first order + delay: tau dv/dt = K u(t - L) - v   (tello_step_fit)
+x: {K: 0.660, tau: ..., L: ..., L_plus_tau: 0.73, sd_K: ..., fit_percent: ..., rms: ..., doublets: 6}
+video_delay_L_v: 0.20
+\end{lstlisting}
+(the values here are illustrative). With matplotlib it also writes \file{step\_fit.png} (per axis: ArUco points,
+model, scaled sent command) and \file{cost\_map.png} (per axis: filled contours of $\log_{10}(J/J_{\min})$
+clipped at 1, the white $+10\,\%$ contour $J = 1.1 J_{\min}$, the leave-one-out points and the optimum).
+
+\subsection{Validation}
+
+\func{read\_model}{(folder) -> dict}
+Parses \file{model.yaml} with PyYAML into \code{\{axis: (K, tau, L)\}}.
+
+\func{latest\_identification}{(before=None) -> Path or None}
+The most recent \file{step\_*} folder (the glob \code{step\_*} does not match \code{stepval\_*}) with a
+\file{model.yaml}, in the same parent as \code{before} and older than it. The comparison is lexicographic on the
+names after replacing \code{stepval} by \code{step}; it works because the timestamp format
+\code{\%Y\%m\%d\_\%H\%M\%S} sorts chronologically.
+
+\func{validate}{(ident\_folder, val\_folder, verbose=True) -> str}
+For each axis of the validation flight, simulate the identified $(K, \tau, L)$ and the reference
+\code{MODEL\_IN\_USE}, fit \emph{only} $c_j, d_j$ (\code{solve(\dots, K=K)}), and report fit \% and RMS for both.
+Writes \file{validation.txt} and \file{validation.png}. This is the honest test: the parameters were not tuned on
+this data. The Nov 13 numbers quoted in \file{model.py}: 81\,\% forward, 67\,\% left, 87\,\% yaw, against
+48/54/30\,\% for the previous model.
+
+\func{main}{()}
+Dispatches \code{--validate} or fits the given folder (default: the last \file{step\_2*} in the sessions).
+
+% =====================================================================================================
+\section{From the fit to \texorpdfstring{\texttt{model.py}}{model.py}: who uses the numbers}\label{sec:ident-use}
+
+\file{model.py} contains only constants (the drone flies with its protective cage, which makes it slower: $K$
+0.66--0.83 instead of $\sim$1.15 without):
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Constant & Value & Meaning \\
+\midrule
+\code{K\_X}, \code{K\_Y} & 0.66, 0.83 & forward / left gain \\
+\code{TAU\_XY} & 0.25 s & horizontal time constant \\
+\code{L\_V} & 0.20 s & image taken $\to$ marker pose \\
+\code{L\_U} & 0.35 s & command $\to$ motion \\
+\code{K\_Z}, \code{TAU\_Z} & 0.9, 0.45 s & vertical (older values, not re-identified) \\
+\code{K\_W} & 1.0 & yaw rate gain \\
+\code{K\_MEAN} & 0.745 & $(K_X+K_Y)/2$ for direction-free predictions \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The measured lateness was $L+\tau = 0.73$\,s forward and $0.85$\,s left. Because only that sum is reliable, the
+authors fixed one $\tau_{xy} = 0.25$\,s for both axes and chose $L_U$ so that $L_U + L_V + \tau_{xy} = 0.80$\,s
+falls in the measured range. Consumers:
+
+\begin{itemize}
+\item \textbf{EKF} (\file{ekf\_node.py} passes them to \code{DroneEKF}, \file{ekf\_core.py}). The prediction is
+the same model, in the world frame and with the learnt drift $d$:
+$\tau\dot{\mathbf v} = R(\psi)\operatorname{diag}(K_x, K_y)\,\mathbf u(t - L_u) + \mathbf d - \mathbf v$,
+discretised exactly like \code{response()}: \code{a\_xy = dt / tau\_xy}, $v \mathrel{+}= a(\cdot - v)$. The input
+is the buffered \topic{/tello/rc\_sent} read $L_u$ in the past (\code{command\_at}), and each marker pose is applied
+at $t_{\text{recv}} - L_v$ and re-propagated to now.
+\item \textbf{Position hold} (\file{safety.py}, \code{position\_hold}/\code{hold\_axis}). Three uses:
+(i) the error is computed on the position \emph{predicted at the time the command acts},
+$e = p^\star - (p + v L_U)$; (ii) when the pilot releases the keys the hold target is where the drone will stop
+on its own, $p + (L_U + \tau)v$ (0.60\,s $\times$ speed); (iii) the desired world velocity is rotated to the body
+frame and the model is \emph{inverted}, $u_x = b_x / K_X$, $u_y = b_y / K_Y$ (and $/K_Z$ vertically), so a
+desired 0.1\,m/s forward becomes a command of 0.15.
+\item \textbf{Zone guard} (\file{safety.py}): the position in $H = 1$\,s if the command $w$ is kept, from the
+closed-form solution of the model after the delay:
+$$
+p(H) = p + v L_U + K w (H - L_U) + (v - K w)\,\tau\left(1 - e^{-(H - L_U)/\tau}\right),
+$$
+with $K = $ \code{K\_MEAN}; obtained by integrating $v(s) = Kw + (v-Kw)e^{-s/\tau}$ over $[0, H-L_U]$.
+\item \textbf{Fake drone} (\file{fake\_world.py}): the simulator moves with the same $K_X, K_Y, \tau, L_U$, and
+delays the rendered images by $L_V$, so \code{mock:=true} reproduces the real timing.
+\item \textbf{Missions} (\file{marker\_tour.py}, \file{patrol.py}, \file{strike.py}): divide their velocity
+requests by $K_X$/$K_Y$, and \file{patrol.py} anticipates the heading by $\omega L_U$.
+\end{itemize}
+
+\begin{keypoint}
+Identification is not a one-off: changing the hardware (e.g.\ flying without the cage) invalidates
+\file{model.py}. The procedure is \code{tello\_step\_test}, then \code{schedule:=valid}, then copy the validated
+numbers into \file{model.py} (nothing reads \file{model.yaml} automatically).
+\end{keypoint}
+
+% =====================================================================================================
+\section{Recording every flight: \texorpdfstring{\texttt{session\_recorder.py}}{session\_recorder.py}}
+
+A passive ROS node started by \code{real.launch.py}. It never commands anything; it writes one folder per launch,
+\file{YYYYmmdd\_HHMMSS/} in \file{\textasciitilde/tello\_ws/sessions/}:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+File & Content & Source / time base \\
+\midrule
+\file{frames/<t>.jpg} & annotated image, at most 1 per second, JPEG 85 & \topic{/aruco/debug\_image}, $t$ relative \\
+\file{poses.csv} & \code{t, x, y, z, yaw\_deg, sigma\_m} & \topic{/aruco/pose}, $t$ relative \\
+\file{telemetry.csv} & telemetry JSON keys + \code{t}, throttled to 2\,Hz & \topic{/tello/telemetry}, relative \\
+\file{rc\_sent.csv} & \code{t, cx, cy, cz, cw} sent by the driver & \topic{/tello/rc\_sent}, epoch \\
+\file{cmd\_in.csv} & \code{t, cx, cy, cz, cw} asked by the mission/teleop & \topic{/tello/cmd\_vel\_safe}, epoch \\
+\file{ekf.csv} & \code{t, x, y, z, sigma\_xy} & \topic{/ekf/pose}, epoch \\
+\file{summary.json} & counts, rates, pose range, battery, max temperature & at shutdown \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+``Relative'' means seconds since the recorder started (\code{t0 = time.time()} in the constructor); ``epoch'' is
+\code{time.time()} directly. \code{sigma\_m} $= \sqrt{\Sigma_{xx}}$ and \code{sigma\_xy}
+$= \sqrt{\max(\Sigma_{xx},\Sigma_{yy})}$. \file{rc\_sent.csv} and \file{ekf.csv} make offline EKF replays possible
+(\file{tools/ekf\_replay.py}); \file{cmd\_in.csv} vs \file{rc\_sent.csv} shows what the safety chain changed.
+
+\func{SessionRecorder.\_\_init\_\_}{(self)}
+Creates the folder (parameter \code{out\_dir}), opens the CSV files, subscribes (the rc/cmd/EKF writers are
+lambdas), and starts a 2\,s timer that flushes every file: when the launch is killed \code{close()} may never run
+(``flight 225048 lost its last 40\,s of poses'').
+
+\func{on\_img}{(self, m)}
+Counts every debug image, saves one per second: reshapes the raw buffer to $H\times W\times c$, converts RGB to BGR
+if needed, writes \file{frames/0012.3.jpg} (name = relative time, format \code{06.1f}).
+
+\func{on\_pose}{(self, m)}
+Yaw from the quaternion in degrees; appends the row to memory (for the summary) and to \file{poses.csv}.
+
+\func{on\_tel}{(self, m)}
+Keeps one message every 0.5\,s, adds the relative \code{t}, appends to memory and to \file{telemetry.csv}
+(header = keys of the first kept message, extra keys ignored).
+
+\func{close}{(self)}
+Writes \file{summary.json}: duration, number and rate of debug images, frames saved, number of poses, the ratio
+\code{poses / (3 * debug\_images)}, time of the first pose, mean/min/max of $(x,y,z)$, battery at start/end and
+maximum \code{temph}; closes the files.
+
+\func{main}{()}
+Spins until Ctrl+C or external shutdown, then \code{close()} in a \code{finally}.
+
+Note that \file{step\_test.py} writes its \emph{own} folder (\file{step\_\dots}) with a different
+\file{poses.csv} (epoch times, yaw in radians, image stamp): the fit never reads the session recorder's files.
+
+% =====================================================================================================
+\section{After the flight: \texorpdfstring{\texttt{flight\_report.py}}{flight\_report.py}}
+
+\code{python3 tools/flight\_report.py [session] [--band 1.7 2.0]} answers ``is the localisation good enough to
+fly fast and precisely?'' for one recorder folder (default: the latest \file{2*} folder). It writes
+\file{report.txt} and \file{report.png} and ends with a checklist of \code{[OK]}/\code{[CHECK]} verdicts.
+
+\func{read\_csv}{(path) -> list[dict]}
+Rows, or \code{[]} for a missing or empty file.
+
+\func{col}{(rows, key, default=nan) -> array}
+One column as floats, \code{nan} for missing or unparsable values.
+
+\func{nearest}{(t\_src, v\_src, t) -> (values, dt)}
+For sorted source times, the value of the nearest sample at each query time and the time distance $|t_{\text{src}} - t|$;
+\code{searchsorted} then a choice between the two neighbours.
+
+\func{folder\_time}{(p) -> float or None}
+Epoch time from the last two \code{\_}-separated parts of a folder name (\code{strike\_20261113\_181035} $\to$
+the timestamp).
+
+\func{main}{()}
+\textbf{Time alignment.} The telemetry rows carry both the recorder's relative \code{t} and the driver's absolute
+\code{stamp}; $t_0 = \operatorname{median}(\text{stamp} - t)$ recovers the recorder's start in epoch time, so that
+pose times become $t_0 + t$ and can be compared with \file{ekf.csv}. \textbf{Flights}: the rising and falling edges
+of \code{flying} give the intervals $[a, b]$; the inner \code{in\_air(t, start=3, end=1)} keeps times inside a flight,
+3\,s after takeoff and 1\,s before landing. Then the metrics:
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}lXl@{}}
+\toprule
+Metric & Exact computation & Verdict \\
+\midrule
+Markers in view & 0.05\,s grid over each flight ($a+3$ to $b-1$); a grid point is ``seen'' if a pose exists
+within 0.3\,s; share of seen points, longest run of unseen points, poses per second & $\ge 85\,\%$ \\
+ArUco vs EKF & for every in-air pose, distance to the nearest EKF sample (if within 0.2\,s): median, 95th
+percentile, number of ``jumps'' $> 15$\,cm; EKF $\sigma_{xy}$ median and max & jumps $< 1\,\%$ \\
+Height & ArUco $z$ minus the nearest ToF (within 0.6\,s, ToF $> 0.3$\,m); samples within 15\,cm of the median
+are ``over the floor'' (furniture reads 0.5--0.9\,m less); median and spread of those & $|\text{med}|, \sigma < 5$\,cm \\
+Height band & with \code{--band}: share of EKF $z$ (from 8\,s after takeoff) in the band $\pm 5$\,cm, min/max &
+$\ge 95\,\%$ \\
+Hover & intervals where the telemetry flag \code{hold} is true, minus the first 2\,s, at least 2\,s and 20 poses
+long; distance of each pose to the interval's median point: median, 95th pct; height 95th pct & 95\,\% $< 8$\,cm \\
+Pad & takeoff and landing points (\file{set\_home.py}: poses of the first 8\,s of the climb / 2--4\,s before the
+landing) vs \file{config/home.yaml} & landing $< 15$\,cm \\
+Tracking & every mission folder \file{*\_2*} whose time falls in $[t_0 - 5, \text{last flying}]$ and has a
+\file{tracking.csv}: horizontal error $\sqrt{(x_d-x)^2 + (y_d-y)^2}$ RMS and max, height error RMS, per phase &
+RMS $< 8$\,cm \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The plot shows the EKF position (lines) with the ArUco poses (dots), and the ToF height with the ArUco $z$ and the
+band limits, against the time since the first takeoff.
+
+\begin{intuition}
+The height check is a free test of the \emph{marker map scale}: if the map were 6\,\% too large (as on Nov 11),
+ArUco $z$ minus ToF would not be a constant offset but would vary with the distance to the markers.
+\end{intuition}
+
+% =====================================================================================================
+\section{Camera calibration: \texorpdfstring{\texttt{calibrate\_camera.py}}{calibrate\_camera.py}}
+
+The localizer's PnP needs the intrinsics. This interactive tool (messages in French) streams the Tello video
+(\code{room\_mapper.tello\_stream()}), takes photos automatically of the printed checkerboard (9$\times$6 inner
+corners, 25\,mm squares), calibrates with OpenCV and saves \file{config/tello\_camera.yaml}.
+
+\subsection{Camera model}
+
+A point $\mathbf X_c = (X, Y, Z)$ in the camera frame is normalised, $x = X/Z$, $y = Y/Z$, $r^2 = x^2+y^2$,
+distorted with the \code{plumb\_bob} (Brown--Conrady) model of 5 coefficients $(k_1, k_2, p_1, p_2, k_3)$:
+$$
+\begin{aligned}
+x_d &= x\,(1 + k_1 r^2 + k_2 r^4 + k_3 r^6) + 2p_1 xy + p_2(r^2 + 2x^2),\\
+y_d &= y\,(1 + k_1 r^2 + k_2 r^4 + k_3 r^6) + p_1(r^2 + 2y^2) + 2p_2 xy,
+\end{aligned}
+$$
+then projected with the intrinsic matrix:
+$$
+\begin{bmatrix} u \\ v \\ 1 \end{bmatrix} = K \begin{bmatrix} x_d \\ y_d \\ 1 \end{bmatrix},\qquad
+K = \begin{bmatrix} f_x & 0 & c_x \\ 0 & f_y & c_y \\ 0 & 0 & 1 \end{bmatrix}.
+$$
+$k_i$ are radial terms (barrel/pincushion), $p_i$ tangential terms (lens not parallel to the sensor).
+
+\subsection{Zhang's method}
+
+\code{cv2.calibrateCamera} follows Zhang (2000). The board is the plane $Z_b = 0$ of its own frame, so for view
+$i$ a board point $(X_b, Y_b)$ maps to the (undistorted) image through a homography
+$$
+s\begin{bmatrix} u \\ v \\ 1\end{bmatrix} = K\begin{bmatrix} \mathbf r_1 & \mathbf r_2 & \mathbf t\end{bmatrix}
+\begin{bmatrix} X_b \\ Y_b \\ 1\end{bmatrix} = H_i \begin{bmatrix} X_b \\ Y_b \\ 1\end{bmatrix}.
+$$
+Since $\mathbf r_1, \mathbf r_2$ are orthonormal, with $H = [\mathbf h_1\ \mathbf h_2\ \mathbf h_3]$ and the symmetric
+$B = K^{-\top}K^{-1}$:
+$$
+\mathbf h_1^\top B\,\mathbf h_2 = 0, \qquad \mathbf h_1^\top B\,\mathbf h_1 = \mathbf h_2^\top B\,\mathbf h_2 .
+$$
+Two linear equations per view in the 6 entries of $B$ (5 up to scale): three views or more give $B$, hence $K$ by
+Cholesky, then each $(R_i, \mathbf t_i)$. This closed form initialises a Levenberg--Marquardt refinement of all
+parameters (intrinsics, distortion, poses) minimising the reprojection error
+$$
+E = \sum_{i}\sum_{j} \big\lVert \mathbf m_{ij} - \pi(K, D, R_i, \mathbf t_i, \mathbf M_j)\big\rVert^2 ,
+\qquad \text{RMS} = \sqrt{E / N},
+$$
+with $N$ = number of views $\times$ 54 corners. The returned \code{rms} is this number in pixels. Varied tilts
+are essential: with fronto-parallel views only, the homographies do not constrain the focal length (the
+equations become degenerate), which is why the tool insists on tilted views.
+
+\subsection{Functions}
+
+Constants: \code{COLS, ROWS, SQUARE = 9, 6, 0.025}; a $3\times3$ grid of image cells; tilt threshold $20^\circ$;
+``still'' $= $ mean corner motion $\le 3$\,px for 0.3\,s; sharpness = variance of the Laplacian on the board
+$\ge 30$; 15 to 40 views.
+
+\func{board\_points}{() -> (54, 3) array}
+The corners in the board frame: $(0..8, 0..5) \times 0.025$\,m, $Z=0$.
+
+\func{measure}{(pts, size, K0) -> dict}
+Describes a detected board: width (fraction of the image width); the board pose by \code{solvePnP} with the
+\emph{guessed} intrinsics $K_0$ ($f_0 = (W/2)/\tan(55.6^\circ/2) \approx 910$\,px at 960\,px, the measured FOV) and
+no distortion; from the board normal $\mathbf n$ (third column of $R$) the horizontal tilt
+$\operatorname{atan2}(n_x, |n_z|)$ and the vertical tilt $\operatorname{atan2}(n_y, |n_z|)$ in degrees; the in-plane
+rotation of the first row folded into $[-90^\circ, 90^\circ)$; the set of grid cells touched by corners; and the
+normalised centre.
+
+\func{novelty}{(m, cov\_cells, cov\_checks, views) -> (new\_cells, new\_checks, different)}
+What a view would add: cells not covered yet, checklist items it satisfies for the first time (near: width
+$> 0.45$; far: $< 0.28$; tilted left/right/up/down: beyond $\pm 20^\circ$; diamond: $25^\circ \le |\text{roll}| \le 65^\circ$),
+and whether it differs from every photo taken (centre moved $> 0.12$, width $> 0.1$, or a tilt $> 12^\circ$).
+
+\func{draw}{(frame, cov\_cells, cov\_checks, n\_views, status, color, corners, flash, hint="") -> image}
+The user interface: green cells, grid lines, detected corners, a white flash on a photo, a top banner, the
+checklist (PIL for accented text), the status and hint lines.
+
+\func{verdict}{(rms) -> (word, colour)}
+$< 0.35$\,px excellent, $< 0.6$ good, $< 1.0$ medium, otherwise bad.
+
+\func{missing\_hint}{(cov\_cells, cov\_checks) -> str}
+Names up to three uncovered cells and the first unchecked item.
+
+\func{run}{(frames\_iter, save=True, show=True, photo\_dir=None) -> (rms, K, D) or None}
+Per frame: stop when complete (all 9 cells, $\ge 15$ views, and 5 checks or 25 views) or at 40 views;
+\code{findChessboardCorners} (adaptive threshold, normalisation, fast check), \code{cornerSubPix} ($11\times11$
+window, 30 iterations or $\epsilon = 0.001$); a photo is taken when the board is sharp, \emph{useful} (new cells or
+checks, or merely different while fewer than 15 views) and still for 0.3\,s. C computes (10 views or more), Esc or
+closing the window computes if there are 10 views, else quits. Then:
+\begin{lstlisting}
+rms, K, D, rv, tv = cv2.calibrateCamera(obj, img_pts, size, None, None)
+errs = [per-view RMS of cv2.projectPoints(...) - corners]        # pseudo-code
+keep = [i for i, e in enumerate(errs) if e < 2.5 * np.median(errs)]
+if len(keep) < len(obj) and len(keep) >= 10:
+    rms, K, D, _, _ = cv2.calibrateCamera(obj[keep], img_pts[keep], ...)
+\end{lstlisting}
+i.e.\ one round of outlier rejection on the per-view error $e_i = \sqrt{\tfrac{1}{54}\sum_j \lVert\cdot\rVert^2}$.
+A sanity warning is printed if $f_x$ is more than 20\,\% from the expected 910\,px (badly printed board), then
+\code{save\_calib} writes the YAML and the last frame is shown undistorted (straight lines must look straight).
+
+\func{main}{()}
+\code{--from-photos <dir>} recomputes from saved \file{calib\_*.jpg}; otherwise creates
+\file{logs/calibration/<time>/} for the photos and calls \code{run(tello\_stream())}.
+
+\paragraph{Output.} \code{room\_mapper.save\_calib} writes the ROS \code{CameraInfo} YAML layout
+(\code{camera\_matrix}, \code{distortion\_model: plumb\_bob}, \code{distortion\_coefficients},
+identity \code{rectification\_matrix}, \code{projection\_matrix} $= [K\,|\,0]$) plus the RMS and the date. The
+current file (Nov 9, 26 views, $k_3$ fixed to 0 according to its \code{source} field):
+$$
+\begin{aligned}&f_x = 910.5,\quad f_y = 913.5,\quad c_x = 466.6,\quad c_y = 363.9\ \text{px},\\
+&D = (-0.0386,\ 0.0816,\ -0.0013,\ -0.0052,\ 0),\qquad \text{RMS} = 0.24\ \text{px}.\end{aligned}
+$$
+Check: $2\arctan(480/910.5) = 55.6^\circ$ horizontal FOV, and the distortion is mild.
+
+% =====================================================================================================
+\section{Printable markers: \texorpdfstring{\texttt{make\_print\_sheets.py}}{make\_print\_sheets.py}}
+
+Generates PDFs at 300\,dpi ($\text{MM} = 300/25.4 = 11.81$\,px/mm; A4 = $2480\times3508$\,px). The dictionary and
+the side come from \file{config/markers.yaml} (\code{DICT\_6X6\_50}, \code{marker\_size: 0.1889}\,m).
+
+\func{font}{(size\_px) -> ImageFont}
+First TrueType font found (Arial, DejaVu Sans), else PIL's default.
+
+\func{marker\_page}{(dictionary, marker\_id, side\_mm, dict\_name) -> PIL image}
+Draws the marker with \code{cv2.aruco.generateImageMarker} (or \code{drawMarker} for old OpenCV) at exactly
+\code{round(side\_mm * MM)} pixels (188.9\,mm $\to$ 2231\,px), centred horizontally. A ``big'' marker (more than
+the page width minus 60\,mm) is placed 14\,mm from the top without a cut guide; a smaller one gets a grey cut
+rectangle one sixth of the side outside it (the white quiet zone must stay). Below: the ID and ``keep upright'',
+the dictionary and size, and a 100\,mm bar to check the print scale with a ruler. Asserts the layout fits; returns a
+1-bit image. (The \code{dictionary} argument is unused.)
+
+\func{checkerboard\_page}{(cols=10, rows=7, square\_mm=25) -> PIL image}
+A4 landscape, $10\times7$ squares of 25\,mm (295\,px), i.e.\ exactly the $9\times6$ inner corners and 0.025\,m that
+\file{calibrate\_camera.py} expects.
+
+\func{main}{()}
+Options \code{--markers}, \code{--ids all|lo-hi} (checked against the dictionary size and warned on IDs already in
+the map), \code{--paper a4|letter}, \code{--checkerboard}, \code{--out docs/print}. Writes
+\file{aruco\_markers\_<ids>\_<paper>.pdf} (one page per marker) and optionally \file{checkerboard\_A4.pdf}.
+
+% =====================================================================================================
+\section{Code review notes}
+
+\begin{review}
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+\item \file{step\_fit.py:50} \code{MODEL\_IN\_USE} is hard-coded to the Nov 11 model ($K=1.15$, $\tau=0.55$,
+$L=0.50$), while \file{model.py:425-430} now has $K_X=0.66$, $K_Y=0.83$, $\tau=0.25$, $L_U+L_V=0.55$. The
+validation therefore compares with an old model, not ``the model the EKF / driver use now''. Build it from
+\code{tello\_driver.model} instead.
+\item \file{step\_fit.py:204-205} The ``sd'' is \code{np.std} of the leave-one-out estimates. The jackknife
+standard error is $\sqrt{(n-1)/n\sum_j(\theta_{(j)}-\bar\theta)^2} = \sqrt{n-1}\cdot$\code{np.std}: with 6 doublets
+the printed uncertainties are about $2.2\times$ too small.
+\item \file{step\_test.py:252} with \file{:452} and \file{:461}: $p_0$ is set to the takeoff hover point, then
+\code{recentre()} flies to the zone centre $(0.04, 1.56)$ while \code{safety()} still checks the $\pm0.8$\,m box
+around the \emph{takeoff} point. A takeoff more than 0.8\,m from the centre along $x$ or $y$ aborts the test during
+that move. Skip the box (or re-anchor it) during the move.
+\item \file{step\_test.py:17} The docstring says the drone lands after 3\,s without marker; the default
+\code{lost\_timeout} is 15\,s (\file{:101}).
+\item \file{step\_test.py:235} The in-flight battery abort threshold (20\,\%) is hard-coded, unlike
+\code{min\_battery}.
+\item \file{step\_test.py:228} ``ANY KEY = land'' relies on \code{read\_key}, which returns \code{None} for a lone
+Esc or an unknown escape sequence (\file{teleop.py:144-148}): Esc does not stop the test.
+\item \file{step\_test.py:537} The fit runs only after a clean end; after any \code{Abort} the data are kept but must
+be fitted by hand, and \code{tello\_step\_fit} without argument (\file{step\_fit.py:396}) then picks that partial
+flight if it is the latest.
+\item \file{step\_fit.py:81} The sent command is looked up at the \file{commands.csv} times, i.e.\ the value sent
+\emph{before} the driver processed the new request: up to one 50\,ms tick (plus reception jitter) is silently
+added to $L$. Building $u$ directly from the \file{sent.csv} timeline would avoid it. Also, the hover phases contain
+the closed-loop hold command, so input and noise are correlated there (mild closed-loop bias).
+\item \file{step\_fit.py:112} Forward Euler $a=\Delta/\tau$ instead of the exact $1-e^{-\Delta/\tau}$: negligible at
+$\tau=0.25$ (2\,\%), 10\,\% at the grid's $\tau=0.05$ (yaw).
+\item \file{session\_recorder.py:103} The ratio divides by \code{n\_img * 3}, but the localizer publishes a debug
+image every \code{debug\_every\_n = 5} frames by default (\file{aruco\_localizer.py:59}): the summary ratio is
+off by $5/3$.
+\item \file{session\_recorder.py:61} vs \file{:82} and \file{:92}: \file{ekf.csv}, \file{rc\_sent.csv},
+\file{cmd\_in.csv} use epoch time while \file{poses.csv} and \file{telemetry.csv} use time since start, in the same
+folder; \file{flight\_report.py:82} must reconstruct $t_0$ from the telemetry \code{stamp}. One time base (epoch)
+everywhere would be simpler.
+\item \file{session\_recorder.py:91} \code{json.loads} without \code{try} (unlike \file{step\_test.py:174}): one
+malformed message kills the recorder's spin. And \file{:95} freezes the CSV header to the first message's keys
+(\code{extrasaction="ignore"}): keys added later by the driver are silently dropped.
+\item \file{flight\_report.py:127-136} ``Pose jumps against the EKF prediction'' actually compares each pose with the
+nearest \emph{published} EKF estimate, which has already fused that pose, at reception time, whereas the pose
+describes the image $L_v = 0.2$\,s earlier: at 0.3\,m/s this alone is a 6\,cm bias, and real jumps are partly
+absorbed. Comparing at \code{t\_image}, or logging the EKF innovation, would be cleaner.
+\item \file{flight\_report.py:204} Missions are searched in the default \code{SESSIONS} folder, not next to the
+given session (\code{ses.parent}): with a session path elsewhere the tracking section is silently empty.
+\item \file{calibrate\_camera.py:216}, \file{:221}, \file{:263} No \code{cv2.CALIB\_FIX\_K3}, while the current
+\file{config/tello\_camera.yaml} was made ``k3 fixed to 0'': a re-run produces a different (and with few wide-field
+views, over-fitted) model. The \code{--from-photos} path also skips the outlier rejection.
+\item \file{calibrate\_camera.py:219-226} If rejection would leave fewer than 10 views, all views are kept but the
+message still prints \code{len(keep)} as the number used.
+\item \file{make\_print\_sheets.py:4,8} The docstring says the default run writes the checkerboard and that the
+marker is 20\,cm; the checkerboard needs \code{--checkerboard} (\file{:87}) and the size comes from
+\file{markers.yaml} (0.1889\,m). The \code{dictionary} parameter of \code{marker\_page} (\file{:34}) is unused.
+\end{enumerate}
+\end{review}

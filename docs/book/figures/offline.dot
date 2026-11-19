@@ -1,0 +1,14 @@
+digraph O { rankdir=LR; nodesep=0.3; node [fontname="Helvetica", fontsize=10.5]; edge [color="#555555", fontname="Helvetica", fontsize=8.5];
+  node [shape=note, style=filled, fillcolor="#f2f2f2"];
+  photos [label="photos of the\nwall markers"]; checker [label="checkerboard\nvideo"]; scan [label="phone 3D scan\n(mesh)"]; flights [label="recorded flights\n(sessions/)"];
+  node [shape=box, style="rounded,filled", fillcolor="#e3f0ff"];
+  mapper [label="tools/room_mapper.py\n(bundle adjustment)"]; calib [label="tools/calibrate_camera.py"];
+  mesh [label="tools/room_mesh_to_map.py\ntools/align_scan.py"]; free [label="tools/free_zone.py"]; boxes [label="hand-made L zone\n(union of boxes)"];
+  home [label="tools/set_home.py"]; fit [label="tello_step_test +\ntello_step_fit"]; report [label="tools/flight_report.py\ntools/ekf_replay.py"];
+  node [shape=folder, style=filled, fillcolor="#fff6c0"];
+  my [label="config/markers.yaml"]; cy [label="config/tello_camera.yaml"]; fz [label="config/flight_zone_band.yaml\n+ grid .npz"]; f3 [label="config/flight_zone_3d.yaml"]; hy [label="config/home.yaml"]; model [label="model.py constants\n(K, tau, L)"];
+  node [shape=box, style="rounded,filled", fillcolor="#d7f2d0"]; nodes [label="ROS nodes at flight time\n(localizer, EKF, driver safety,\nmissions, RViz)"];
+  photos -> mapper -> my; checker -> calib -> cy; scan -> mesh -> free -> fz; free -> boxes -> f3; my -> mesh [style=dashed];
+  flights -> home -> hy; flights -> fit -> model; flights -> report;
+  my -> nodes; cy -> nodes; fz -> nodes; f3 -> nodes; hy -> nodes; model -> nodes;
+}

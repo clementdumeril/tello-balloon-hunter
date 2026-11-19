@@ -1,0 +1,1017 @@
+\chapter{Missions: from a goal to velocity commands}
+\label{ch:missions}
+\sloppy % many long \code{} names: let lines stretch rather than overflow
+
+The previous chapters built the ``body'' of the system: the driver that talks to the Tello and filters every
+command through its safety chain, the ArUco localizer that turns images into a pose, and the EKF that turns noisy,
+delayed poses into a smooth state estimate. None of these decides \emph{where} the drone should go. That is the job
+of the \emph{missions}: small programs, run in a second terminal, that read the pose, decide on a goal (a point in
+front of a marker, the corner of a patrol path, a strike point), and publish a velocity request on
+\topic{/tello/cmd\_vel\_safe} twenty times per second.
+
+This chapter documents every mission file, function by function:
+
+\begin{itemize}[nosep]
+  \item \file{trajectory.py}: minimum-jerk (quintic) trajectories and their safety check;
+  \item \file{marker\_tour.py}: the \code{MarkerTour} node and its reusable pieces (feasible points in front of a
+        marker, turning to find markers, the set-point controller \code{goto});
+  \item \file{goto\_markers.py}: \code{tello\_goto 49 35}, a thin subclass of \code{MarkerTour};
+  \item \file{patrol.py}: laps around the zone, ``type a marker number'', lap statistics;
+  \item \file{strike.py}: fast planned legs and strike / retreat, the only user of \file{trajectory.py};
+  \item \file{home.py} and \file{teleop.py}: the takeoff pad and the keyboard teleop.
+\end{itemize}
+
+All paths below are relative to \file{src/tello\_driver/tello\_driver/}. Line numbers refer to the version of the
+code this chapter was written against (commit \code{aab4639}).
+
+\begin{intuition}
+A mission is a loop at 20~Hz that does three things: (1) read the latest pose estimate, (2) compute an error to a
+goal, (3) turn that error into a body-frame velocity request. Everything else in these files is bookkeeping around
+that loop: choosing goals that are safe, deciding what to do when the markers are lost, logging, and listening to
+the keyboard. Two very different ``step (3)'' laws coexist in the code: a \emph{reactive set-point controller}
+(\code{MarkerTour.goto}, used by the tour, \code{tello\_goto} and the patrol) and a \emph{planned trajectory with
+model feedforward} (\code{Strike.track}, used only by \code{tello\_strike}).
+\end{intuition}
+
+% =====================================================================================================
+\section{The big picture: class hierarchy and topics}
+
+\subsection{Who inherits from whom}
+
+All missions are subclasses of \code{StepTest} (\file{step\_test.py}), the identification-flight node. This is
+historical: the identification flight was the first program that had to take off, hold a start point, react to
+keys and land safely, so the later missions inherited that machinery instead of copying it.
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Class & File & Parent \\
+\midrule
+\code{StepTest} & \file{step\_test.py} & \code{rclpy.node.Node} \\
+\code{MarkerTour} & \file{marker\_tour.py} & \code{StepTest} \\
+\code{GotoMarkers} & \file{goto\_markers.py} & \code{MarkerTour} \\
+\code{Patrol} & \file{patrol.py} & \code{MarkerTour} \\
+\code{PatrolNode} & \file{patrol.py} & \code{Patrol} \\
+\code{Strike} & \file{strike.py} & \code{StepTest} (\emph{not} \code{MarkerTour}) \\
+\code{Teleop} & \file{teleop.py} & \code{rclpy.node.Node} (standalone) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The executables are declared in \file{src/tello\_driver/setup.py}:
+\code{tello\_marker\_tour}, \code{tello\_goto}, \code{tello\_patrol}, \code{tello\_strike} and
+\code{tello\_teleop}. Each \code{main()} calls
+\code{run(cls)} from \file{step\_test.py} (except the teleop, which has its own loop).
+
+\subsection{How the EKF is used: which topic each mission reads}
+
+The author asked: \emph{``How is the EKF used --- is it simply that the pose every node reads is the EKF one?''}
+Essentially yes, with two important refinements: the missions also read the \emph{raw} marker topics to know
+whether the EKF pose is backed by a real measurement, and the EKF pose is discarded when its uncertainty is too
+large.
+
+\code{StepTest.\_\_init\_\_} subscribes to the topic named by the class attribute \code{POSE\_TOPIC}
+(overridable with the ROS parameter \code{pose\_topic}). \code{StepTest} itself uses \topic{/aruco/pose} (the
+identification must not use the EKF, whose model is what is being identified), but every mission overrides it:
+\code{MarkerTour.POSE\_TOPIC = "/ekf/pose"} (\file{marker\_tour.py}:38) and
+\code{Strike.POSE\_TOPIC = "/ekf/pose"} (\file{strike.py}:37). The EKF publishes \topic{/ekf/pose} at 30~Hz as
+soon as it is initialised, \emph{predicted} even without markers (\file{ekf\_node.py}:56,98).
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}lXccc@{}}
+\toprule
+Topic & Used for & Tour/Goto & Patrol & Strike \\
+\midrule
+\topic{/ekf/pose} & \code{self.pose}: the pose every controller uses & yes & yes & yes \\
+\topic{/ekf/drift} & drift learnt by the EKF, cancelled in \code{goto} & yes & yes & no \\
+\topic{/aruco/pose} & only its \emph{arrival time} (\code{marker\_t}); patrol also counts poses/s & yes & yes (twice) & no \\
+\topic{/aruco/ids} & what the camera sees (id, image position): the camera search & no & yes & no \\
+\topic{/tello/telemetry} & battery, \code{flying}, height, IMU yaw (\code{yaw\_estimate}) & yes & yes & yes \\
+\topic{/tello/camera\_info} & ``video is alive'' (one message per frame) & yes & yes & yes \\
+\topic{/tello/rc\_sent} & logged to \file{sent.csv} only & yes & yes & yes \\
+\midrule
+\topic{/tello/cmd\_vel\_safe} & \emph{published}: the velocity request & yes & yes & yes \\
+\topic{/tello\_driver/takeoff}, \topic{land} & services called & yes & yes & yes \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{keypoint}
+Every mission flies on \topic{/ekf/pose}. But the marker tour and the patrol additionally gate
+\emph{translations} on the age of the last \topic{/aruco/pose}: the EKF prediction may bridge 0.7--1~s without a
+marker, never more (the comment in \file{marker\_tour.py}:201--202 recalls a flight where the mission flew 0.7~m
+forward on prediction alone). \code{Strike} does not subscribe to \topic{/aruco/pose}: it trusts the EKF pose as
+long as \code{StepTest.on\_pose} accepts it, i.e.\ while its standard deviation is below
+\code{max\_pose\_sigma} = 0.15~m.
+\end{keypoint}
+
+The filter in \code{StepTest.on\_pose} (\file{step\_test.py}:159) matters: with
+$\sigma_{xy} = \sqrt{\max(P_{xx}, P_{yy})}$ read from the covariance, a message with $\sigma_{xy} > 0.15$~m is
+dropped, so \code{self.pose} is not refreshed and \code{pose\_age()} grows. The yaw is extracted from the
+quaternion, $\psi = \operatorname{atan2}(2(q_w q_z + q_x q_y), 1 - 2(q_y^2+q_z^2))$, and the offset between that
+yaw and the IMU heading is stored in \code{yaw\_offset} for later use when markers are out of view.
+
+% =====================================================================================================
+\section{The inherited toolbox (\texorpdfstring{\texttt{StepTest}}{StepTest})}
+
+\code{StepTest} is documented with the identification in another chapter; here are only the methods every mission
+relies on, because they define the timing and the failure behaviour of all the code below.
+
+\func{run}{(seconds, fn, restart\_on\_loss=False, search\_on\_loss=True) -> None}
+The 20~Hz loop (\code{RATE = 20.0}, \file{step\_test.py}:42). At each tick it calls \code{safety()}, then
+\code{fn()}; \code{fn} sends one command and returns \code{None} to continue or \code{False} to stop. Between
+ticks it spins ROS (\code{rclpy.spin\_once}) until the next deadline, so callbacks (poses, telemetry) are
+processed. With \code{search\_on\_loss=True} (the default), a pose older than 1~s suspends \code{fn} and calls
+\code{search\_until\_found(p0 yaw)}. All mission controllers pass \code{search\_on\_loss=False} because they handle
+losses themselves; only the short ``hold'' calls such as \code{self.run(self.hold, lambda: self.send())} use the
+default.
+
+\func{safety}{() -> None, raises Abort}
+Checked every tick: a key press (\code{check\_keys}), battery $<20\,\%$, distance to the obstacle grid
+($<$ margin $-0.2$~m), the mission rectangle \code{self.fence} $\pm$ \code{fence\_tol}, the height limits (once
+reached), and finally \code{pose\_age() > lost\_max}. An \code{Abort} propagates up to \code{run(cls)} in
+\file{step\_test.py}:507, whose \code{finally} publishes a zero \code{Twist} and calls the \code{land} service.
+\emph{This is how ``landing on lost markers'' is implemented}: there is no explicit landing code in the
+missions, only a timeout that raises.
+
+\func{send}{(cx, cy, cz, cw, ..., blind=False) -> None}
+Publishes a \code{Twist} on \topic{/tello/cmd\_vel\_safe}: \code{linear.x} forward, \code{linear.y} left,
+\code{linear.z} up (m/s), \code{angular.z} counter-clockwise (rad/s), all in the \emph{body} frame. If the pose is
+older than 0.7~s and \code{blind} is false, everything is zeroed (hover). \code{blind=True} is the explicit
+``I am turning on the IMU heading, let it through''.
+
+\func{yaw\_estimate}{() -> float or None}
+The ArUco/EKF yaw if the pose is fresher than 0.5~s, else $\psi_{\text{IMU}} + \text{offset}$, with
+$\psi_{\text{IMU}} = -\text{yaw}_{\text{Tello}}$ in radians (the Tello reports clockwise-positive degrees).
+
+\func{search\_heading}{(base\_yaw) -> None}
+Turn towards \code{base\_yaw}, then, once the pose is older than 3~s, sweep
+$\psi^\ast = \psi_b + 40^\circ \sin\big(2\pi (t_{\text{lost}}-3)/6\big)$ (a 6~s period), with the rate
+$\omega = \operatorname{clip}(0.9\,\operatorname{wrap}(\psi^\ast-\psi), \pm 0.5)$~rad/s. No translation.
+
+\func{prepare}{() -> None}
+Waits for telemetry and video, refuses to start if another node publishes on \topic{/tello/cmd\_vel\_safe}
+(e.g.\ a forgotten teleop), asks for ENTER, calls \code{takeoff}, waits for the driver's climb, then measures the
+start point \code{p0} = median of 15 fresh poses (turning at 0.5~rad/s if no marker is in view after 2~s). With
+\code{MOVE\_TO\_ZONE\_CENTRE} (true for \code{Strike}, false for \code{MarkerTour}) it then flies to the centre of
+the zone rectangle with \code{recentre}.
+
+\func{recentre}{(timeout=6.0, target=None) -> None}
+A plain saturated P controller to \code{p0} or \code{target}: gains 0.6 (position, clipped at 0.25~m/s) and 0.8
+(yaw, clipped at 0.4~rad/s), done within 8~cm and $5^\circ$.
+
+\func{return\_home}{() -> None}
+Loads the pad with \code{home.load\_home} and \code{recentre}s above it at the current height (15~s timeout);
+falls back to \code{recentre()} to \code{p0} if the pad is unknown, the pose stale, or the pad too close to an
+obstacle. The landing itself is done by \code{run(cls)} after \code{main()} returns.
+
+% =====================================================================================================
+\section{Minimum-jerk trajectories (\texorpdfstring{\texttt{trajectory.py}}{trajectory.py})}
+
+\subsection{The quintic}
+
+A rest-to-rest move from $\mathbf p_0$ to $\mathbf p_1$ (both in $\mathbb R^3$, map frame) in $T$ seconds is
+written as a straight line with a scalar timing law:
+$$
+\mathbf p(t) = \mathbf p_0 + (\mathbf p_1 - \mathbf p_0)\, s(r), \qquad r = t/T \in [0,1].
+$$
+The path is a straight segment; only the \emph{speed along it} is shaped. The scalar $s$ is the quintic that
+minimises the integrated squared jerk $\int_0^T \dddot{s}^2\,dt$ under the six boundary conditions
+$$
+s(0)=0,\ s(1)=1,\qquad s'(0)=s'(1)=0,\qquad s''(0)=s''(1)=0,
+$$
+i.e.\ start and end at rest with zero acceleration. Six conditions fix the six coefficients of a degree-5
+polynomial, and the solution is
+$$
+s(r) = 10r^3 - 15r^4 + 6r^5,\qquad
+s'(r) = 30r^2 - 60r^3 + 30r^4,\qquad
+s''(r) = 60r - 180r^2 + 120r^3 .
+$$
+(Check: $s(1)=10-15+6=1$, $s'(1)=30-60+30=0$, $s''(1)=60-180+120=0$.) By the chain rule, with
+$\mathbf d = \mathbf p_1-\mathbf p_0$ and $d = \lVert \mathbf d\rVert$,
+$$
+\dot{\mathbf p}(t) = \frac{\mathbf d}{T}\, s'(r), \qquad \ddot{\mathbf p}(t) = \frac{\mathbf d}{T^2}\, s''(r).
+$$
+
+\paragraph{Velocity profile.} $s'(r) = 30r^2(1-r)^2$ is a symmetric bell, zero at both ends, maximum at $r=1/2$:
+$s'(1/2) = 30/16 = 15/8$. So the peak speed is
+$$ v_{\text{peak}} = \frac{15}{8}\,\frac{d}{T} \approx 1.875\,\frac{d}{T}, $$
+i.e.\ 1.875 times the average speed. The acceleration $s''$ is maximal where $s'''(r) = 60-360r+360r^2 = 0$, at
+$r = (3-\sqrt3)/6 \approx 0.211$, where $s'' = 10/\sqrt3 \approx 5.77$:
+$$ a_{\text{peak}} = \frac{10}{\sqrt3}\,\frac{d}{T^2}. $$
+The jerk is $60\,d/T^3$ at both ends and $-30\,d/T^3$ in the middle: finite everywhere, which is the point of a
+quintic (a trapezoidal velocity profile has infinite jerk at its corners and makes a multirotor pitch abruptly).
+
+\func{s\_profile}{(r) -> (s, s', s'')}
+Evaluates the three polynomials above, with $r$ first clamped to $[0,1]$ (\file{trajectory.py}:14--18). The
+clamp means that after $T$ the trajectory simply stays at $\mathbf p_1$ with zero velocity: \code{Strike.track}
+relies on this when it keeps calling \code{traj.at(t)} during its settling time.
+
+\subsection{Choosing the duration}
+
+\func{Quintic.\_\_init\_\_}{(p0, p1, v\_max=0.8, a\_max=1.0, t\_min=0.6, u\_max=None, tau=0.55, K=1.15)}
+Stores the end points and picks the \emph{shortest} $T$ that respects both limits. Inverting the two peak
+formulas:
+$$
+T = \max\left( t_{\min},\ \frac{15}{8}\frac{d}{v_{\max}},\ \sqrt{\frac{10}{\sqrt3}\frac{d}{a_{\max}}} \right)
+\qquad (d > 1\text{ mm; otherwise } T = t_{\min}).
+$$
+Then, if \code{u\_max} is given, it accounts for the \emph{command} that will be needed. With the identified
+first-order model $\tau \dot v = K u - v$ (delay aside), producing $v_d(t)$ requires
+$u = (v_d + \tau a_d)/K$, which is larger than $v_d/K$ during the acceleration phase. The constructor samples
+101 values of $r$ and multiplies $T$ by 1.05 until
+$$
+\max_r \frac{\left| s'(r)\,d/T + \tau\, s''(r)\, d/T^2 \right|}{K} \le u_{\max}
+\qquad\text{or}\qquad T \ge 30\text{ s}.
+$$
+The docstring explains why: without it the command saturated and the drone lagged 24~cm behind in simulation.
+
+The default \code{tau=0.55}, \code{K=1.15} are an older model; \code{Strike} always overrides them with
+\code{qkw()} = \code{\{u\_max: 0.9, tau: M.TAU\_XY = 0.25, K: M.K\_MEAN = 0.745\}} from \file{model.py}.
+
+\paragraph{Concrete numbers.} With the strike defaults $v_{\max}=0.8$, $a_{\max}=1.0$, $u_{\max}=0.9$,
+$K=0.745$, $\tau = 0.25$ (computed with the same code):
+
+\begin{center}
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+$d$ (m) & $T$ from $v_{\max}, a_{\max}$ (s) & $T$ after $u_{\max}$ stretch (s) & peak speed (m/s) & peak accel.\ (m/s$^2$) \\
+\midrule
+0.5 & 1.70 & 1.70 & 0.55 & 1.00 \\
+1.0 & 2.40 & 3.07 & 0.61 & 0.61 \\
+1.5 & 3.52 & 4.49 & 0.63 & 0.43 \\
+2.0 & 4.69 & 5.70 & 0.66 & 0.36 \\
+3.0 & 7.03 & 8.55 & 0.66 & 0.24 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{keypoint}
+Because the planner requires $(v + \tau a)/K \le u_{\max}$, the speed can never exceed
+$u_{\max} K = 0.9 \times 0.745 = 0.67$~m/s: the command limit, not \code{v\_max}, sets the
+speed: no strike trajectory ever plans more than $\approx 0.66$~m/s, whatever \code{v\_max} is above that. To fly
+faster you must raise \code{u\_max} (and the driver's \code{max\_rc}, 80 $\approx$ 1.0~m/s), not \code{v\_max}.
+\end{keypoint}
+
+\func{Quintic.at}{(t) -> (position, velocity, acceleration)}
+Returns $\mathbf p_0 + \mathbf d\,s$, $\mathbf d\,s'/T$, $\mathbf d\,s''/T^2$ at $r = t/T$ (clamped). Three
+\code{numpy} arrays of length 3.
+
+\func{Quintic.samples}{(n=40) -> list of positions}
+$n+1 = 41$ positions at $t = kT/n$, $k = 0..n$. Used only by \code{check}.
+
+\subsection{The clearance check}
+
+\func{check}{(traj, zone, clearance\_fn, z\_lim=(1.2, 2.1)) -> None or str}
+Returns \code{None} if the trajectory is safe, else a human-readable reason. For each of the 41 samples
+$\mathbf p_k$:
+\begin{enumerate}[nosep]
+  \item the height must satisfy $z_{\text{lo}} - 1\text{ mm} \le z_k \le z_{\text{hi}} + 1\text{ mm}$;
+  \item if the zone has a clearance grid, $\text{clearance}(x_k, y_k, z_k) \ge \text{margin}$, where
+        \code{clearance\_fn} is \code{zone.clearance} (distance to the nearest scanned obstacle, read from the
+        precomputed grid of the layer valid at $z_k$).
+\end{enumerate}
+Since the path is a straight segment and $s$ is monotonic, the 41 samples are spaced at most
+$d\,\max_r s'(r)/40 \approx 1.875\,d/40$ apart along the segment, i.e.\ under 5~cm for $d \le 1$~m and
+$\approx 14$~cm for $d=3$~m: with a 25~cm margin a thin obstacle cannot slip between samples for moves of a few
+metres.
+
+\begin{intuition}
+The author wrote: \emph{``Trajectory: when it knows a marker's position and its own position it knows where to
+go.''} That is exactly it, with one caveat: there is no path \emph{planning} in the graph-search sense. The goal
+is computed geometrically from the marker map (a point $d$ metres along the marker's normal, pushed back until it
+is in free space, \code{Strike.point\_in\_front}); the start is the current EKF position (\code{Strike.here});
+the path is the straight segment between them; \code{check} only \emph{validates} it. If the segment crosses an
+obstacle, the move is refused and skipped, never re-routed. In this bedroom the free space is nearly convex (a
+rectangle or an L), so straight segments between free points are almost always free.
+\end{intuition}
+
+% =====================================================================================================
+\section{The marker tour (\texorpdfstring{\texttt{marker\_tour.py}}{marker\_tour.py})}
+
+\code{tello\_marker\_tour} visits every marker of the map: survey turn, then for each marker turn to face it,
+approach to 0.9~m, hold 1~s, back off to 1.6~m, next one; then back to the start point and land. The class is
+also the library on which \code{tello\_goto} and \code{tello\_patrol} are built.
+
+\func{clip}{(v, m) -> float}
+$\max(-m, \min(m, v))$: symmetric saturation. Also imported by \file{patrol.py}.
+
+\func{MarkerTour.\_\_init\_\_}{() -> None}
+Declares the parameters, with their defaults:
+
+\begin{center}
+\small
+\begin{tabular}{@{}llp{8.3cm}@{}}
+\toprule
+Parameter & Default & Meaning \\
+\midrule
+\code{standoff} & 1.6 m & overview distance in front of a marker (back-off point) \\
+\code{approach} & 0.9 m & visit distance in front of a marker \\
+\code{max\_accel} & 0.6 m/s$^2$ & $a_{\max}$ of the braking profile \\
+\code{max\_speed} & 0.5 m/s & horizontal $v_{\max}$ \\
+\code{max\_vertical\_speed} & 0.25 m/s & vertical saturation \\
+\code{max\_yaw\_rate} & 0.5 rad/s & yaw saturation $\omega_{\max}$ \\
+\code{kp}, \code{kp\_yaw} & 0.6, 0.9 & proportional gains (1/s) \\
+\code{hold} & 1.0 s & stop in front of each marker \\
+\code{wall\_margin} & 0.6 m & distance kept from marker walls (\code{flight\_zone}) \\
+\code{tour\_z\_min}, \code{tour\_z\_max} & 1.2, 2.1 m & height limits (replaced by the band in band mode) \\
+\code{room\_box} & $\pm 99$ m & optional room extents for walls without markers \\
+\code{tour\_lost\_timeout} & 12 s & \code{lost\_max}: search time before landing \\
+\code{sequence} & env \code{GOTO\_SEQ} & marker ids for \code{tello\_goto} \\
+\code{survey} & true & full turn after takeoff \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+It then loads the marker map (\code{load\_marker\_map}: each marker has \code{t}, its centre in \code{map}, and
+\code{R}, whose third column is the outward normal), checks that every id of the sequence exists, computes
+\code{self.fence = flight\_zone()}, the centroid of all markers (the ``main wall'' direction), and subscribes to
+\topic{/ekf/drift} (\code{on\_drift}) and \topic{/aruco/pose} (a lambda that only stores \code{marker\_t}).
+
+\func{on\_drift}{(m) -> None}
+Stores the EKF drift $\boldsymbol\delta = (\delta_x, \delta_y)$ (m/s, map frame) and its arrival time.
+
+\func{marker\_age}{() -> float}
+Seconds since the last \topic{/aruco/pose}, i.e.\ since a marker was really seen and accepted by the localizer.
+This is the ``is the EKF backed by a measurement'' signal, as opposed to \code{pose\_age()}, which is the age of
+the last accepted \emph{EKF} pose (fresh as long as the EKF publishes with $\sigma \le 0.15$~m).
+
+\func{flight\_zone}{() -> (xmin, xmax, ymin, ymax)}
+The axis-aligned mission rectangle. Start from \code{room\_box} shrunk by the margin; then for each marker, look
+at its normal $\mathbf n = R_{:,3}$: if $n_x > 0.9$ the marker is on a wall facing $+x$ (west wall), so
+$x_{\min} \leftarrow \max(x_{\min}, t_x + 0.6)$; symmetrically for $-x$, $+y$, $-y$. Finally intersect with the
+zone rectangle from the room scan (\code{x\_min}\dots\code{y\_max} of \file{config/flight\_zone\_band.yaml}).
+An empty rectangle raises \code{Abort}. \code{StepTest.safety} lands if the drone leaves this rectangle by more
+than \code{fence\_tol} (0.3~m; 1.0~m for goto and patrol, which can take off anywhere).
+
+\subsection{Where to stop in front of a marker}
+
+\func{feasible}{(m, n, d, z=None) -> (x, y)}
+The point $d$ metres in front of marker $m$ along its horizontal normal $\mathbf n$, pushed further back in
+5~cm steps until it is in free space:
+$$
+\mathbf q_k = \mathbf t_{xy} + (d + 0.05k)\,\mathbf n_{xy}, \quad k = 0,\dots,39,
+\qquad \text{accept the first with } \text{clearance}(\mathbf q_k, z) \ge \text{margin} + 0.15 .
+$$
+The extra 15~cm (the comment says +10~cm still overshot by 5~cm in simulation) leaves room for the braking
+overshoot. With no grid, or if none of the 40 candidates (up to $d + 1.95$~m) is free, it falls back to the
+point at distance $d$ clamped into \code{self.fence}. The height $z$ matters only for a 3D zone, whose clearance
+grid depends on the layer.
+
+\func{waypoints}{() -> list of dict}
+One entry per marker, then ordered. For marker $m$ with horizontal unit normal $\mathbf n$:
+\begin{enumerate}[nosep]
+  \item Height: $z = \operatorname{clip}(t_z, z_{\text{lo}}, z_{\text{hi}})$.
+  \item Vertical field of view: if the marker is higher or lower than the drone can fly, back off until it sits
+        in the middle 60\,\% of the 43$^\circ$ vertical field of view:
+        $$ d_{\min} = \frac{|t_z - z|}{0.6\,\tan 21.5^\circ} \approx \frac{|t_z - z|}{0.236}. $$
+        For a west marker at 2.6~m seen from 2.0~m: $d_{\min} \approx 2.5$~m.
+  \item Approach point: \code{near = feasible(m, n, max(approach, d\_min), z)}.
+  \item \emph{The 3D-zone upper-layer trick}: with the L-shaped 3D zone (\file{config/flight\_zone\_3d.yaml},
+        launch \code{flight\_zone:=3d}), \code{zone["layers"]} is a list of height layers; the highest one,
+        $[2.08, 2.30]$~m, is the only one that extends over the east furniture. The code tries a second height
+        $z_u = \min(\max(z, z_{\text{floor,top}} + 0.10), z_{\text{hi}}) = \min(\max(z, 2.18), z_{\text{hi}})$
+        and recomputes the approach point there. If it is more than 5~cm closer to the marker, it adopts it
+        \emph{and} the higher height: for the east markers (behind the furniture) the drone goes up to fly over
+        the desk instead of stopping 0.7~m short of it.
+  \item Overview point: \code{p = feasible(m, n, max(standoff, d\_min, |near - t|), z)}, never closer than the
+        approach point.
+  \item Heading: $\psi = \operatorname{atan2}(t_y - y, t_x - x)$, facing the marker from the overview point.
+  \item Wall index: $\operatorname{round}\big(\deg\operatorname{atan2}(n_y,n_x)/90\big) \bmod 4$; and the polar
+        angle \code{ang} of the marker around the centre of the fence.
+\end{enumerate}
+The list is sorted by \code{ang} (a walk around the room), then rotated so that it starts with the marker whose
+heading is closest to the start heading \code{p0[3]} (in buckets of 0.5~rad, ties broken by distance): the first
+move is not a blind turn.
+
+\func{survey\_turn}{() -> None}
+A full turn in place at 0.45~rad/s with \code{blind=True}, integrating $\sum |\operatorname{wrap}(\psi_k -
+\psi_{k-1})|$ from \code{yaw\_estimate()} until $2\pi - 0.1$; 25~s timeout; \code{lost\_max} raised to at least
+15~s meanwhile (restored in \code{finally}). Purpose: see every wall, fix the position, let the EKF learn the
+drift.
+
+\subsection{The set-point controller \texorpdfstring{\texttt{goto}}{goto}}
+
+\func{search}{(look\_at) -> None}
+Markers lost: turn towards \code{look\_at} \emph{from the last known position} \code{last\_xy}, via
+\code{search\_heading} (turn, then $\pm 40^\circ$ sweep). Hovers if there is no yaw or no last position.
+
+\func{goto}{(target, yaw\_t, timeout=25.0, tol=0.12, yaw\_only=False, look\_at=None, face=None) -> None}
+The workhorse of the tour, \code{tello\_goto} and the patrol. It runs \code{step()} at 20~Hz for at most
+\code{timeout} seconds. Each step goes through a cascade of guards before the control law:
+
+\begin{enumerate}[nosep]
+  \item If the pose is fresh ($<0.5$~s), remember \code{last\_xy}.
+  \item Translation mode and (pose older than 1~s \emph{or} last marker older than 1~s): \code{search(look)} and
+        return. Default \code{look} is the marker centroid.
+  \item Translation mode and last marker older than 0.7~s: hover (\code{send()}); the driver holds position.
+  \item Turn-only mode and pose older than 0.5~s: keep turning on the IMU heading,
+        $\omega = \operatorname{clip}(0.9\,e_\psi, 0.5)$, but stop (hover) once within $10^\circ$ to wait for a
+        marker to confirm the heading.
+  \item Any mode, pose older than 0.5~s: hover.
+\end{enumerate}
+
+Then the control law. With the EKF pose $(x,y,z,\psi)$ and target $(x_t,y_t,z_t)$:
+\begin{itemize}[nosep]
+  \item Heading goal: \code{yaw\_t}, or, if \code{face} is given and the drone is more than 0.3~m from it,
+        $\psi_g = \operatorname{atan2}(f_y - y, f_x - x)$ recomputed every step (a fixed heading let the marker
+        slide out of the 55$^\circ$ field of view when the drone was 20~cm off to the side).
+  \item Errors: $\mathbf e = (x_t - x, y_t - y)$, $e_z = z_t - z$, $e_\psi = \operatorname{wrap}(\psi_g - \psi)$,
+        $d = \lVert\mathbf e\rVert$.
+  \item Speed along the error:
+        $$ v = \min\Big( v_{\max},\ k_p d,\ \sqrt{2 a_{\max} \max(d - \tfrac{1}{2}\text{tol}, 0)} \Big). $$
+        The square-root term is the classic braking curve: from speed $v$ a constant deceleration $a$ stops in
+        $v^2/2a$, so $v \le \sqrt{2ad}$ stops exactly at the target.
+  \item World-frame velocity, minus the drift learnt by the EKF (if received in the last 0.5~s):
+        $$ \mathbf v^w = v\,\frac{\mathbf e}{d} - \boldsymbol\delta . $$
+  \item Rotation to the body frame and inversion of the static gains of the model
+        ($K_X = 0.66$ forward, $K_Y = 0.83$ left, from \file{model.py}):
+$$
+\begin{bmatrix} u_x \\ u_y \end{bmatrix} =
+\begin{bmatrix} 1/K_X & 0 \\ 0 & 1/K_Y \end{bmatrix}
+\begin{bmatrix} \cos\psi & \sin\psi \\ -\sin\psi & \cos\psi \end{bmatrix}
+\begin{bmatrix} v^w_x \\ v^w_y \end{bmatrix},
+$$
+$$
+u_z = \operatorname{clip}(k_p e_z, 0.25),\qquad
+\omega = \operatorname{clip}(k_\psi e_\psi, 0.5).
+$$
+\end{itemize}
+Default gains: $k_p = 0.6$~s$^{-1}$, $k_\psi = 0.9$~s$^{-1}$, $v_{\max}=0.5$~m/s, $a_{\max} = 0.6$~m/s$^2$.
+\emph{Reached}: $d<\text{tol}$, $|e_z|<0.1$~m and $|e_\psi|<10^\circ$ (turn-only: $|e_\psi|<5^\circ$),
+continuously for 0.6~s; then one zero command and return. On timeout it prints the remaining error and returns
+anyway: \code{goto} never fails, the mission just goes on.
+
+\begin{lstlisting}
+d = math.hypot(ex, ey)
+v = min(self.v_max, self.kp * d, math.sqrt(2 * self.a_max * max(d - 0.5 * tol, 0.0)))
+vx, vy = (ex / d * v, ey / d * v) if d > 1e-3 else (0.0, 0.0)
+if time.time() - self.drift_t < 0.5:
+    vx, vy = vx - self.drift[0], vy - self.drift[1]
+c, s = math.cos(yaw), math.sin(yaw)
+self.send((c * vx + s * vy) / M.K_X, (-s * vx + c * vy) / M.K_Y,
+          clip(self.kp * ez, self.vz_max), clip(self.kp_yaw * eyaw, self.w_max))
+\end{lstlisting}
+
+\begin{intuition}
+Which of the three terms of $v$ is active? $k_p d = v_{\max}$ at $d = 0.5/0.6 = 0.83$~m, so beyond 0.83~m the
+drone cruises at 0.5~m/s. Below, $k_p d$ and $\sqrt{2a_{\max}(d-\text{tol}/2)}$ cross where
+$0.36 d^2 = 1.2(d - 0.05)$, i.e.\ at $d \approx 5$~cm (for tol = 0.10). So with the default gains the
+braking curve is active only in the last 5~cm; in practice $v = \min(0.5, 0.6d)$: a \emph{saturated
+proportional controller}. In the linear region the error decays like $e^{-k_p t}$ (time constant 1.7~s), and the
+largest deceleration requested is $k_p v_{\max} = 0.3$~m/s$^2$, gentle enough for the 0.5--0.8~s total latency.
+Why no integral term? The comment explains: a P-only approach stopped $\approx$20~cm short because of the
+Tello's own 5--10~cm/s drift; an integrator overshot by 20--30~cm; subtracting the EKF's drift estimate
+$\boldsymbol\delta$ (a feedforward disturbance cancellation) fixed both.
+\end{intuition}
+
+Note that \code{goto} has \emph{no velocity feedforward}: the reference is a fixed point, not a moving one, and
+the EKF already compensates the measurement delay (its pose is predicted to ``now''). Compare with
+\code{Strike.track} below.
+
+\func{turn}{(yaw\_t) -> None}
+Turn in place to \code{yaw\_t} with \code{goto(..., yaw\_only=True)}. A turn larger than $100^\circ$ is split if
+facing the marker centroid lies on the way (it is closer to the current heading than the goal): first face the
+centroid (10~s timeout), then the goal (12~s): the drone never spends long facing a wall with no marker.
+\code{lost\_max} is raised to at least 7~s during the turn.
+
+\func{centre\_point}{() -> (x, y)}
+The centre of the fence, moved to the nearest point of a $\pm 0.6$~m grid (5~cm step, $25 \times 25$ points)
+with clearance $\ge$ margin $+0.2$~m.
+
+\func{go\_sequence}{() -> None}
+The \code{tello\_goto} mission: centre point at height $z_c$ (middle of the band, or \code{p0} height clipped),
+then for each id: \code{turn} towards the marker \emph{from the current pose}, \code{goto(near, face=marker)}
+with tol = 0.10, hold 1~s, print the final error, \code{goto} back to the centre; finally
+\code{return\_home()}.
+
+\func{main}{() -> None}
+\code{prepare()}; if a sequence was given, \code{go\_sequence()} and return. Otherwise: abort if \code{p0} is
+outside the fence; survey turn and \code{turn(yaw0)}; compute the waypoints; for each, if it is on another wall
+than the previous one, go back to the fence centre \emph{at the next marker's height} first (turning next to a
+wall left markers cut at the image edges); \code{turn(w.yaw)}; approach (tol 0.10, \code{face}); hold; back
+off to \code{p} (tol 0.15). Then \code{goto} the start point, \code{return\_home()}.
+
+\subsection{Landing when markers are lost}
+
+There is no ``land'' call in \file{marker\_tour.py}. Three mechanisms combine:
+\begin{enumerate}[nosep]
+  \item Short loss ($>0.7$~s since the last marker): \code{goto} hovers, the driver's position hold keeps the
+        drone in place on the EKF prediction.
+  \item Longer loss ($>1$~s): \code{goto} turns towards \code{look\_at} (the marker it is going to) and sweeps
+        $\pm40^\circ$.
+  \item \code{StepTest.safety} raises \code{Abort} when \code{pose\_age() > lost\_max} (12~s for the tour),
+        and \code{run(cls)} lands in its \code{finally}.
+\end{enumerate}
+Because \code{pose\_age()} is the age of the last \emph{accepted EKF} pose, the 12~s count starts when the EKF's
+$\sigma_{xy}$ exceeds 0.15~m (\code{max\_pose\_sigma}), not exactly when the last marker was seen; see the
+review notes.
+
+% =====================================================================================================
+\section{\texorpdfstring{\texttt{tello\_goto}}{tello\_goto} (\texorpdfstring{\texttt{goto\_markers.py}}{goto\_markers.py})}
+
+\func{GotoMarkers.\_\_init\_\_}{() -> None}
+Calls \code{MarkerTour.\_\_init\_\_}, exits with a usage message if the sequence is empty, sets
+\code{survey = False} (irrelevant in sequence mode, where \code{main} returns before the survey) and
+\code{fence\_tol = 1.0}: the drone can take off anywhere, the obstacle grid is the real limit.
+
+\func{main}{() -> None}
+Collects the numeric command-line arguments (\code{tello\_goto 49 35}), stores them in the environment variable
+\code{GOTO\_SEQ} (read as the default of the \code{sequence} parameter, which is how a plain argument list reaches
+a ROS parameter), and \code{run(GotoMarkers)}. The whole mission is \code{MarkerTour.go\_sequence}.
+
+% =====================================================================================================
+\section{The patrol (\texorpdfstring{\texttt{patrol.py}}{patrol.py})}
+
+\code{tello\_patrol} flies rectangular laps inside the flight zone while turning on itself continuously (so that the
+camera sweeps every wall). Typing a marker number and ENTER interrupts the lap: the drone stops, turns until its
+\emph{camera} sees that marker, flies in front of it, holds, and resumes patrolling.
+
+\subsection{``Two patrol functions and a patrol thing''}
+
+The author asked why there are several patrols. There are three distinct things with that name:
+\begin{enumerate}[nosep]
+  \item \code{Patrol.patrol()} in \file{patrol.py}:143 --- the rectangular laps of \code{tello\_patrol}, built on
+        \code{MarkerTour}, reactive control, continuous yaw rotation.
+  \item \code{Strike.patrol()} in \file{strike.py}:144 --- a \emph{different} mission: straight left-right legs
+        across the zone, facing the marker wall, each leg a planned quintic; selected by the \code{mode}
+        parameter of \code{tello\_strike} (\code{mode:=patrol}, \code{strike}, or the default
+        \code{patrol,strike}). It is the ``patroller of the final demo'' rehearsal.
+  \item \code{PatrolNode} in \file{patrol.py}:274 --- not a mission, a two-line subclass of \code{Patrol} that adds
+        a second \topic{/aruco/pose} subscription counting poses (\code{pose\_count}) for the lap statistics.
+        \code{main()} runs \code{PatrolNode}, not \code{Patrol}.
+\end{enumerate}
+They do not share code; they were written at different times for different purposes (\code{Strike} predates
+\code{Patrol}: the commit adding \code{tello\_patrol} is \code{d2227e0}).
+
+\subsection{Why the patrol does not use \texorpdfstring{\texttt{trajectory.py}}{trajectory.py}}
+
+The author's question: \emph{``In patrol there is strike, self.mode, self.strike, self.retreat, self.track\dots\
+why don't we use the trajectory module already?''} The attributes \code{self.mode}, \code{self.strike},
+\code{self.track}, \code{retreat\_d} do not exist in \file{patrol.py}; they belong to \file{strike.py}, which
+\emph{does} use the trajectory module (\code{from tello\_driver.trajectory import Quintic, check},
+\file{strike.py}:28; every move of \code{Strike} is \code{self.track(Quintic(...))}). \file{patrol.py} imports
+only \code{MarkerTour}, \code{clip}, \code{model}, \code{step\_test} and \code{teleop.read\_key}; \file{marker\_tour.py}
+does not import \file{trajectory.py} either. So:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Mission & Motion law & Uses \file{trajectory.py} \\
+\midrule
+\code{tello\_marker\_tour}, \code{tello\_goto} & \code{MarkerTour.goto} (set point, saturated P) & no \\
+\code{tello\_patrol} & own lap law + \code{goto} for the marker visit & no \\
+\code{tello\_strike} & \code{Strike.track} (quintic + feedforward + PI) & yes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Reasons visible in the code for not using it in the patrol: a quintic is \emph{rest-to-rest}, while the patrol
+explicitly does not stop at corners (``corner reached: next one (no stop)'', \file{patrol.py}:187); the patrol
+rotates continuously, which the strike tracker does not model (it holds a fixed heading); and the patrol must keep
+going when markers drop out (it then turns blind without translating), which a time-indexed reference handles
+only by freezing. Nothing prevents using \code{Quintic} for the ``fly in front of marker \code{mid}'' part of
+\code{find()} --- that would be a natural unification (see the review).
+
+\subsection{Inputs}
+
+\func{Patrol.\_\_init\_\_}{() -> None}
+After \code{MarkerTour.\_\_init\_\_}, declares dynamically typed parameters (so \code{speed:=1} and
+\code{speed:=1.0} are both accepted): \code{speed} 0.25~m/s, \code{yaw\_rate} 10~deg/s (stored in rad/s),
+\code{search\_yaw\_rate} 12~deg/s, \code{inset} 0.35~m, \code{height} (0 = top of the band $-0.05$~m),
+\code{see\_frames} 3. The comments justify the numbers with real-flight statistics: markers detected 92\,\% of
+the seconds below 5~deg/s, 73\,\% at 10--15, 50\,\% at 15--20, 18\,\% at 30--40~deg/s (motion blur); and the
+worst blind arc of a full turn is $124^\circ$ with a 0.15~m inset at 1.85~m but $58^\circ$ with 0.35~m at 2.0~m.
+It also sets \code{survey = False}, \code{fence\_tol = 1.0}, \code{lost\_max} $\ge$ 15~s, subscribes to
+\topic{/aruco/ids} and opens \file{laps.csv}.
+
+\func{on\_ids}{(m) -> None}
+Parses \topic{/aruco/ids}, a string \code{"id:u:size\_px,..."} published by the localizer every frame, where
+$u = (\bar c_x - c_x)/c_x \in [-1, 1]$ is the horizontal image position of the marker centre ($-1$ left, $+1$
+right) and \code{size\_px} its longest edge. Appends \code{(t, u, size)} to \code{self.seen[id]} and keeps only
+the last second.
+
+\func{sees}{(mid, window=0.5) -> (frames, mean u)}
+How many frames contained marker \code{mid} in the last \code{window} seconds, and its mean $u$.
+
+\func{check\_keys}{() -> None, raises Abort}
+Overrides \code{StepTest.check\_keys} (called by \code{safety()} every tick). Drains all pending keys: digits
+accumulate in \code{buf}; backspace erases; ENTER with a number sets \code{self.request} (if the id is in the
+map); ENTER alone prints the current lap statistics; \code{+}/\code{-} change the patrol speed by
+0.05~m/s within $[0.05, 0.8]$; \code{*}/\code{/} the turning speed by 5~deg/s within $[0, 90]$; anything else
+raises \code{Abort("key pressed")} (land).
+
+\subsection{The lap law}
+
+\func{path}{() -> 4 corners}
+The fence rectangle shrunk by \code{inset}: $(x_0,y_0), (x_1,y_0), (x_1,y_1), (x_0,y_1)$, counter-clockwise.
+
+\func{patrol}{() -> None (returns when a marker is requested)}
+Picks the nearest corner as the first target, the height
+$z_t$ = \code{height} or (band top $-0.05$) or \code{p0} height, checks that all four corners have clearance
+$\ge$ margin $+0.1$ at $z_t$ (else \code{Abort}: in the 3D zone the L shape may exclude a corner), starts a lap,
+and runs \code{step()} with no timeout ($10^9$~s) until \code{self.request} is set. Each step:
+\begin{enumerate}[nosep]
+  \item Statistics: count the step, ``in view'' if the last marker is younger than 0.25~s, longest blind
+        stretch, maximum EKF $\sigma_{xy}$.
+  \item No translation without a marker: if the pose is older than 0.5~s or the marker older than 0.7~s, turn
+        at $\omega_p$ blind and return (turning is what brings markers back).
+  \item Path error (metric only): projection of the position on the current leg $[\mathbf a, \mathbf b]$,
+        $s = \operatorname{clip}\big((\mathbf p - \mathbf a)\cdot(\mathbf b - \mathbf a)/\lVert\mathbf b -
+        \mathbf a\rVert^2, [0,1]\big)$, error $\lVert \mathbf a + s(\mathbf b - \mathbf a) - \mathbf p\rVert$.
+  \item Corner switching: if $d < 0.15$~m, target the next corner (no stop); when the index comes back to the
+        first target, the lap is complete: \code{print\_lap}, \code{lap\_n += 1}, \code{new\_lap}.
+  \item Velocity: $v = \min(v_p, \sqrt{2a_{\max} d})$ towards the corner, minus the EKF drift.
+  \item Yaw-rate compensation: the drone turns at $\omega_p$ while moving, and the command acts $L_U = 0.35$~s
+        later, so the world-to-body rotation uses the predicted heading $\psi_p = \psi + \omega_p L_U$:
+$$
+u_x = \frac{\cos\psi_p\,v^w_x + \sin\psi_p\,v^w_y}{K_X},\quad
+u_y = \frac{-\sin\psi_p\,v^w_x + \cos\psi_p\,v^w_y}{K_Y},
+$$
+$$
+u_z = \operatorname{clip}(k_p(z_t-z), 0.25),\quad \omega = \omega_p .
+$$
+        At 10~deg/s this is a $3.5^\circ$ correction; without it the motion would be bent sideways by
+        $\omega_p L_U$.
+\end{enumerate}
+The yaw is \emph{not} controlled: it is a constant-rate feedforward $\omega = \omega_p$, which is the whole point
+(the camera scans the room).
+
+\begin{intuition}
+With $a_{\max} = 0.6$, $\sqrt{2a_{\max}d}$ falls below $v_p = 0.25$~m/s only when $d < 0.052$~m, but the corner
+switches at $d = 0.15$~m; so at the default speed the drone never slows down at corners, it just cuts them. The
+slowdown starts to act only for $v_p > \sqrt{1.2 \times 0.15} = 0.42$~m/s. That is consistent with ``no stop'',
+but the comment ``slows down before the corner'' is only true at high speed.
+\end{intuition}
+
+\func{new\_lap}{() -> None}
+Resets the lap dictionary: start time, step count, in-view count, pose count at start, path errors, max sigma,
+longest blind time, and the speed and yaw rate of this lap.
+
+\func{print\_lap}{(partial=False) -> None}
+Skipped if fewer than 20 steps (1~s). Prints and, unless \code{partial}, writes to \file{laps.csv}: duration,
+speed, yaw rate, percentage of steps with a marker in view, ArUco poses per second
+$(\text{pose\_count} - \text{poses0})/\text{duration}$, path error RMS and max, maximum $\sigma_{xy}$, longest blind
+stretch. The docstring's tuning recipe: raise the speeds while these numbers stay good.
+
+\func{on\_pose}{(m) -> None}
+Calls \code{StepTest.on\_pose}, then stores $\sigma_{xy} = \sqrt{\max(P_{xx},P_{yy})}$ from the EKF covariance
+(also for poses rejected as too uncertain, which is what the statistic should show).
+
+\subsection{Finding a typed marker}
+
+\func{find}{(mid) -> None}
+Three phases, the first two using the camera only (\topic{/aruco/ids}), the third the map:
+\begin{enumerate}[nosep]
+  \item \emph{Search}: turn blind at $\pm\omega_s$ (12~deg/s, in the patrol's turning direction) until
+        \code{sees(mid)} reports at least \code{see\_frames} = 3 frames in 0.5~s. The turned angle is integrated
+        from \code{yaw\_estimate()}; beyond $4\pi$ (two full turns) it raises \code{Abort} (land). 60~s timeout.
+  \item \emph{Centre}: $\omega = \operatorname{clip}(-1.2u, 0.5)$ while the marker is seen (a marker on the
+        right, $u>0$, gives a clockwise turn), $\pm 0.3$~rad/s if it is lost, until $|u| < 0.1$ (about
+        $\pm 3^\circ$ of the 55$^\circ$ field of view), 8~s timeout.
+  \item \emph{Visit}: take this marker's waypoint from \code{waypoints()}, \code{goto(near, face=marker)} with
+        tol 0.10, hold 1~s, print the time and final error.
+\end{enumerate}
+Then \code{main} returns to \code{patrol()}, which restarts from the nearest corner.
+
+\func{main}{() -> None}
+\code{pose\_count = 0}, \code{lap\_n = 1}, \code{prepare()}, then forever: \code{patrol()}; take the request;
+print the partial lap; \code{find(mid)}. The only exits are exceptions (key, battery, zone, lost markers,
+marker not found), all of which land.
+
+\func{close}{() -> None}
+Closes \file{laps.csv} then the \code{StepTest} files.
+
+\func{\_count\_marker\_poses}{(node) -> None}
+Adds a \topic{/aruco/pose} subscription whose callback increments \code{node.pose\_count} and sets
+\code{node.marker\_t}.
+
+\func{PatrolNode.\_\_init\_\_}{() -> None}
+\code{Patrol.\_\_init\_\_}, \code{pose\_count = 0}, \code{\_count\_marker\_poses(self)}.
+
+\subsection{State machine of the patrol}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}lXl@{}}
+\toprule
+State & Behaviour & Transition $\rightarrow$ next \\
+\midrule
+PREPARE & checks, ENTER, takeoff, climb, measure \code{p0} & done $\rightarrow$ LAP \\
+LAP (to corner $k$) & $v=\min(v_p,\sqrt{2ad})$ to corner, constant $\omega_p$ & $d<0.15$ $\rightarrow$ LAP ($k{+}1$); request $\rightarrow$ SEARCH \\
+LAP-BLIND & no marker for 0.7~s: turn only & marker back $\rightarrow$ LAP \\
+SEARCH & turn at $\omega_s$, camera only & 3 frames in 0.5~s $\rightarrow$ CENTRE; $>720^\circ$ $\rightarrow$ LAND \\
+CENTRE & $\omega = -1.2u$ & $|u|<0.1$ or 8~s $\rightarrow$ APPROACH \\
+APPROACH & \code{goto(near, face)} & reached 0.6~s or 25~s $\rightarrow$ HOLD \\
+HOLD & zero command for 1~s & $\rightarrow$ LAP (nearest corner) \\
+any & key other than digits/ENTER/$\pm$/*//, battery $<20\,\%$, zone, \code{pose\_age} $>15$~s & $\rightarrow$ LAND \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% =====================================================================================================
+\section{Strike: planned legs (\texorpdfstring{\texttt{strike.py}}{strike.py})}
+
+\code{tello\_strike} rehearses the balloon attack on markers: fast moves planned as quintics, checked against the
+free space \emph{before} flying, and tracked with the identified model as feedforward.
+
+\func{Strike.\_\_init\_\_}{() -> None}
+Parameters: \code{mode} (\code{"patrol,strike"}, comma list), \code{targets} (\code{"6,10,5"}), \code{legs} 4,
+\code{v\_max} 0.8, \code{a\_max} 1.0, \code{u\_max} 0.9, \code{kp} 0.8, \code{kp\_z} 0.8, \code{kp\_yaw} 1.0,
+\code{ki} 0.3, model \code{K} = \code{K\_MEAN} = 0.745, $\tau$ = \code{TAU\_XY} = 0.25~s, $L_u$ = \code{L\_U} =
+0.35~s, \code{strike\_distance} 0.9~m, \code{retreat\_distance} 1.6~m, \code{height} (0 = middle of the band, or
+2.0~m), \code{strike\_lost\_timeout} 15~s. Height limits \code{z\_lim} = the band, or $(1.2, 2.1)$. It sets
+\code{box = 99} (no box around the start: no \code{fence} attribute, so \code{safety} uses the obstacle grid and
+this huge box), and opens \file{tracking.csv}.
+
+\subsection{The tracking controller}
+
+\func{track}{(traj, yaw\_t, phase, settle=2.0, tol=0.12) -> dict or None}
+First \code{check(traj, zone, clearance, z\_lim)}; if refused, print the reason and return \code{None} (the move
+is skipped). Then a 20~Hz loop:
+
+\begin{itemize}[nosep]
+  \item \emph{Frozen reference}: if the pose is older than 0.6~s, add $1/\text{RATE}$ to \code{frozen} and hover.
+        The trajectory time is $t = t_{\text{now}} - t_0 - t_{\text{frozen}}$: the reference waits for the
+        drone instead of running away.
+  \item Reference now and $L_u$ ahead: $(\mathbf p_d, \mathbf v_d, \cdot) = \text{at}(t)$,
+        $(\cdot, \mathbf v_{\text{ff}}, \mathbf a_{\text{ff}}) = \text{at}(t + L_u)$.
+  \item Integral, only near the reference ($|e_x|, |e_y| < 0.3$~m), clamped:
+        $\mathbf I \leftarrow \operatorname{clip}(\mathbf I + k_i \mathbf e / 20, \pm 0.15)$.
+  \item World-frame horizontal command:
+        $$ \mathbf u^w = \frac{\mathbf v_{\text{ff}} + \tau \mathbf a_{\text{ff}}}{K} + k_p(\mathbf p_d - \mathbf p)_{xy}
+        + \mathbf I, \qquad \text{scaled down so that } \lVert\mathbf u^w\rVert \le 1.3\,v_{\max} = 1.04\text{ m/s}. $$
+  \item Vertical and yaw:
+        $u_z = \operatorname{clip}(v_{\text{ff},z} + k_z e_z, \pm 0.4)$,
+        $\omega = \operatorname{clip}(k_\psi \operatorname{wrap}(\psi_t - \psi), \pm 0.8)$.
+  \item Body frame: $u_x = \cos\psi\,u^w_x + \sin\psi\,u^w_y$, $u_y = -\sin\psi\,u^w_x + \cos\psi\,u^w_y$.
+  \item Log a row of \file{tracking.csv}; done when $t > T$ and ($e < \text{tol}$ or $t > T + \text{settle}$).
+\end{itemize}
+The loop's own timeout is $T + \text{settle} + 20$~s. Returns $T$, the RMS and max horizontal tracking error,
+the distance $d$, and the elapsed time.
+
+\begin{lstlisting}
+pd, vd, _ = traj.at(t)
+_, vff, aff = traj.at(t + self.L_u)
+_, x, y, z, yaw = self.pose
+ex, ey, ez = pd[0] - x, pd[1] - y, pd[2] - z
+if abs(ex) < 0.3 and abs(ey) < 0.3:
+    self.integ = np.clip(self.integ + self.ki * np.array([ex, ey]) / RATE, -0.15, 0.15)
+ux = (vff[0] + self.tau * aff[0]) / self.K + self.kp * ex + self.integ[0]
+uy = (vff[1] + self.tau * aff[1]) / self.K + self.kp * ey + self.integ[1]
+\end{lstlisting}
+
+\paragraph{Why this feedforward.} The identified model per horizontal axis is
+$\tau \dot v(t) = K u(t - L_u) - v(t)$. We want $v(t) = v_d(t)$ exactly; substituting,
+$\tau a_d(t) = K u(t-L_u) - v_d(t)$, so $u(t - L_u) = (v_d(t) + \tau a_d(t))/K$, i.e.
+$$ u(t) = \frac{v_d(t + L_u) + \tau\,a_d(t + L_u)}{K}. $$
+The model inverse has two parts: $\tau a_d$ \emph{anticipates} the lag of the first-order response (push harder
+while accelerating, brake earlier), and the time shift $L_u$ anticipates the pure delay. Feedback then only has to
+correct model errors and disturbances: $k_p = 0.8$~s$^{-1}$ on the position error (evaluated against $\mathbf p_d(t)$,
+\emph{not} shifted: the EKF pose is already delay-compensated), and a slow integral $k_i = 0.3$~s$^{-2}$ capped at
+0.15~m/s for the drift (this mission does not use \topic{/ekf/drift}). Note that the feedback term is not divided
+by $K$ and that a single mean $K$ is used for both body axes, unlike \code{goto} which divides by $K_X$ and $K_Y$
+separately.
+
+\begin{keypoint}
+Compare the two controllers. \code{goto}: reference = a fixed point; command $\propto$ error, saturated; no
+model except static gains; drift cancelled with $\boldsymbol\delta$. \code{track}: reference = a time-indexed
+trajectory; command = model inverse of the reference velocity + P + I on the error; the reference freezes when the
+pose is lost. \code{track} gives a predictable \emph{time} to target (needed for a strike), \code{goto} gives
+robust \emph{arrival} without any timing.
+\end{keypoint}
+
+\func{turn\_to}{(yaw\_t, timeout=6.0) -> None}
+Turn in place with $\omega = \operatorname{clip}(1.2 e_\psi, \pm 0.9)$, blind, using the EKF yaw if fresh
+($<0.6$~s) else the IMU-based \code{yaw\_estimate}; done within $6^\circ$.
+
+\func{qkw}{() -> dict}
+\code{\{"u\_max", "tau", "K"\}}, the keyword arguments passed to every \code{Quintic}.
+
+\func{here}{() -> np.array (3,)}
+Current EKF position with $z$ clipped into \code{z\_lim}: a small overshoot above the band must not make every
+next trajectory fail \code{check} (its first sample is the start point).
+
+\func{roomy}{(x, y, extra) -> bool}
+True if there is no grid or clearance$(x,y) \ge$ margin + \code{extra} (height-independent: for a 3D zone, the
+smallest layer).
+
+\subsection{The two missions of \texorpdfstring{\texttt{tello\_strike}}{tello\_strike}}
+
+\func{patrol}{() -> None}
+Legs along $x$ at the zone's middle $y_c$ and height $z = \operatorname{clip}(z_{\text{fly}}, z_{\text{lim}})$.
+The leg ends $x_a, x_b$ are found by walking from the centre $x_c$ in 5~cm steps until \code{roomy(x, y\_c, 0.35)}
+fails, then stepping back 5~cm: leg ends keep margin + 0.35~m (the driver's guard looks $\approx$1~s ahead and
+would otherwise brake at every end). The heading is fixed to the start heading \code{p0[3]} (facing the marker
+wall). First a slow quintic to $\mathbf a$ ($v_{\max}=0.4$, $a_{\max}=0.5$), then \code{legs} quintics
+alternating $\mathbf b, \mathbf a, \mathbf b, \dots$, each from \code{here()} (the real position, not the
+previous goal), with results recorded and printed.
+
+\func{point\_in\_front}{(m, d) -> (point or None, n)}
+Same idea as \code{MarkerTour.feasible}: $\mathbf t + (d + 0.05k)\mathbf n$ for $k < 40$, first point with
+\code{roomy(..., 0.15)}, height = marker height clipped into \code{z\_lim}; \code{None} if no free point.
+
+\func{strike}{() -> None}
+For each target id in the map: \code{hit} = point at 0.9~m, \code{back} = point at 1.6~m, heading
+$\psi = \operatorname{atan2}(-n_y, -n_x)$ (facing the marker, against its normal). Then:
+\emph{ready} (quintic to \code{back}, 0.5~m/s, 0.6~m/s$^2$) $\rightarrow$ \code{turn\_to} $\rightarrow$
+\emph{dash} (quintic to \code{hit} at full limits, settle 1~s, tol 0.10) $\rightarrow$ closest approach
+$\rightarrow$ hover 0.3~s $\rightarrow$ \emph{retreat} (quintic to \code{back}). If the retreat returned
+\code{None} (refused or no pose at all), stop striking. Finally a slow quintic back to the position where the
+strike phase started, heading \code{p0[3]}.
+
+\func{closest\_since}{(t0, m, n) -> float}
+Flushes and re-reads \file{tracking.csv}, and returns the minimum signed distance to the marker plane,
+$\min (\mathbf p - \mathbf t)\cdot\mathbf n$, over the rows logged since \code{t0}. The \emph{overshoot} is then
+$\max(0, \lVert \text{hit}_{xy} - \mathbf t_{xy}\rVert - \text{closest})$.
+
+\func{main}{() -> None}
+\code{prepare()} (which also moves to the zone centre since \code{MOVE\_TO\_ZONE\_CENTRE = True}); abort without a
+zone; \code{patrol()} if in mode; \code{strike()} if in mode; \code{summary()}; \code{return\_home()}.
+
+\func{summary}{() -> None}
+Writes \file{results.csv} (kind, id, distance, planned and real time, RMS and max error, closest, overshoot) and
+prints it.
+
+\func{close}{() -> None}
+\code{StepTest.close()} then closes \file{tracking.csv}.
+
+\subsection{State machine of \texorpdfstring{\texttt{tello\_strike}}{tello\_strike}}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}lXl@{}}
+\toprule
+State & Behaviour & Transition $\rightarrow$ next \\
+\midrule
+PREPARE & takeoff, \code{p0}, move to zone centre & $\rightarrow$ PATROL-START if \code{"patrol"} in mode, else STRIKE \\
+PATROL-START & quintic to $\mathbf a$ (0.4, 0.5) & done/refused $\rightarrow$ LEG 1 \\
+LEG $k$ & quintic to $\mathbf b$ ($k$ odd) or $\mathbf a$ & $k<$ legs $\rightarrow$ LEG $k{+}1$; else $\rightarrow$ STRIKE or SUMMARY \\
+READY($i$) & quintic to \code{back}$_i$ (0.5, 0.6) & $\rightarrow$ TURN \\
+TURN & \code{turn\_to}$(\psi_i)$, 6~s max & $\rightarrow$ DASH \\
+DASH & quintic to \code{hit}$_i$, settle 1~s & $\rightarrow$ PAUSE (0.3~s) \\
+RETREAT & quintic to \code{back}$_i$ & ok $\rightarrow$ READY($i{+}1$); \code{None} $\rightarrow$ STRIKE-HOME \\
+STRIKE-HOME & quintic to the strike start point & $\rightarrow$ SUMMARY \\
+SUMMARY & \file{results.csv}, \code{return\_home} & $\rightarrow$ LAND \\
+any track step & pose older than 0.6~s: reference frozen, hover & pose back $\rightarrow$ same state \\
+any & key, battery, obstacle, \code{pose\_age} $>15$~s & $\rightarrow$ LAND \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% =====================================================================================================
+\section{The takeoff pad (\texorpdfstring{\texttt{home.py}}{home.py})}
+
+\func{load\_home}{(path=HOME\_FILE) -> dict or None}
+Reads \file{config/home.yaml} (path from \code{TELLO\_REPO}, default \file{\textasciitilde/tello\_ws/src/tello-balloon-hunter}):
+returns \code{\{x, y, yaw\_deg, marker, samples\}} (pad marker default 48) or \code{None} if the file is missing,
+malformed, or has no \code{x}/\code{y}. The file is written by \file{tools/set\_home.py} from the first poses of
+real climbs. Missions use it through \code{StepTest.return\_home}; the EKF uses it to initialise on the pad.
+
+% =====================================================================================================
+\section{Keyboard teleop (\texorpdfstring{\texttt{teleop.py}}{teleop.py})}
+
+The teleop is a standalone node, not a \code{StepTest}: no pose, no EKF, no mission safety; it relies entirely
+on the driver's safety chain (position hold, zone, ceiling, wall guard, 0.5~s command watchdog).
+
+\func{Teleop.\_\_init\_\_}{() -> None}
+Parameters \code{speed} 0.35~m/s, \code{yaw\_rate} 0.6~rad/s, \code{hold} 0.35~s; publisher on
+\topic{/tello/cmd\_vel\_safe}; clients for \topic{/tello\_driver/takeoff}, \topic{land}, \topic{emergency};
+subscription to \topic{/tello/telemetry}.
+
+\func{on\_tel}{(m) -> None}
+Parses the telemetry JSON and stores its arrival time.
+
+\func{say}{(text) -> None} Prints a message on its own line (clearing the status line).
+
+\func{status}{() -> None}
+One status line rewritten in place every 0.3~s: ``DRIVER NOT FOUND'' if nobody subscribes to
+\topic{/tello/cmd\_vel\_safe}, ``waiting for telemetry'' if none for 2~s, else flying state, battery, height,
+last key; truncated to the terminal width so it never wraps.
+
+\func{in\_air}{() -> bool}
+\code{flying} from telemetry, or height $\ge 20$~cm (the driver sets \code{flying} only once the takeoff call
+returns).
+
+\func{call}{(name) -> None}
+Calls a \code{Trigger} service with a 1~s wait for the service and a 3~s wait for the answer, prints the
+message.
+
+\func{key}{(k) -> None}
+Maps a key to a body-frame \code{Twist}: arrows $\pm$\code{speed} on $x$ (forward/back) and $y$ (left/right),
+\code{i}/\code{k} $\pm$\code{speed} on $z$, \code{j}/\code{l} $\pm$\code{yaw\_rate}, space a zero command;
+\code{t}, \code{g}, \code{x} call takeoff, land, emergency. The command is kept for \code{hold} = 0.35~s
+(\code{self.until}): a terminal cannot see key releases, but auto-repeat of a held key refreshes it.
+
+\func{tick}{() -> None}
+Publishes the current command if \code{now < until}, else a zero \code{Twist}.
+
+\func{read\_key}{(timeout) -> str or None}
+Reads raw bytes with \code{os.read} on the stdin file descriptor (not \code{sys.stdin.read}: Python's buffer
+would swallow the rest of an arrow escape sequence and \code{select} would see nothing). Keeps unread bytes in
+the module-level \code{\_pending}; an \code{ESC} prefix is read as a 3-byte sequence mapped through \code{ARROWS}
+(both \code{ESC [ A} and \code{ESC O A} forms); other bytes are returned one at a time, lower-cased. This function
+is reused by \code{StepTest} and \code{Patrol} for their keyboard handling.
+
+\func{main}{() -> None}
+Sets the local-only DDS environment (\code{local\_ros\_env}), initialises \code{rclpy} \emph{without} its signal
+handler (so Ctrl+C raises \code{KeyboardInterrupt} in Python and the landing call can still run), puts the
+terminal in cbreak mode, then loops: \code{read\_key(0.05)}, \code{q} lands and quits, other keys go to
+\code{key()}, then \code{tick()}, \code{spin\_once}, status. The loop period is at most 50~ms, so commands go out
+at $\ge 20$~Hz. On Ctrl+C: zero command and land; \code{finally} restores the terminal and shuts down.
+
+% =====================================================================================================
+\section{Summary of the control laws}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l*{3}{>{\raggedright\arraybackslash}X}@{}}
+\toprule
+ & \code{MarkerTour.goto} & \code{Patrol.patrol} step & \code{Strike.track} \\
+\midrule
+Reference & fixed point & next corner (moving on at 0.15~m) & quintic $\mathbf p_d(t)$ \\
+Horizontal law & $v = \min(0.5, 0.6d, \sqrt{1.2(d-\text{tol}/2)})$ along $\mathbf e$ & $v = \min(v_p, \sqrt{1.2 d})$ & $(\mathbf v_{\text{ff}} + \tau\mathbf a_{\text{ff}})/K + 0.8\mathbf e + \mathbf I$ \\
+Saturation & $v \le 0.5$~m/s & $v \le v_p$ & $\lVert\mathbf u\rVert \le 1.04$~m/s \\
+Disturbance & $-\boldsymbol\delta$ (EKF drift) & $-\boldsymbol\delta$ & integral, $k_i = 0.3$, $\le 0.15$ \\
+Model inverse & $1/K_X, 1/K_Y$ & $1/K_X, 1/K_Y$, heading $+\omega L_U$ & $1/K_{\text{mean}}$ on ff only, $L_u$ shift \\
+Vertical & $\operatorname{clip}(0.6e_z, 0.25)$ & $\operatorname{clip}(0.6e_z, 0.25)$ & $\operatorname{clip}(v_{\text{ff},z} + 0.8e_z, 0.4)$ \\
+Yaw & $\operatorname{clip}(0.9e_\psi, 0.5)$, optional \code{face} & constant $\omega_p$ & $\operatorname{clip}(1.0e_\psi, 0.8)$ \\
+Marker loss & hover 0.7~s, search 1~s & turn blind & freeze reference, hover \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% =====================================================================================================
+\section{Code review notes}
+
+\begin{review}
+All items were checked in the code; line numbers refer to commit \code{aab4639}.
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Two implementations of ``point in front of a marker''.} \code{MarkerTour.feasible}
+        (\file{marker\_tour.py}:140) and \code{Strike.point\_in\_front} (\file{strike.py}:167) do the same
+        5~cm back-off loop with the same $+0.15$~m, but the first passes the height to \code{clearance} (3D
+        layers) and handles the field-of-view distance and the upper-layer trick, the second uses the
+        height-independent smallest layer via \code{roomy}. A strike target behind the east furniture is
+        therefore placed farther than the tour would. One shared function would remove the divergence.
+  \item \textbf{Three turning controllers.} \code{goto(yaw\_only=True)} (\file{marker\_tour.py}:209--231,
+        gain 0.9, max 0.5, $5^\circ$), \code{Strike.turn\_to} (\file{strike.py}:114, gain 1.2, max 0.9, $6^\circ$)
+        and \code{StepTest.recentre}'s yaw term. Same job, different gains and tolerances.
+  \item \textbf{Inconsistent model inversion.} \code{goto} and \code{Patrol} divide body commands by
+        $K_X = 0.66$ and $K_Y = 0.83$ (\file{marker\_tour.py}:255, \file{patrol.py}:201); \code{Strike.track}
+        uses one mean $K = 0.745$ in the world frame and rotates afterwards (\file{strike.py}:91--99), so its
+        forward feedforward is 11\,\% too small and its lateral one 11\,\% too large. Rotating first and dividing
+        per axis would match the identified model.
+  \item \textbf{The planner caps strike speed at $\approx$0.66~m/s.} With \code{u\_max} 0.9 and $K = 0.745$
+        (\file{strike.py}:46,49; \file{trajectory.py}:30--34), \code{v\_max} = 0.8 is never reached; the
+        parameter is misleading. Document it or derive \code{v\_max} from \code{u\_max K}.
+  \item \textbf{Integral never reset.} \code{self.integ} is created once (\file{strike.py}:51) and keeps
+        accumulating across all legs and strikes (\file{strike.py}:90). Arguably intended (drift is slow), but
+        after a leg with a large error it starts the next one with up to 0.15~m/s of bias; resetting or decaying
+        it at the start of \code{track} would make legs independent.
+  \item \textbf{Dead code in \file{strike.py}.} \code{state = \{"done": False\}} is written
+        (\file{strike.py}:75,105) but never read; \code{src} in \code{src, dst = ...} (\file{strike.py}:160) is
+        unused; \code{vd} is computed only for the log.
+  \item \textbf{\code{closest\_since} re-reads the CSV from disk} (\file{strike.py}:211--220) after every dash,
+        although the positions are available in memory inside \code{track}; the file grows with the flight and
+        the read happens between the dash and the retreat, while the drone is close to the wall.
+  \item \textbf{\code{PatrolNode} and duplicated \topic{/aruco/pose} subscriptions.} \code{MarkerTour} already
+        subscribes to \topic{/aruco/pose} to set \code{marker\_t} (\file{marker\_tour.py}:77);
+        \code{\_count\_marker\_poses} adds a second subscription that sets \code{marker\_t} again and counts poses
+        (\file{patrol.py}:264--278). \code{Patrol} alone would run with \code{pose\_count} stuck at 0 (it is set in
+        \code{main}, \file{patrol.py}:248, and again in \code{PatrolNode}, :277). Folding the counter into
+        \code{Patrol.\_\_init\_\_} removes a class and a subscription.
+  \item \textbf{The ``lost markers'' landing timer is not a marker timer.} \code{StepTest.safety} compares
+        \code{pose\_age()} with \code{lost\_max} (\file{step\_test.py}:260), but for the missions
+        \code{pose\_age()} is the age of the last \emph{accepted EKF} pose, which keeps refreshing at 30~Hz while
+        $\sigma_{xy} \le 0.15$~m. The ``no marker seen for 12 s'' message really means ``12~s after the EKF
+        became too uncertain''. Likewise \code{search\_heading} starts its $\pm40^\circ$ sweep on
+        \code{pose\_age() > 3} (\file{step\_test.py}:281), so during the first seconds of a loss, while the EKF is
+        still confident, \code{goto}'s search only turns towards \code{look\_at} and does not sweep. Using
+        \code{marker\_age()} in both places would match the documented behaviour.
+  \item \textbf{Esc does not land in the patrol.} The docstring says ``ANY OTHER KEY (space, q, Esc\dots) = stop
+        and land'' (\file{patrol.py}:11), but a lone \code{ESC} byte is treated by \code{read\_key} as an
+        incomplete escape sequence and \code{ARROWS.get(b"\textbackslash x1b")} returns \code{None}
+        (\file{teleop.py}:144--148), which \code{Patrol.check\_keys} (and \code{StepTest.check\_keys}) treat as
+        ``no key''. Space or \code{q} work; Esc is silently ignored.
+  \item \textbf{Patrol corner slowdown inactive at normal speeds.} The corner switches at $d < 0.15$~m
+        (\file{patrol.py}:187) while $\sqrt{2a_{\max}d}$ (\file{patrol.py}:194) only limits below
+        $v_p = 0.42$~m/s at that distance; the comment ``slows down before the corner'' holds only for fast
+        patrols. Similarly in \code{goto} the braking curve is dominated by $k_p d$ except in the last
+        $\approx$5~cm (\file{marker\_tour.py}:245).
+  \item \textbf{First lap statistics are not comparable.} The lap ends when the target index returns to the
+        first corner (\file{patrol.py}:189), so lap 1 is ``approach + 3 legs'' and later laps are 4 legs; and
+        after each \code{find()} a new lap starts from the nearest corner. Lap 1 and post-search laps should be
+        flagged in \file{laps.csv}.
+  \item \textbf{Recomputed centroid.} \code{turn} recomputes the marker centroid (\file{marker\_tour.py}:269)
+        that \code{\_\_init\_\_} already stored in \code{self.centroid} (:69--70).
+  \item \textbf{\code{find} may fly to a marker it did not centre.} The centring phase times out after 8~s
+        without any check (\file{patrol.py}:237), and the subsequent \code{goto} uses only the map; that is fine
+        for localisation, but the docstring's ``(no map)'' (\file{patrol.py}:207) describes only the search.
+  \item \textbf{Trajectory module unused by two of three missions.} The approach legs of \code{go\_sequence},
+        \code{MarkerTour.main} and \code{Patrol.find} are rest-to-rest moves to a known point, exactly what
+        \code{Quintic} + \code{check} + \code{track} provide, with a validated, predictable timing. Moving
+        \code{track} into a shared base (e.g.\ into \code{MarkerTour}) would unify the three missions on one
+        controller and let \code{Strike} inherit the drift cancellation.
+\end{enumerate}
+\end{review}

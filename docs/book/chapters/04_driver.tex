@@ -1,0 +1,1147 @@
+\chapter{The driver, the safety chain and the flight zone}
+\label{ch:driver}
+\setlength{\emergencystretch}{3em}
+
+This chapter covers the node that talks to the drone, \code{tello\_driver}, and the three plain-Python modules it
+is built on: \file{safety.py} (the chain of guards every command goes through), \file{zone.py} (the obstacle-free
+flight zone) and \file{video\_reader.py} (an optional low-latency video decoder). It ends with the fake drone
+(\file{fake\_tello.py}, \file{fake\_world.py}) that replaces the Tello when the launch file is started with
+\code{mock:=true}, and the small \file{ros\_env.py} helper.
+
+Every number quoted here comes from the code or from the configuration files at the time of writing. The line
+numbers in the code review refer to the same version.
+
+\section{Why there is a driver, and what goes into it}
+\label{sec:driver-role}
+
+\subsection{The single gate}
+
+The Tello is reached over its own Wi-Fi with a text protocol on UDP (commands on port 8889, telemetry on 8890,
+H.264 video on 11111). The Python library \code{djitellopy} wraps that protocol. The Tello accepts commands only from
+the first program that talked to it after power-on, so exactly one process may own the link. In this project
+that process is the ROS 2 node \code{tello\_driver} (\file{src/tello\_driver/tello\_driver/driver.py}).
+
+Every other program, the keyboard teleop and all the missions (\code{tello\_goto}, \code{tello\_marker\_tour},
+\code{tello\_patrol}, \code{tello\_strike}, \code{tello\_step\_test}), can only \emph{ask}: it publishes a velocity on
+\topic{/tello/cmd\_vel\_safe} and calls the services \topic{/tello\_driver/takeoff}, \topic{/tello\_driver/land} and
+\topic{/tello\_driver/emergency}. The driver decides what is really sent to the drone.
+
+\begin{keypoint}
+The driver is the only path from a ROS program to the motors, so whatever it enforces holds for \emph{every}
+client, including a buggy mission or a human pressing the wrong key. The flight-zone check, the ceiling, the
+height band, the wall check and the position hold therefore live in the driver. No mission can switch them off,
+because no mission has another way to reach the drone.
+\end{keypoint}
+
+\subsection{What goes into the driver, and what goes elsewhere}
+
+This is the rule the code follows, with examples:
+
+\begin{center}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.34\linewidth}X}
+\toprule
+\textbf{In the driver} & \textbf{Why} \\
+\midrule
+The \code{djitellopy} link, connection checks, \code{streamon}, video watchdog & only one process may own the link \\
+Conversion m/s $\rightarrow$ rc joystick points, axis signs & a property of the drone, not of a mission \\
+Command timeout (0.5 s) and the 20 Hz rc loop & the Tello keeps flying with the last rc value it received \\
+Takeoff, the climb to the marker height, landing, low battery & must work for every client \\
+Position hold, ceiling, height band, flight zone, wall ahead (\file{safety.py}) & must protect every client \\
+Publishing \topic{/tello/rc\_sent} & the EKF needs what was \emph{really} sent, after the guards \\
+\midrule
+\textbf{Elsewhere} & \\
+\midrule
+State estimation (\file{ekf\_node.py}, \file{ekf\_core.py}) & heavy, testable on recorded flights (replay) \\
+Marker detection and PnP (\file{aruco\_localizer.py}) & vision, separate package \\
+Where to go: goals, paths, search behaviour (missions) & changes per task; may be wrong without risk \\
+Visualisation of the zone (\file{marker\_map\_publisher.py}) & RViz only, no effect on the flight \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Inside the driver there is a second split. \file{driver.py} contains the ROS wiring and the drone link;
+\file{safety.py} (class \code{CommandFilter}) contains every decision about the commands and imports no ROS module.
+The driver feeds it numbers (pose, velocity, drift, height, marker distance) and asks for the filtered command.
+The filter can therefore be run in a plain Python loop against a simulated drone; its docstrings mention such
+"stress tests" (seeds 27, 142, 203, 367), but the test script itself is not in the repository (see the code review).
+\file{zone.py} is ROS-free for the same reason, and the missions import it too.
+
+\subsection{Interfaces of the node}
+
+\begin{center}\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Name} & \textbf{Type} & \textbf{Role} \\
+\midrule
+\multicolumn{3}{l}{\emph{Published}}\\
+\topic{/tello/image\_raw} & \code{sensor\_msgs/Image} (rgb8) & camera, stamped on arrival at the PC \\
+\topic{/tello/camera\_info} & \code{sensor\_msgs/CameraInfo} & intrinsics, same stamp as the image \\
+\topic{/tello/telemetry} & \code{std\_msgs/String} (JSON) & Tello state + driver fields, 10 Hz \\
+\topic{/tello/rc\_sent} & \code{geometry\_msgs/Twist} (body) & command really sent, 20 Hz \\
+\multicolumn{3}{l}{\emph{Subscribed}}\\
+\topic{/tello/cmd\_vel\_safe} & \code{Twist} (body, m/s, rad/s) & velocity requests \\
+\topic{/ekf/pose} & \code{PoseWithCovarianceStamped} & pose and its uncertainty \\
+\topic{/ekf/velocity} & \code{TwistStamped} (map) & velocity for the hold \\
+\topic{/ekf/drift} & \code{Vector3Stamped} (map) & learnt drift, cancelled by the hold \\
+\topic{/aruco/nearest\_marker} & \code{std\_msgs/Float32} & distance of the closest marker in view \\
+\multicolumn{3}{l}{\emph{Services} (\code{std\_srvs/Trigger})}\\
+\topic{\textasciitilde/takeoff} & \code{Trigger} & takeoff, then climb \\
+\topic{\textasciitilde/land} & \code{Trigger} & land (never dropped) \\
+\topic{\textasciitilde/emergency} & \code{Trigger} & motors off; \textasciitilde\ = \topic{/tello\_driver} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The flight zone is not a topic. It is a \emph{file path} given to the driver as the parameter
+\code{flight\_zone\_file}; Section~\ref{sec:zone-ros} explains who else reads that file.
+
+\section{driver.py: the node}
+\label{sec:driverpy}
+
+\subsection{Module-level function}
+
+\func{load\_camera\_info}{(path, width, height, frame\_id) -> (CameraInfo, calibrated: bool)}
+Builds the \code{CameraInfo} message published with every image. With a calibration file (YAML written by
+\file{tools/calibrate\_camera.py}, normally \file{config/tello\_camera.yaml}) it copies the matrix $K$, the
+distortion vector $D$, the rectification $R$ (identity if absent) and the projection $P$ (if absent,
+$P=[K\mid 0]$ built from $K$). If the file's \code{image\_width}/\code{image\_height} differ from the stream size it
+raises \code{ValueError}: a calibration for another resolution would give wrong poses silently.
+
+Without a file it returns an ideal pinhole with the measured horizontal field of view of the video stream,
+$55.6^\circ$ (DJI's $82.6^\circ$ is the photo mode):
+$$
+f = \frac{W/2}{\tan(55.6^\circ/2)}, \qquad
+K = \begin{bmatrix} f & 0 & W/2 \\ 0 & f & H/2 \\ 0 & 0 & 1 \end{bmatrix}, \qquad D = 0 .
+$$
+For the $960\times720$ stream, $f \approx 910.4$ px. The second return value tells the caller which case it was,
+for the log line.
+
+\subsection{The class TelloDriver}
+
+\func{TelloDriver.\_\_init\_\_}{(self)}
+The constructor does everything in a fixed order; each step matters.
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+\item \textbf{Parameters.} The main ones are listed in Table~\ref{tab:driver-params}. The model parameters default
+to the constants of \file{model.py} ($K_x=0.66$, $K_y=0.83$, $\tau=0.25$ s, $L_u=0.35$ s, $K_z=0.9$).
+\item \textbf{Zone.} \code{self.zone = load\_zone(flight\_zone\_file)} (Section~\ref{sec:zonepy}); if a zone was
+loaded, its bounding rectangle is logged.
+\item \textbf{Safety filter.} A \code{CommandFilter} is built with the zone, the gains, the model and all the
+guard parameters; its warnings go to the ROS logger.
+\item \textbf{Live parameters.} A callback \code{on\_params} is registered (see below).
+\item \textbf{Duplicate check.} The node spins for 2 s, then asks the graph who already publishes
+\topic{/tello/image\_raw}. If anyone does (typically a forgotten fake driver), it logs a fatal error and exits:
+two image sources make the pose jump between two drones. The check is done \emph{before} its own publisher is
+created, so it never finds itself.
+\item \textbf{Publishers, subscriptions, services} of the table above. The three EKF and marker subscriptions are
+one-line lambdas that pass the numbers straight into the filter (\code{on\_ekf\_velocity}, \code{on\_ekf\_drift},
+\code{on\_nearest\_marker}).
+\item \textbf{Drone object.} In mock mode a \code{FakeTello(mock\_markers\_file)}; if a zone exists and the
+environment variable \code{FAKE\_START} is not set, the fake drone is moved to a start point inside the zone:
+centre of the zone rectangle, pushed along $\bm n$, the horizontal direction pointing away from the main marker
+wall, by $d=\max(0,\ |n_x|h_x+|n_y|h_y-0.3)$, where $h_x,h_y$ are the half-sizes of the rectangle. So the fake
+drone starts 0.3 m from the zone edge furthest from the wall, facing the wall. In real mode
+\code{wait\_for\_tello\_network} is called, the \code{djitellopy} logger is set to \code{WARNING} (otherwise it prints
+\code{rc 0 0 0 0} twenty times per second) and a \code{Tello()} is created.
+\item \textbf{Connect.} \code{tello.connect()}; on failure a fatal message explains the usual cause (another
+program talked to the Tello first) and the process exits. Then the battery is logged and \code{streamon} is sent.
+\item \textbf{Video reader.} \code{low\_latency\_video} (default \code{false}, forced off in mock mode) selects
+\code{LowLatencyReader} (Section~\ref{sec:video}); otherwise \code{tello.get\_frame\_read()}, the \code{djitellopy}
+reader (or the fake one).
+\item \textbf{State and timers.} \code{rc\_target}=(0,0,0,0), \code{last\_cmd}=0, the lock \code{busy}, the
+telemetry dict \code{state}, then the four timers of Table~\ref{tab:timers}.
+\end{enumerate}
+
+\begin{table}[ht]
+\centering\small
+\begin{tabular}{llp{5.8cm}}
+\toprule
+\textbf{Parameter} & \textbf{Default} & \textbf{Meaning} \\
+\midrule
+\code{mock} & false & fake drone (\file{fake\_tello.py}) \\
+\code{lin\_gain} & $0.38/30\approx0.01267$ & m/s per rc point (measured Nov 7) \\
+\code{yaw\_gain} & $18^\circ/30\approx0.01047$ & rad/s per rc point \\
+\code{max\_rc} & 80 & saturation of every rc axis ($\approx1.01$ m/s) \\
+\code{cmd\_timeout} & 0.5 s & request older than this $\Rightarrow$ zero \\
+\code{low\_battery} & 12 \% & land automatically at or below \\
+\code{takeoff\_height} & 0 (launch: auto) & climb target after takeoff (m) \\
+\code{max\_height} & 2.6 m & ceiling (room ceiling 2.80 m) \\
+\code{flight\_zone\_file} & "" (launch: auto) & zone YAML; empty = no zone guards \\
+\code{min\_wall\_distance}, \code{wall\_slow\_band} & 0.7 m, 0.15 m & wall guard \\
+\code{blind\_speed} & 0.15 m/s & horizontal speed limit without a pose \\
+\code{position\_hold}, \code{height\_hold} & true, true & hold on/off \\
+\code{hold\_kp}, \code{hold\_kv}, \code{hold\_ki} & 0.8, 0.4, 0.15 & hold gains \\
+\code{hold\_vmax}, \code{hold\_kp\_z}, \code{hold\_drift\_ff} & 0.4 m/s, 1.0, true & hold limits, drift cancel \\
+\code{pose\_topic} & \topic{/ekf/pose} & pose for the hold and the guards \\
+\code{low\_latency\_video} & false & use \file{video\_reader.py} \\
+\code{video\_timeout}, \code{network\_timeout} & 3 s, 30 s & watchdog, Wi-Fi wait \\
+\bottomrule
+\end{tabular}
+\caption{Parameters of \code{tello\_driver} (\file{driver.py}, lines 66--96 and 125--185).}
+\label{tab:driver-params}
+\end{table}
+
+\begin{table}[ht]
+\centering\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Timer} & \textbf{Period} & \textbf{Job} \\
+\midrule
+\code{poll\_video} & 10 ms (100 Hz) & publish a new image when the reader has one (30 fps max) \\
+\code{poll\_state} & 100 ms (10 Hz) & telemetry JSON, low-battery landing \\
+\code{send\_rc} & 50 ms (20 Hz) & the command loop: timeout, climb, safety chain, send \\
+\code{video\_watchdog} & 1 s & restart the stream after 3 s without images \\
+\bottomrule
+\end{tabular}
+\caption{The four timers of the driver.}
+\label{tab:timers}
+\end{table}
+
+\begin{intuition}
+\code{rclpy.spin} uses a single-threaded executor: the timers, subscriptions and service callbacks of the driver
+never run at the same time. The only other threads are the ones of \code{djitellopy} (state and video receivers),
+the video reader, and the short-lived threads that run blocking SDK commands (\code{run\_async}). The lock
+\code{busy} is what keeps the 20 Hz rc loop quiet while such a command runs.
+\end{intuition}
+
+\func{on\_params}{(params) -> SetParametersResult}
+A closure registered with \code{add\_on\_set\_parameters\_callback}. For every changed parameter it calls
+\code{safety.set\_param(name, value)}; the names in \code{CommandFilter.LIVE\_PARAMS} (hold gains, hold on/off) are
+applied immediately and logged, e.g. \code{ros2 param set /tello\_driver hold\_kp 1.0} during a flight. It always
+returns success, so other parameters are accepted but have no effect after start-up.
+
+\func{wait\_for\_tello\_network}{(timeout) -> None}
+Waits until the PC has a route to the Tello. It "connects" a UDP socket to \code{192.168.10.1:8889}: for UDP this
+sends nothing, it only makes the kernel pick a source address. If that address starts with \code{192.168.10.},
+the PC is on the Tello's Wi-Fi. Otherwise it warns once and retries every second, and exits after
+\code{network\_timeout} (30 s). The reason is WSL mirrored networking, which follows a Windows Wi-Fi change only
+after a few seconds.
+
+\func{video\_watchdog}{() -> None}
+Runs at 1 Hz and acts only if no image arrived for \code{video\_timeout} = 3 s (never in mock mode, never while a
+restart is running).
+\begin{itemize}[itemsep=1pt]
+\item Low-latency reader: that reader reopens the stream itself, so only \code{streamon} is re-sent.
+\item \code{djitellopy} reader: it blocks on UDP port 11111 with no timeout. If its thread is alive, it will resume
+by itself when packets come back, so only \code{streamon} is re-sent. If the thread is dead, the old container is
+closed (which frees port 11111; a second reader on a busy port fails with "Address already in use"), and a new
+reader is made after 0.5 s. This is done in a background thread so the executor is not blocked; the flag
+\code{restarting} prevents overlapping restarts, and \code{last\_frame\_t} is reset so the stream gets 3 more seconds.
+\end{itemize}
+
+\func{poll\_video}{() -> None}
+At 100 Hz, reads \code{reader.frame}. The readers return the \emph{same array object} until a newer image exists,
+so \code{frame is self.last\_frame} detects "nothing new" without comparing pixels. The black $400\times300$
+placeholder that \code{djitellopy} returns before the first decoded image is skipped. For a new image it updates
+the frame-rate estimate (over 2 s windows, sent in telemetry as \code{video\_fps}), (re)builds the
+\code{CameraInfo} when the image size changes, and publishes \code{Image} (\code{rgb8}, step $3W$) and
+\code{CameraInfo} with the \emph{same} stamp: the current ROS time. The stamp is therefore the arrival time at
+the PC, not the exposure time; the EKF accounts for the video latency $L_v=0.2$ s itself. In mock mode the
+distortion is set to zero and passed to the fake camera (\code{world.set\_camera}), because the renderer draws an
+ideal pinhole image.
+
+\func{poll\_state}{() -> None}
+At 10 Hz, copies \code{tello.get\_current\_state()} (the dict \code{djitellopy} parses from the 10 Hz telemetry
+packets: \code{tof}, \code{h}, \code{bat}, \code{yaw}, \code{vgx}, \dots) into \code{self.state}, adds the driver's
+own fields and publishes everything as JSON on \topic{/tello/telemetry}:
+\begin{center}\small
+\begin{tabular}{ll}
+\toprule
+\code{stamp} & ROS time in seconds \\
+\code{flying} & \code{tello.is\_flying} \\
+\code{busy} & a takeoff/land command is running \emph{or} the climb is not finished \\
+\code{video\_fps} & images published per second \\
+\code{hold} & horizontal position hold active \\
+\code{guard} & the guard that changed the command in the last 0.5 s (\code{CommandFilter.guard\_now}) \\
+\bottomrule
+\end{tabular}
+\end{center}
+Missions read \code{busy} to wait for the end of the climb before sending velocities; \file{tools/flight\_report.py}
+uses \code{hold} and \code{guard}. Finally, if the drone flies and the battery is at or below 12 \%, it starts a
+landing with \code{run\_async} (repeated calls are harmless: \code{run\_async} does nothing while \code{busy} is held).
+
+\func{on\_pose}{(m: PoseWithCovarianceStamped) -> None}
+Converts the EKF pose to the numbers the filter wants: position, yaw from the quaternion,
+$$
+\psi = \operatorname{atan2}\big(2(q_wq_z+q_xq_y),\ 1-2(q_y^2+q_z^2)\big),
+$$
+and two standard deviations taken from the $6\times6$ covariance (row-major): $\sigma_{xy}=\sqrt{\max(\Sigma_{xx},\Sigma_{yy})}$
+(indices 0 and 7) and $\sigma_z=\sqrt{\Sigma_{zz}}$ (index 14). Then \code{safety.on\_pose(x, y, z, yaw, sigma\_xy, sigma\_z)}.
+
+\func{on\_cmd}{(m: Twist) -> None}
+Converts a velocity request into Tello rc points and stores it with its reception time. The two conventions are
+different:
+\begin{center}\small
+\begin{tabular}{lll}
+\toprule
+& \textbf{ROS body frame (REP 103)} & \textbf{Tello rc} \\
+\midrule
+order & $(v_x, v_y, v_z, \omega_z)$ & (left/right, forward/back, up/down, yaw) \\
+positive & forward, \emph{left}, up, counter-clockwise & \emph{right}, forward, up, clockwise \\
+\bottomrule
+\end{tabular}
+\end{center}
+hence, with $g=$ \code{lin\_gain} and $g_\psi=$ \code{yaw\_gain} and $\operatorname{clip}$ = round and saturate to
+$\pm$\code{max\_rc} $=\pm80$:
+$$
+\text{rc} = \Big(\operatorname{clip}\big(-\tfrac{v_y}{g}\big),\ \operatorname{clip}\big(\tfrac{v_x}{g}\big),\
+\operatorname{clip}\big(\tfrac{v_z}{g}\big),\ \operatorname{clip}\big(-\tfrac{\omega_z}{g_\psi}\big)\Big).
+$$
+Example: $v_x=0.38$ m/s forward gives fb $=30$; $\omega_z=+0.314$ rad/s ($18^\circ$/s to the left) gives yaw $=-30$.
+Nothing is sent here: the 20 Hz loop sends.
+
+\func{send\_rc}{() -> None}
+The heart of the node, at 20 Hz:
+\begin{lstlisting}
+if self.busy.locked():
+    return                      # takeoff / land running: rc would interfere
+rc = self.rc_target if time.time() - self.last_cmd < self.cmd_timeout else (0, 0, 0, 0)
+flying = self.tello.is_flying
+hgt, vz = self.safety.height_and_rate(self.state.get("tof"), flying)
+if self.climb_target is not None and flying:
+    ud = self.climb_rc(hgt, vz)
+    if ud is not None:
+        rc = (0, 0, ud, 0)      # climbing: other commands wait
+rc = self.safety.filter(rc, hgt, vz, flying, busy=..., climbing=self.climb_target is not None)
+self.tello.send_rc_control(*rc)
+\end{lstlisting}
+\begin{enumerate}[itemsep=1pt]
+\item \textbf{Timeout.} A request older than 0.5 s is replaced by zero: if a mission crashes, the drone does not
+keep its last velocity. (Zero is then turned into a position hold by the filter.)
+\item \textbf{Height.} \code{height\_and\_rate} fuses the time-of-flight sensor (\code{tof}, cm) and the EKF
+height, and differentiates it (Section~\ref{sec:safety}).
+\item \textbf{Climb.} After a takeoff, while \code{climb\_target} is set, the request is replaced by a pure
+vertical command from \code{climb\_rc}.
+\item \textbf{Safety chain.} \code{safety.filter}.
+\item \textbf{Send.} \code{send\_rc\_control} also keeps the link alive: the Tello lands by itself after 15 s
+without any command.
+\item \textbf{Publish what was sent} on \topic{/tello/rc\_sent}, converted back to the ROS body frame:
+$v_x=g\,\text{fb}$, $v_y=-g\,\text{lr}$, $v_z=g\,\text{ud}$, $\omega_z=-g_\psi\,\text{yaw}$.
+\end{enumerate}
+
+\begin{keypoint}
+The EKF's input is \topic{/tello/rc\_sent}, not \topic{/tello/cmd\_vel\_safe}. When a guard brakes, pushes back or
+holds, the request and the real command differ; predicting with the request would make the EKF believe the drone
+moves when it is braking.
+\end{keypoint}
+
+\func{stop\_rc}{() -> None}
+Sends rc (0,0,0,0) once and publishes a zero \code{Twist} on \topic{/tello/rc\_sent}. The Tello keeps flying with
+the last rc value while no new one comes, and none comes while a takeoff or landing runs (the 20 Hz loop is
+paused by \code{busy}); flight 225048 flew on backwards for 1.2 m before landing. So every blocking command is
+preceded by \code{stop\_rc}.
+
+\func{run\_async}{(fn, label) -> None}
+Runs a blocking SDK command (\code{tello.takeoff}, \code{tello.land}, which wait for the drone's "ok", several
+seconds) in a daemon thread, so the executor keeps publishing video and telemetry. The worker takes
+\code{busy} with a \emph{non-blocking} \code{acquire}: if another command already runs, the new one is dropped.
+It then calls \code{stop\_rc}, runs \code{fn}, logs any exception and releases the lock.
+
+\func{srv\_takeoff}{(req, res) -> res}
+Refuses if the last telemetry battery is below 25 \% (if no telemetry was received yet the default is 100, i.e.
+accepted). Otherwise starts \code{takeoff\_and\_climb} through \code{run\_async} and answers immediately ("taking
+off, then climbing to 1.85 m").
+
+\func{takeoff\_and\_climb}{() -> None}
+Calls the SDK \code{takeoff} (the Tello rises to about 0.8 m and answers). If \code{takeoff\_height} $>0$, sets
+$$
+z_{\text{climb}} = \min\big(\text{takeoff\_height},\ h_{\max}-0.6\big) = \min(1.85,\ 2.0) = 1.85\ \text{m (band mode)},
+$$
+and the time origin of the climb. The climb itself is \emph{not} an SDK command: \code{up} was refused right after
+takeoff ("error Not joystick", Nov 9), and the barometer height \code{h} was wrong (20 cm at 80 cm). So the climb
+is done with joystick commands by \code{send\_rc}, closed-loop on the fused height. The value of
+\code{takeoff\_height} comes from the launch file (Section~\ref{sec:zone-ros}): the middle of the zone's height
+range, 1.85 m for the band zone, $(1.55+2.30)/2\approx1.92$ m for the 3D zone.
+
+\func{climb\_rc}{(hgt, vz) -> int | None}
+The vertical rc during the climb, \code{None} when the climb is over. With a height measurement:
+$$
+e = z_{\text{climb}} - (h + 0.8\,\dot h), \qquad \text{ud} = \operatorname{int}\big(\operatorname{sat}_{[-25,\,40]}(100\,e)\big),
+$$
+(\code{int} truncates towards zero),
+a proportional law on the height predicted 0.8 s ahead (the drone keeps moving for about a second after the
+command changes), with 1 rc point per cm of error, limited to $+40$ ($\approx0.5$ m/s) up and $-25$ down.
+End conditions:
+\begin{itemize}[itemsep=1pt]
+\item done: $|z_{\text{climb}}-h|<0.10$ m and $|\dot h|<0.15$ m/s continuously for 0.5 s;
+\item timeout: 12 s after takeoff, whatever the height;
+\item no height at all: rc 0 for up to 10 s, then the climb is abandoned.
+\end{itemize}
+During the climb, the filter is told \code{climbing=True}: the height hold, the band guard and the zone guard are
+off (the drone starts below the band), but the horizontal position hold and the ceiling stay on.
+
+\func{end\_climb}{(msg) -> None}
+Clears \code{climb\_target}, logs the reason and returns \code{None} (so \code{climb\_rc} can \code{return
+self.end\_climb(...)}).
+
+\func{srv\_land}{(req, res) -> res}
+Clears the pending request and the climb. If no blocking command is running, lands through \code{run\_async}.
+If one is (typically a takeoff still waiting for the Tello's answer), the landing must not be dropped: it calls
+\code{stop\_rc} and sends the raw \code{land} command without waiting for the answer
+(\code{send\_command\_without\_return}).
+
+\func{srv\_emergency}{(req, res) -> res}
+Clears the climb and calls \code{tello.emergency()}: the motors stop at once and the drone falls. Only for real
+emergencies (the cage then hits the floor).
+
+\func{shutdown}{() -> None}
+Called by \code{main} on Ctrl+C or external shutdown. If the drone flies: rc zero and \code{land}. Then (real
+drone only) a fire-and-forget \code{streamoff}, the video reader is stopped, and \code{\_\_del\_\_} of the
+\code{Tello} class is replaced by a no-op: \code{djitellopy}'s destructor would otherwise call \code{end()}, which
+retries \code{streamoff} for several seconds, even after the PC left the Tello's Wi-Fi.
+
+\func{main}{() -> None}
+\code{rclpy.init}, build the node, \code{spin} until Ctrl+C, then \code{shutdown} (landing), destroy and
+\code{rclpy.shutdown}. The driver does not call \code{local\_ros\_env} itself: the launch file sets the same
+environment variables (Section~\ref{sec:rosenv}).
+
+\section{safety.py: the command filter}
+\label{sec:safety}
+
+\subsection{The chain}
+
+\code{CommandFilter.filter} applies five stages, in this order, to the rc tuple (lr, fb, ud, yaw) that
+\code{send\_rc} hands it:
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{l>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{2.2cm}}
+\toprule
+\textbf{Stage} & \textbf{What it does} & \textbf{Touches} \\
+\midrule
+\code{position\_hold} & no horizontal/yaw request: hold the point where the drone stops; no vertical request: hold the height & lr, fb, yaw; ud \\
+\code{ceiling} & never above \code{max\_height} = 2.6 m, on the height predicted 1 s ahead & ud \\
+\code{band\_guard} & not more than 10 cm out of the zone's height limits; pushed back 25 cm out & ud \\
+\code{zone\_guard} & slow down / brake / push back before the obstacles; slow when blind & lr, fb \\
+\code{wall\_guard} & a marker closer than 0.7 m ahead: no forward, back off & fb \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The order matters. The hold comes first because it \emph{creates} commands (from zero) that the guards must still
+check: a hold target that happens to be outside the zone is braked like any request. The guards that follow only
+ever \emph{restrict} or push back; the last one to touch an axis wins. Each guard that acts calls \code{note(...)}
+so the telemetry field \code{guard} tells which one changed the command.
+
+The filter works in rc points at its input and output, but converts to metric velocities inside each stage with
+the same \code{lin\_gain} $g$ and \code{yaw\_gain} $g_\psi$ as the driver. Three frames appear: the body frame
+(forward $x_b$, left $y_b$), the map (world) frame, and rc. With yaw $\psi$ from the EKF,
+$$
+\begin{bmatrix} w_x \\ w_y \end{bmatrix} =
+\begin{bmatrix} \cos\psi & -\sin\psi \\ \sin\psi & \cos\psi \end{bmatrix}
+\begin{bmatrix} b_x \\ b_y \end{bmatrix},
+\qquad b_x = g\,\text{fb},\quad b_y = -g\,\text{lr}.
+$$
+
+\subsection{The model used inside the filter}
+
+All predictions use the identified horizontal model of \file{model.py} (drone with its cage, Nov 13 flights): per
+axis, from a velocity command $u$ (m/s) to the real velocity $v$,
+$$
+\tau\,\dot v(t) = K\,u(t-L_u) - v(t), \qquad K_x = 0.66,\ K_y = 0.83,\ \tau = 0.25\ \text{s},\ L_u = 0.35\ \text{s},
+$$
+and $K_z = 0.9$ vertically. $K<1$ means the drone flies slower than the rc gain promises (the cage adds drag).
+The zone guard uses the mean $\bar K = (K_x+K_y)/2 = 0.745$ because it works in the world frame where the direction
+is arbitrary.
+
+\subsection{Construction and inputs}
+
+\func{CommandFilter.\_\_init\_\_}{(zone, gains, model\_*, guard and hold\_* parameters, warn, clock)}
+Stores the parameters and initialises the state: no pose yet (\code{pose\_xy=None}), uncertainties 1.0 m, empty
+histories, EKF velocity and drift zero, nearest marker "9 m" (far), no hold target, zero integrators. The
+\code{clock} argument is injectable so an offline test can run faster than real time; everything in the filter
+measures ages with it.
+
+\func{on\_pose}{(x, y, z, yaw, sigma\_xy, sigma\_z) -> None}
+Stores the pose and its time, and appends $(t,(x,y))$ to a 0.6 s history (for \code{velocity\_xy}). Before that,
+it \emph{invalidates the hold targets} when the estimate cannot be trusted to mean the same point as before:
+\begin{itemize}[itemsep=1pt]
+\item horizontal target cleared if the new pose jumped more than 0.15 m from the previous one (markers back after
+dead reckoning, EKF restart) or $\sigma_{xy}>0.06$ m;
+\item height target cleared if $z$ jumped more than 0.15 m or $\sigma_z>0.08$ m.
+\end{itemize}
+Without this, a target taken from a drifting estimate would drag the drone to a meaningless point when the
+markers come back (the docstring cites a 63 cm drag in a stress test).
+
+\func{on\_ekf\_velocity}{(vx, vy, vz) -> None}
+\func{on\_ekf\_drift}{(dx, dy) -> None}
+\func{on\_nearest\_marker}{(d) -> None}
+Store the EKF world velocity (with its time), the EKF drift estimate (the horizontal velocity the drone has with
+zero command, learnt while markers are in view), and the distance of the closest marker in view (with its time).
+
+\func{set\_param}{(name, value) -> bool}
+If \code{name} is a key of \code{LIVE\_PARAMS} (\code{hold\_kp}, \code{hold\_kv}, \code{hold\_ki},
+\code{hold\_kp\_z}, \code{hold\_vmax}, \code{hold\_drift\_ff}, \code{position\_hold}, \code{height\_hold}), sets the
+mapped attribute and returns \code{True}.
+
+\subsection{Helpers}
+
+\func{pose\_valid}{(max\_age, max\_sigma) -> bool}
+True if a pose exists, is younger than \code{max\_age} and has $\sigma_{xy}<$ \code{max\_sigma}. The EKF keeps
+publishing without markers, with a growing covariance; this is where "dead reckoning for too long" becomes "no
+pose". The thresholds differ per user: hold $(0.4\text{ s}, 0.12\text{ m})$, zone guard $(0.5\text{ s},
+0.25\text{ m})$.
+
+\func{velocity\_xy}{() -> (vx, vy)}
+Finite difference between the oldest and newest pose of the 0.6 s history, $\big(\bm p_{\text{new}}-\bm
+p_{\text{old}}\big)/\Delta t$, or zero if $\Delta t\le0.2$ s. Used by the hold when the EKF velocity is older than
+0.3 s, and always by the zone guard.
+
+\func{height\_estimate}{(tof\_cm) -> float | None}
+The height above the floor used by the ceiling and the climb:
+$$
+h = \max\big(\text{tof}/100 \ \text{(if } 15\le\text{tof}\le400\text{ cm)},\ \ z_{\text{EKF}}\ \text{(if age} <0.5\text{ s and } \sigma_z<0.5\text{ m)}\big).
+$$
+Taking the \emph{larger} is conservative for the ceiling: over the bed the distance sensor reads about 0.85 m less
+than the height above the floor, and the EKF height protects against that. \code{None} if neither is valid.
+
+\func{height\_and\_rate}{(tof\_cm, flying) -> (h, dh/dt)}
+\code{(None, 0)} when not flying. Otherwise $h$ from \code{height\_estimate}, appended to a 0.6 s history, and
+$\dot h$ by finite difference over that history (zero if it spans less than 0.2 s).
+
+\func{clip}{(v) -> int}
+\code{round} then saturate to $[-80, 80]$.
+
+\func{note}{(s) -> None}
+\func{guard\_now}{() -> str}
+\func{warn}{(key, msg, period=1.0) -> None}
+\code{note} records which guard acted and when; \code{guard\_now} returns it if it is younger than 0.5 s (else
+""); \code{warn} logs a message at most once per \code{period} per \code{key}, since the guards run 20 times per
+second.
+
+\subsection{Position hold}
+
+\begin{intuition}
+The Tello normally holds its position with a downward camera (optical flow). On the plain floor of the bedroom
+that does not work: the drone reported zero velocity while drifting 0.4 m in 8 s. So when nobody asks for motion,
+the driver holds the position itself, from the EKF pose. Three tricks make the hold stiff without oscillating:
+(1) control the position the drone \emph{will} have when the command takes effect, (2) compute the command by
+inverting the identified model instead of a plain PID, (3) subtract the drift that the EKF has learnt.
+\end{intuition}
+
+\func{hold\_axis}{(k, target, pos, vel, drift, K, kp, dt) -> u}
+One axis of the hold. With $x^\ast$ the target, $x$, $v$ the position and velocity, $d$ the drift:
+\begin{align*}
+e &= x^\ast - (x + v\,L_u) && \text{error on the position predicted } L_u = 0.35\text{ s ahead}\\
+v_d &= \operatorname{sat}_{\pm v_{\max}}(k_p\,e) && v_{\max}=0.4\text{ m/s},\ k_p = 0.8\ \text{s}^{-1}\\
+i_k &\leftarrow \operatorname{sat}_{\pm0.1}(i_k + k_i\,e\,\Delta t)\quad\text{only if } |e|<0.3\text{ m} && k_i = 0.15\\
+u &= \operatorname{sat}_{\pm0.6}\Big(\frac{v_d - d + k_v\,(v_d - v)}{K} + i_k\Big) && k_v = 0.4
+\end{align*}
+Reading the last line: in steady state the model says $v = K u + d$; asking for $v = v_d$ gives the
+\emph{model inversion} $u=(v_d-d)/K$. The term $k_v(v_d-v)$ corrects the velocity error that remains (wrong $K$,
+gusts), and the small integral $i_k$ (at most 0.1 m/s, built only near the target so a long transit does not wind
+it up) removes the last static error. $\Delta t$ is the time since the previous call, at most 0.1 s. For $x,y$ the
+function is called with $K=1$: the result is the \emph{world} velocity wanted, and the real inversion is done after
+the rotation to the body frame, where the gains differ.
+
+\func{position\_hold}{(rc, flying, busy=False, climbing=False) -> rc}
+\begin{enumerate}[itemsep=1pt]
+\item Off (both targets cleared, rc unchanged) if the hold is disabled, the drone is not flying, or
+\code{busy}.
+\item Any non-zero lr, fb or yaw: the pilot or the mission is moving, the horizontal target and integrators are
+cleared and the request passes. Any non-zero ud, or the climb: same for the height.
+\item No pose valid at $(0.4\text{ s}, 0.12\text{ m})$: rc unchanged (no hold, integrators kept).
+\item Velocity: the EKF one if younger than 0.3 s, else \code{velocity\_xy} (and $v_z=0$). Drift: the EKF one if
+\code{hold\_drift\_ff} and the EKF velocity is fresh, else zero.
+\item \textbf{Horizontal hold}, if no horizontal request and (a target exists or $\sigma_{xy}<0.06$ m). A new target
+is only taken on a certain pose, and not where the keys were released but where the drone \emph{will stop on its
+own}. With zero command it keeps its speed for $L_u$, then decays with time constant $\tau$, so it travels
+$$
+\int_0^{L_u} v\,dt + \int_0^\infty v\,e^{-t/\tau}dt = (L_u+\tau)\,v = 0.6\,v ,
+\qquad
+(x^\ast,y^\ast,\psi^\ast) = (x+0.6\,v_x,\ y+0.6\,v_y,\ \psi).
+$$
+Then, per world axis, $w_x=$ \code{hold\_axis}$(x)$, $w_y=$ \code{hold\_axis}$(y)$; rotation into the body frame and
+inversion of the per-axis gain:
+$$
+b_x = \operatorname{sat}_{\pm0.6}\frac{\cos\psi\,w_x+\sin\psi\,w_y}{K_x},\qquad
+b_y = \operatorname{sat}_{\pm0.6}\frac{-\sin\psi\,w_x+\cos\psi\,w_y}{K_y},
+$$
+$$
+\omega =\operatorname{sat}_{\pm0.3}\big(0.8\,\operatorname{wrap}(\psi^\ast-\psi)\big),
+$$
+and back to rc: lr $=$ clip$(-b_y/g)$, fb $=$ clip$(b_x/g)$, yaw $=$ clip$(-\omega/g_\psi)$. A body command of
+0.6 m/s is about 47 rc points.
+\item \textbf{Height hold}, if enabled and no vertical request and not climbing. New target
+$z^\ast = z + 0.5\,v_z$ (where it stops), then $u_z=$ \code{hold\_axis}$(2, z^\ast, z, v_z, 0, K_z{=}0.9, k_{pz}{=}1.0)$,
+limited to $\pm0.3$ m/s, i.e.\ $\pm24$ rc points.
+\end{enumerate}
+The docstring reports the tuning on the fake drone with a drift of 8/5 cm/s: the hold stays within 2.4 cm and
+overshoots 7--9 cm after a key release (the previous PI: 13 cm and 24 cm).
+
+\subsection{Ceiling}
+
+\func{ceiling}{(rc, hgt, vz) -> rc}
+Does nothing without a height. Otherwise, with $h_{\max}=2.6$ m, the limit $\ell = h_{\max}-0.15 = 2.45$ m and the
+height predicted 1 s ahead (only when rising) $\hat h = h + \max(\dot h,0)\cdot1\,\text{s}$:
+$$
+\text{ud} \leftarrow
+\begin{cases}
+-30 & h > h_{\max} \quad\text{(descend, whatever was asked)}\\
+\min(\text{ud}, -20) & \hat h > \ell \quad\text{(brake now)}\\
+\min\big(\text{ud},\ \operatorname{int}((\ell-\hat h)/g)\big) & \text{otherwise.}
+\end{cases}
+$$
+The last line limits the commanded climb rate to $(\ell-\hat h)/(1\text{ s})$: the drone slows down
+progressively as it approaches 2.45 m. One second is used because the drone needs about a second to stop
+vertically. The ceiling acts also during the climb.
+
+\subsection{Height band (band\_guard)}
+
+\func{band\_guard}{(rc, flying, climbing=False) -> rc}
+The obstacle grid of the zone is computed for a range of heights only (the band file says: 0.25 m from any
+surface between 1.50 and 2.20 m), so the horizontal guard is only valid if the drone stays near that range. This
+guard keeps it there. It acts only with a zone, in flight, not during the climb, and only on a fresh ($<0.5$ s),
+certain ($\sigma_z\le0.10$ m) EKF height; markers are not required (an EKF height stays good for a while on the
+distance sensor).
+
+The limits $[z_{lo}, z_{hi}]$ come from \code{height\_limits(zone, x, y)}: the band $[z_{\min}, z_{\max}]$ of a 2D
+zone, or, for the 3D zone, the floor and top of the boxes above the current point. The floor is "tight" when it
+is higher than the zone's global floor (over the east furniture, $z_{lo}=2.08$ m, furniture top 1.88 m: only 0.20 m
+of slack). With $h=z_{\text{EKF}}$:
+
+\begin{center}\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Condition} & \textbf{Action} & \textbf{Note} \\
+\midrule
+$h < z_{lo} - 0.25$ (tight: $-0.12$) & ud $\ge 12$ & push up ($\approx0.15$ m/s) \\
+$h < z_{lo} - 0.10$ (tight: $-0.03$) and ud $<0$ & ud $=0$ & no further descent \\
+$h > z_{hi} + 0.25$ & ud $\le -12$ & push down \\
+$h > z_{hi} + 0.10$ and ud $>0$ & ud $=0$ & no further climb \\
+\bottomrule
+\end{tabular}
+\end{center}
+In band mode ($1.70$--$2.00$ m) the pilot can therefore fly between 1.60 and 2.10 m, inside the 1.50--2.20 m for
+which the grid is valid.
+
+\subsection{Flight zone (zone\_guard, grid\_guard, box\_guard)}
+
+\func{zone\_guard}{(rc, flying, climbing=False) -> rc}
+Off without zone, on the ground or during the climb. Then:
+\begin{itemize}[itemsep=1pt]
+\item \textbf{Blind} (no pose valid at $(0.5\text{ s}, 0.25\text{ m})$): the zone cannot be enforced. Blocking all
+motion was tried and trapped the pilot (he could not move to find the markers again); now every horizontal axis is
+limited to $\text{lim}=\operatorname{round}(0.15/g)=12$ rc points, 0.15 m/s commanded. At that speed the pilot has
+about a second to react over 15 cm. Yaw and vertical are not limited (turning is how markers are found).
+\item \textbf{With a pose}: the horizontal request is converted to a world velocity $\bm w=(w_x,w_y)$ (body $\to$
+world rotation above), passed to \code{grid\_guard} if the zone has a clearance grid, else to \code{box\_guard},
+rotated back to the body frame and to rc. ud and yaw pass unchanged. The velocity used for predictions is
+\code{velocity\_xy()}, the finite difference of poses.
+\end{itemize}
+
+\func{grid\_guard}{(x, y, vx, vy, wx, wy) -> (wx, wy)}
+The main horizontal guard. It reads the clearance $c$ (distance to the nearest obstacle, Section~\ref{sec:zonepy})
+and the unit direction $\hat{\bm u}$ pointing \emph{away} from that obstacle, at two points, both on the layer of
+the current height $z$:
+\begin{enumerate}[itemsep=1pt]
+\item the current position: $d,\ \hat{\bm u}_0$;
+\item the position predicted $H=1$ s ahead if the command $\bm w$ is kept, with the identified model (velocity
+$\bm v$ kept during $L_u$, then first-order response to $\bar K\bm w$):
+$$
+\hat{\bm p} = \bm p + \bm v L_u + \bar K\bm w\,(H-L_u) + (\bm v-\bar K\bm w)\,f,\qquad
+f = \tau\big(1-e^{-(H-L_u)/\tau}\big) \approx 0.231\ \text{s}.
+$$
+This is the exact integral of $\tau\dot v = \bar K w - v$ over $[L_u, H]$ starting from $v$: a deceleration
+already commanded is not taken for a run at the wall.
+\end{enumerate}
+The worse of the two is used: $(d_u, \hat{\bm u}) = (d_p, \hat{\bm u}_p)$ if $d_p<d$, else $(d,\hat{\bm u}_0)$. If
+$\hat{\bm u}=\bm 0$ (flat clearance), nothing is done. The speed towards the obstacle is
+$s = -\bm w\cdot\hat{\bm u}$ ($>0$: approaching). With the margin $m$ (0.25 m for the band and 3D zones):
+
+\begin{center}\footnotesize
+\begin{tabular}{lll}
+\toprule
+\textbf{Case} & \textbf{Correction} & \textbf{Result} \\
+\midrule
+$d < m$ (already too close) & if $s>-0.25$: $\bm w \mathrel{+}= (s+0.25)\,\hat{\bm u}$ & moves away at $\ge0.25$ m/s \\
+$d_u < m+0.10$ (will be too close) & if $s>-0.15$: $\bm w \mathrel{+}= (s+0.15)\,\hat{\bm u}$ & moves away at $\ge0.15$ m/s \\
+otherwise & if $s>a$, $a=(d_u-m)/1\text{ s}$: $\bm w \mathrel{+}= (s-a)\,\hat{\bm u}$ & approaches at $\le a$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{intuition}
+Only the component of the velocity along $\hat{\bm u}$ (towards or away from the nearest obstacle) is changed; the
+tangential component is left alone, so the drone \emph{slides along} a wall instead of stopping dead. Far from the
+obstacles the allowed approach speed is the remaining distance per second: with 0.5 m of room beyond the margin,
+0.5 m/s towards the obstacle is allowed; it shrinks linearly to zero as the predicted point reaches the margin;
+10 cm before it, the drone is braked into a retreat; inside the margin it is pushed out. Note that the speeds are
+\emph{commanded} speeds, which the drone executes with the gain $K<1$.
+\end{intuition}
+
+\func{box\_guard}{(x, y, vx, vy, wx, wy) -> (wx, wy)}
+The fallback when the zone file has no grid: the rectangle $[x_{\min},x_{\max}]\times[y_{\min},y_{\max}]$ only,
+with a fixed margin $m_b=0.15$ m and a cruder prediction $\hat p = p + v\cdot 1\,$s. Per axis and per side, e.g.
+the upper side:
+$$
+w \leftarrow
+\begin{cases}
+\min(w,-0.25) & p > \text{hi}\\
+\min(w,-0.15) & \hat p > \text{hi}-m_b\\
+\min\big(w,\ (\text{hi}-m_b-\hat p)/1\text{ s}\big) & \text{otherwise,}
+\end{cases}
+$$
+symmetrically for the lower side with $\max$. With the shipped zone files this function is not used (all three
+have a grid, explicitly or built from the boxes).
+
+\subsection{Wall ahead}
+
+\func{wall\_guard}{(rc, flying) -> rc}
+A guard that needs neither the map nor the pose: the localizer publishes on \topic{/aruco/nearest\_marker} the
+distance of the closest marker seen, from its apparent size, $d = f_x\,s/\ell_{\text{px}}$ ($s$ the printed side,
+$\ell_{\text{px}}$ its longest edge in the image). The camera looks forward, so a big marker means a wall ahead.
+Active if flying and the measurement is younger than 0.4 s:
+$$
+\text{fb} \leftarrow
+\begin{cases}
+\min(\text{fb}, -12) & d < 0.7\text{ m (back off at}\approx 0.15\text{ m/s)}\\
+\operatorname{int}\Big(\text{fb}\,\dfrac{d-0.7}{0.15}\Big) & 0.7 \le d < 0.85\text{ m and fb}>0\\
+\text{fb} & \text{otherwise.}
+\end{cases}
+$$
+It is last in the chain so it has the final word on the forward axis. It is the backup for the case where the
+pose is wrong but the camera is not.
+
+\func{filter}{(rc, hgt, vz, flying, busy=False, climbing=False) -> rc}
+\code{wall\_guard(zone\_guard(band\_guard(ceiling(position\_hold(rc)))))}, with the arguments each one needs.
+
+\section{zone.py: the flight zone}
+\label{sec:zonepy}
+
+\subsection{What a clearance grid is, and what it is for}
+
+The room contains walls, a bed, a desk and tall furniture along the east wall. The phone scan of the room
+(\file{tools/room\_mesh\_to\_map.py}, aligned to the \topic{map} frame) gives all those surfaces as a triangle mesh.
+The guard needs to answer, 20 times per second, one question: \emph{how far is the nearest obstacle from this
+point, and in which direction should I move to get away from it?} A \textbf{clearance grid} answers it by a single
+array lookup.
+
+It is a 2D array over the floor plan, cell size $\delta$ (5 cm for the scan grids, 2 cm for the 3D zone), with
+cell $(i,j)$ at $x = x_0 + j\delta$, $y = y_0 + i\delta$ (rows are $y$, columns are $x$). Each cell holds
+$$
+c(\bm p) = \min_{\bm q \in \mathcal O} \lVert \bm p - \bm q \rVert ,
+$$
+the Euclidean distance from the cell to the nearest obstacle cell $\mathcal O$ (a cell where some scan point lies
+in the height range of the zone, or the outside of the room). Computing that for every cell at once is a
+\textbf{Euclidean distance transform} (EDT): given a binary image, it returns for every pixel the distance to the
+nearest pixel of the other class. OpenCV (\code{cv2.distanceTransform}, used by \file{tools/free\_zone.py}) and
+SciPy (\code{scipy.ndimage.distance\_transform\_edt}, used by \file{zone.py}) both implement it in linear time.
+
+The gradient $\nabla c$ points in the direction where the distance to obstacles grows fastest, i.e.\ \emph{away
+from the nearest obstacle}; for an exact distance field $\lVert\nabla c\rVert=1$ almost everywhere, and the
+direction is $\hat{\bm u} = \nabla c/\lVert\nabla c\rVert$. So the clearance is used for:
+\begin{itemize}[itemsep=1pt]
+\item the \textbf{driver's guard} (\code{grid\_guard}): how much room is left ($c - m$) and which direction is
+"towards the obstacle" ($-\hat{\bm u}$);
+\item the \textbf{missions' planning}: a waypoint or a takeoff point is acceptable only if
+$c \ge m + $ a few cm (e.g.\ \file{marker\_tour.py} uses $m+0.15$ m, \file{patrol.py} $m+0.1$ m);
+\item \textbf{RViz}: \topic{/room/free\_space}, an occupancy grid with 100 where $c<m$.
+\end{itemize}
+The \textbf{margin} $m$ is the clearance under which a point is no-fly: the drone with its cage is about 0.2 m
+wide, plus pose error.
+
+\begin{keypoint}
+Instead of storing obstacles and computing distances on the fly, the zone precomputes the distance field once.
+The guard then has the same cost whatever the shape of the room, and gets the escape direction for free from the
+gradient. A rectangle check would forbid the whole L-shaped free space except its biggest rectangle; the clearance
+grid lets the drone use any free shape.
+\end{keypoint}
+
+\subsection{Three zone files}
+
+\begin{center}\small
+\begin{tabular}{lllll}
+\toprule
+\textbf{File (config/)} & \textbf{Rectangle} $x\times y$ (m) & \textbf{Heights} & \textbf{Margin} & \textbf{Grid} \\
+\midrule
+\file{flight\_zone.yaml} & $[-0.26,0.79]\times[0.51,2.71]$ & 1.40--2.40 & 0.35 & \code{\_grid.npz} \\
+\file{flight\_zone\_band.yaml} & $[-0.86,0.94]\times[0.36,2.76]$ & 1.70--2.00 & 0.25 & \code{\_band\_grid.npz} \\
+\file{flight\_zone\_3d.yaml} & union of 2 boxes & 1.55--2.30 & 0.25 & from the boxes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The first two are produced by \file{tools/free\_zone.py} from the scan: it rasterises every scan point between
+the given heights (1.2--2.6 m for the first, 1.5--2.2 m for the band) into 5 cm cells, flood-fills the inside of the
+room, runs the distance transform, finds the largest free rectangle (the "mission rectangle" \code{x\_min}\dots) and
+removes narrow passages so that only the main free region keeps a clearance above the margin. The \code{.npz}
+contains \code{clearance} ($99\times75$ cells, origin $(-1.56, -1.24)$, cell 0.05 m), \code{x0}, \code{y0},
+\code{cell}, \code{z\_lo}, \code{z\_hi}. The rectangle and \code{z\_min}/\code{z\_max} in the YAML are the
+\emph{allowed} band (1.70--2.00 for band mode), narrower than the heights the grid was computed for (1.50--2.20),
+so the 10 cm tolerance of \code{band\_guard} stays inside the valid range.
+
+The third file is drawn by hand (with \file{tools/zone\_view.py}) as a union of boxes:
+\begin{lstlisting}
+margin: 0.25
+boxes:
+  - {name: main,                 x: [-0.94, 0.67], y: [0.30, 2.87], z: [1.55, 2.30]}
+  - {name: above_east_south,     x: [0.67, 1.15],  y: [0.30, 1.55], z: [2.08, 2.30]}
+  - {name: above_east_north,     x: [0.67, 1.35],  y: [1.55, 2.87], z: [2.08, 2.30]}
+\end{lstlisting}
+Each box is where the drone \emph{centre} may be, already 0.25 m away from every scanned surface (walls at
+$x=-1.24$ and $1.65$, $y=0$ and $3.17$; east furniture front at $x=0.92$, top 1.88 m). Seen from the south,
+the union is an L: the whole room width between 2.08 and 2.30 m, but only the part west of $x=0.67$ down to
+1.55 m. This lets the drone fly lower (more markers in view on the low rows) away from the furniture, and above
+the furniture only high.
+
+\subsection{Functions}
+
+\func{wrap}{(a) -> float}
+$\operatorname{atan2}(\sin a, \cos a)$: an angle brought back to $(-\pi,\pi]$.
+
+\func{make\_grid}{(c, x0, y0, cell, margin) -> dict}
+Turns a clearance array into the dict that \code{clearance()} reads:
+\code{\{"d": c, "gx", "gy", "x0", "y0", "cell"\}}. The direction field is first the numerical gradient,
+\code{gy, gx = np.gradient(c)} (axis 0 is $y$). Problem: inside an obstacle or outside the scan $c$ is a flat 0,
+so the gradient is zero and the guard would not push at all (a stress test left the drone at $x=2.2$ m). Fix:
+\begin{enumerate}[itemsep=1pt]
+\item \code{bad} = cells with $c < m + 0.10$;
+\item one EDT on \code{bad} with \code{return\_indices=True} gives, for each bad cell, the indices $(i^\ast, j^\ast)$
+of the nearest good cell;
+\item on the cells that are \code{bad} with a zero gradient, \emph{or} have $c<m$, the direction is replaced by
+$(j^\ast-j,\ i^\ast-i)$: the vector to the nearest cell with room. It is not normalised here;
+\code{clearance()} normalises.
+\end{enumerate}
+(In \code{flat = bad \& (...) | (c < margin)}, \code{\&} binds tighter than \code{|}.) So inside the no-fly part,
+the push always points to the nearest flyable place, even where the gradient is flat or points into a dead end.
+
+\func{box\_layers}{(boxes, margin, cell=0.02, pad=0.6) -> [(z\_lo, z\_hi, grid)]}
+Converts the union of boxes into clearance grids, one per height layer.
+\begin{enumerate}[itemsep=1pt]
+\item A common 2D raster covering all boxes plus 0.6 m of padding, 2 cm cells ($176\times190$ cells for the 3D
+file).
+\item The \emph{layers} are the intervals between consecutive distinct box floors/tops: here
+$\{1.55, 2.08, 2.30\}$ gives $[1.55, 2.08]$ and $[2.08, 2.30]$.
+\item For each layer, \code{inside} = union of the footprints of the boxes that cover the \emph{whole} layer
+height: the lower layer contains only \code{main}, the upper one \code{main} $\cup$ \code{above\_east\_furniture}.
+\item The clearance is built so that the box boundary is the level $c=m$:
+$$
+c = \begin{cases}
+m + \delta\cdot\mathrm{EDT}(\text{inside}) & \text{inside the union (distance to its edge)}\\
+\max\big(0,\ m - \delta\cdot\mathrm{EDT}(\text{outside})\big) & \text{outside (distance to the union)}
+\end{cases}
+$$
+Since each box is already $m$ from the scanned surfaces, $c$ approximates "distance to the nearest obstacle"
+near the boundary, and the same guard code works unchanged.
+\item \code{make\_grid} adds the directions.
+\end{enumerate}
+Evaluated on the shipped file: $c(0, 1.5)$ on the lower layer is 0.93 m with $\hat{\bm u}=(-1,0)$ (the nearest
+edge is the east side of \code{main}, at $x=0.67$); at $(1.0, 1.5)$ the lower layer gives $c=0$,
+$\hat{\bm u}=(-1,0)$ (push west, out of the furniture area), while the upper layer gives 0.61 m (free).
+
+\begin{keypoint}
+\code{box\_layers} runs only inside the Python processes that call \code{load\_zone}: the driver (enforcement) and
+the missions (planning). RViz does not use it. \file{marker\_map\_publisher.py} reads the same YAML with
+\code{yaml.safe\_load} and draws each box directly as a translucent cube with thick edges on
+\topic{/room/flight\_zone}. The boxes you see in RViz and the boxes the driver enforces come from the \emph{same
+file}, but through two different code paths.
+\end{keypoint}
+
+\func{load\_zone}{(path) -> dict | None}
+Empty path: \code{None} (no zone, the zone and band guards are off). Otherwise two formats:
+\begin{itemize}[itemsep=1pt]
+\item \textbf{boxes} (3D): the rectangle keys are the bounding box of the boxes (for the file above
+$x\in[-0.94,1.35]$ (v1.1: three boxes, the bounding box is unchanged), $y\in[0.30,2.87]$, $z\in[1.55,2.30]$), \code{margin} (default 0.25), the boxes as floats,
+\code{layers} from \code{box\_layers}, and \code{grid} = the layer with the fewest cells at $c\ge m$, i.e.\ the
+most restrictive one (the lower layer here), used when a caller gives no height.
+\item \textbf{rectangle} (2D): the six keys, \code{margin} (default 0.35) and, if \code{grid\_file} is set, the grid
+loaded from the \code{.npz} next to the YAML and passed through \code{make\_grid}.
+\end{itemize}
+Any exception (missing file, bad YAML, missing key) returns \code{None}. Note the consequence in the review.
+
+\func{grid\_at}{(zone, z=None) -> grid}
+The grid valid at height $z$. 2D zone or $z$ unknown: \code{zone["grid"]}. 3D zone: $z$ is clamped to
+$[1.55, 2.30]$ and the highest layer whose floor is $\le z + 0.05$ is chosen. The 5 cm slack under a layer floor
+avoids flipping between layers because of height noise around 2.08 m: from $z\ge2.03$ m the upper layer applies.
+
+\func{height\_limits}{(zone, x, y) -> (lo, hi)}
+For a 2D zone, $(z_{\min}, z_{\max})$. For a 3D zone, the boxes whose footprint contains $(x,y)$ grown by 5 cm;
+the result is $(\min z_{lo}, \max z_{hi})$ over them. At $(0,1.5)$: $(1.55, 2.30)$; at $(1.0,1.5)$: $(2.08, 2.30)$;
+on the shared edge $x=0.67$ both boxes count, so the lower floor wins. Outside every footprint (being pushed back
+in), the limits of the nearest box(es) are used.
+
+\func{clearance}{(zone, x, y, z=None) -> (d, (ux, uy)) | None}
+The lookup used by everybody: picks the grid with \code{grid\_at}, converts $(x,y)$ to the nearest cell
+$j=\operatorname{round}((x-x_0)/\delta)$, $i=\operatorname{round}((y-y_0)/\delta)$, returns $c_{ij}$ and the
+normalised direction $(g_x, g_y)/\lVert(g_x,g_y)\rVert$ (zero vector if the norm is below $10^{-6}$). Outside the
+array, it returns $d=0$ and the unit vector towards the centre of the zone rectangle. \code{None} if the zone has
+no grid.
+
+\section{How the zone exists in ROS}
+\label{sec:zone-ros}
+
+\emph{"We delimited a zone. How? Is it only in the driver node? How does it work in ROS?"}
+
+The zone is three things: \textbf{data} (a YAML file, possibly with an \code{.npz}), \textbf{code} that interprets it
+(\file{zone.py}, a plain module), and a \textbf{parameter} that tells each node which file to use. There is no zone
+topic and no zone server. The path is chosen once, in \file{real.launch.py}:
+
+\begin{lstlisting}
+def zone_file(arg, band=False):
+    if arg == "none":
+        return ""
+    if arg == "3d":   # the L-shaped zone (union of boxes)
+        return str(Path(REPO) / "config" / "flight_zone_3d.yaml")
+    if arg != "auto":
+        return arg    # any path
+    p = Path(REPO) / "config" / ("flight_zone_band.yaml" if band else "flight_zone.yaml")
+    return str(p) if p.exists() else ""
+\end{lstlisting}
+
+With the defaults (\code{band:=true}, \code{flight\_zone:=auto}) the file is \file{config/flight\_zone\_band.yaml};
+\code{flight\_zone:=3d} selects the L zone; \code{flight\_zone:=none} disables it. The same string is passed as the
+parameter \code{flight\_zone\_file} to two nodes of the launch, and \code{takeoff\_height} is derived from it
+(\code{takeoff\_height()}: in band mode the middle of the file's heights, or of the boxes' full range).
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{3.8cm}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{4.6cm}}
+\toprule
+\textbf{Who} & \textbf{How it gets the file} & \textbf{What it does with it} \\
+\midrule
+\code{tello\_driver} & parameter \code{flight\_zone\_file} from the launch & \code{load\_zone} $\to$ \code{CommandFilter}: \textbf{enforcement} (band and zone guards) \\
+\code{marker\_map\_publisher} & same parameter from the launch & RViz only: boxes on \topic{/room/flight\_zone} (yellow: rectangle of a 2D file; green: the boxes of \file{flight\_zone\_3d.yaml}), \topic{/room/free\_space} from the \code{.npz} \\
+missions (\code{StepTest} and its subclasses: tour, goto, patrol, strike) & own parameter; if empty, \emph{asks the running driver} for its \code{flight\_zone\_file} (\code{GetParameters} service of the driver, function \code{driver\_zone\_file} in \file{step\_test.py}); else the default file & \code{load\_zone} again in their own process: \textbf{planning} (choosing targets with enough clearance, landing if the zone is left) \\
+\code{tello\_teleop} & does not know the zone & protected by the driver \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{intuition}
+Think of it as \emph{one file, read independently by several processes}. Enforcement is only in the driver; the
+missions only use the zone to avoid \emph{asking} for something the driver would refuse (a mission that plans a
+waypoint in the no-fly part would fight the guard forever). Asking the driver for its parameter guarantees both
+read the same file, so a launch with \code{flight\_zone:=3d} switches enforcement, planning and display together.
+\end{intuition}
+
+\section{video\_reader.py: the low-latency reader}
+\label{sec:video}
+
+\subsection{Why}
+
+\code{djitellopy}'s \code{BackgroundFrameRead} opens \code{udp://0.0.0.0:11111} with PyAV/FFmpeg defaults made for
+smooth playback: input buffering, a long stream analysis at start, frame-threaded decoding (each thread holds
+images back), no read timeout, and a huge UDP FIFO. When the decoder is slower than the 30 images/s the drone sends
+(CPU busy with RViz and ArUco), packets pile up in that FIFO and the delay \emph{grows} without bound; on Nov 12 the
+RViz image was a minute late, and a late image means a late pose for the EKF. The class
+\code{LowLatencyReader} keeps the same interface (\code{.frame}, \code{.stop()}) but never lets the delay grow.
+
+It is \textbf{off by default} (\code{low\_latency\_video:=false}): on Nov 13 it failed to open the real stream
+(\code{InvalidDataError} in a loop); it was only validated on a synthetic H.264 stream (p90 latency 49 ms against
+60 ms, max 68 against 120 ms).
+
+\subsection{How}
+
+\begin{itemize}[itemsep=1pt]
+\item \textbf{URL} \code{udp://@0.0.0.0:11111?overrun\_nonfatal=1\&fifo\_size=8000}: the FIFO counts 188-byte units,
+so 1.5 MB, about 1.5--3 s of 2--4 Mbit/s video; when full, data is dropped instead of delaying everything.
+\item \textbf{Format options} \code{fflags=nobuffer}, \code{probesize=32768}, \code{analyzeduration=0}; codec flag
+\code{low\_delay}; never frame threading (+260 ms measured).
+\item \textbf{Timeouts} \code{(10 s open, 1 s read)}: after a Wi-Fi drop the read fails, the container is closed
+(freeing the port) and reopened after 0.3 s by the reader's own thread.
+\item \textbf{Only the newest image} is kept, and converted to RGB only when read.
+\item \textbf{Catch-up}: the reader measures how long it waited for each packet.
+\end{itemize}
+
+\func{LowLatencyReader.\_\_init\_\_}{(url=URL, low\_latency=True, log=None, ...)}
+Stores the settings (the defaults are the benchmarked ones; the other arguments exist for experiments), sets the
+same black $400\times300$ placeholder as \code{djitellopy} (skipped by the driver), zero counters, and starts the
+daemon thread \code{\_run}.
+
+\func{frame}{(property) -> np.ndarray}
+Takes the newest decoded \code{av.VideoFrame} under the lock (and clears it), converts it to an RGB array outside
+the lock, and stores it as \code{\_frame} unless an even newer one was decoded meanwhile. Returns \code{\_frame}:
+the \emph{same object} until a newer image exists, which is what \code{poll\_video}'s identity test relies on.
+
+\func{stop}{(wait=2.0) -> None}
+Raises \code{stopped} and joins the thread for up to 2 s. Only the reader thread may close the FFmpeg container
+(closing it from another thread while it decodes crashes the process); it notices the flag within the 1 s read
+timeout.
+
+\func{stats}{() -> dict}
+Frames decoded, mean decode time (ms), reconnections, skipped packets, number of catch-ups.
+
+\func{\_close}{() -> None},\quad \func{\_open}{() -> (container, stream)},\quad \func{\_decode}{(packet) -> frames}
+Close the container ignoring errors; open it with the options and set the codec flags; decode one packet (a method
+so a test can override it).
+
+\func{\_run}{() -> None}
+The thread. In a loop until stopped: open; for each demuxed packet, record $(t_0, w)$ where $w$ is the time spent
+waiting for that packet since the previous one was processed, over a sliding window of 1 s. The reader is declared
+\textbf{behind} when the window holds more than 10 packets, spans more than 0.8 s, and
+$$
+\sum w < 0.03 \times 1\text{ s},
+$$
+i.e.\ it practically never had to wait for data: packets are queued and the images are late. It then
+\textbf{skips} packets (counted in \code{skipped}) until the next key frame, or for at most 2 s (after which decoding
+restarts with artefacts until the next key frame), and clears the window. A key frame is needed because H.264
+P-frames only encode differences to the previous images. Decoded frames replace \code{\_av\_frame} under the lock.
+Any exception (timeout, corrupt stream) is logged, the container closed, and the stream reopened after 0.3 s.
+
+\section{ros\_env.py: local-only ROS}
+\label{sec:rosenv}
+
+\func{local\_ros\_env}{() -> None}
+Must run before \code{rclpy.init}. Sets, only if not already set (\code{setdefault}), three variables:
+\begin{itemize}[itemsep=0pt]
+\item \code{ROS\_AUTOMATIC\_DISCOVERY\_RANGE=LOCALHOST},
+\item \code{FASTDDS\_BUILTIN\_TRANSPORTS=LARGE\_DATA},
+\item \code{FASTRTPS\_DEFAULT\_PROFILES\_FILE} = the installed \file{config/fastdds\_local.xml} (UDP on
+127.0.0.1 only, packets $\le1400$ bytes).
+\end{itemize} Why: all nodes run on one PC, and the PC switches its Wi-Fi to the Tello (no multicast,
+no internet); WSL mirrored networking drops fragmented UDP on the loopback, and with Tailscale up the discovery
+packets exceeded 1500 bytes and no node saw the others. Called by \code{tello\_teleop}, the missions
+(\code{step\_test.run}) and \code{tello\_ekf}; the launch file sets the same three variables for the nodes it
+starts (\code{LOCAL\_ROS\_ENV}), so a program started by hand in a second terminal must use the same settings to
+see them.
+
+\func{fastdds\_profile}{() -> str}
+Path of \file{fastdds\_local.xml} in the package share directory, or "" if not found.
+
+\section{The fake drone: fake\_tello.py and fake\_world.py}
+\label{sec:fake}
+
+With \code{mock:=true} the driver builds \code{FakeTello} instead of \code{djitellopy.Tello}. Everything downstream
+(localizer, EKF, missions, RViz) is the real code; only the drone and its camera are simulated.
+
+\subsection{fake\_tello.py}
+
+\func{FakeFrameRead}{(world=None)}
+The video reader. Its \code{frame} property produces a new image when the 30 Hz tick $k=\lfloor 30t\rfloor$ changes.
+With a world, each tick renders the view (which also advances the dynamics, see \code{render}) and pushes it in a
+queue; the image returned is the newest one at least $L_v=0.2$ s old, so the fake video has the same latency as the
+real one (the EKF assumes it). Without a world: a grey image with a colour ramp and a moving white line.
+
+\func{FakeTello}{(markers\_file="")}
+The \code{djitellopy} subset the driver uses. \code{connect}, \code{streamon}, \code{streamoff}, \code{end}: no-ops;
+battery 90 \%. \code{takeoff} sets \code{world.z\_target} $=\max(z, 0.85)$ and waits until reached (the real Tello
+stops around 0.8--0.9 m); \code{land} targets 0.05 m and waits 1 s; \code{emergency} stops at once;
+\code{send\_command\_without\_return("land")} lands in a thread; \code{send\_rc\_control} stores the rc in the
+world; \code{get\_current\_state} returns the world's state (or constants without a world); \code{move\_up},
+\code{get\_height}, \code{wait\_z} support the position commands.
+
+\subsection{fake\_world.py}
+
+\func{marker\_image}{(dictionary, mid, px=240) -> RGB image}
+A printed marker: the ArUco square, $240$ px, centred on a white sheet 1.5 times larger.
+
+\func{FakeWorld.\_\_init\_\_}{(markers\_file, width=960, height=720)}
+Loads the real marker map (\file{config/markers.yaml}) with the localizer's own loader, renders one image per
+marker, sets an ideal pinhole with the same $55.6^\circ$ field of view ($f\approx910$ px), the start pose, zero
+velocity, an rc queue for the delay.
+
+\func{set\_camera}{(K, D)}
+Replaces the intrinsics with the driver's \code{CameraInfo} (distortion forced to zero by the driver), so the
+renderer and the localizer use the same camera.
+
+\func{start\_pose}{() -> (p, yaw)}
+\code{FAKE\_START=x,y,yaw\_deg} if set. Otherwise: group the markers by the direction of their normal (rounded to
+$45^\circ$), take the wall with the most markers (the west wall, 16 markers), stand on the floor 2 m in front of
+its centre, facing it. The driver then moves this start inside the zone (Section~\ref{sec:driverpy}).
+
+\func{step}{() -> None}
+The dynamics, with $\Delta t \le 0.1$ s since the previous step:
+\begin{itemize}[itemsep=1pt]
+\item the rc applied is the one sent $L_u = 0.35$ s ago (queue);
+\item body velocity target $\bm v^\ast = g\,(K_x\,\text{fb},\ -K_y\,\text{lr},\ \text{ud})$ and a first-order
+Euler step $\bm v \mathrel{+}= (\bm v^\ast-\bm v)\min(1, \Delta t/\tau)$, $\tau=0.25$ s: the identified model;
+\item during takeoff/land (\code{z\_target}), a position loop $v_z = \operatorname{sat}_{\pm0.6}(2\,\Delta z)$
+that stops within 2 cm, like the Tello's own;
+\item yaw rate first order towards $-g_\psi\,\text{yaw}$;
+\item position integrated in the map with the yaw rotation; \code{FAKE\_DRIFT=vx,vy} adds a constant drift (the
+real Tello without its optical-flow hold); $z\ge0.05$.
+\end{itemize}
+
+\func{render}{() -> RGB image}
+Calls \code{step}, then draws: a vertical grey gradient (wall), then every marker, far ones first (painter's
+algorithm). A marker is skipped if seen from behind or edge-on ($(\bm c-\bm t)\cdot\bm n \le 0.05$), or if a corner
+is less than 0.15 m in front of the camera. Its four sheet corners are projected with \code{cv2.projectPoints}
+(camera 5 cm ahead of the body, optical axes $R_{bc}$: $z$ forward, $x$ right, $y$ down), and the marker image is
+warped onto that quadrilateral with a homography (\code{getPerspectiveTransform} + \code{warpPerspective}).
+\code{FAKE\_BLACKOUT=a:b} returns a blank wall between $a$ and $b$ seconds after takeoff, to test the search
+behaviour.
+
+\func{state}{() -> dict}
+A telemetry dict in Tello units and signs: \code{yaw} in degrees clockwise, \code{vgx}, \code{vgy}, \code{vgz} in
+dm/s (body frame, $z$ down), \code{tof} and \code{h} in cm, battery 90, plus \code{true\_x}, \code{true\_y},
+\code{true\_z}, \code{true\_yaw\_deg}: the ground truth, recorded in the session so the EKF can be scored.
+
+\begin{intuition}
+Because the dynamics advance only inside \code{render}, the simulation runs at the rate the driver polls the video
+(30 steps per second). The fake drone obeys the same identified model the EKF and the hold assume, so the mock is
+good for testing logic (guards, missions, search) but cannot reveal a model error; that is what the validation
+flights are for.
+\end{intuition}
+
+\section{Code review notes}
+\label{sec:driver-review}
+
+\begin{review}
+\begin{enumerate}[leftmargin=*,itemsep=3pt]
+\item \textcolor{OliveGreen}{\textbf{[Fixed in v1.1, see Appendix~\ref{app:review}.]}} \textbf{A zone file that fails to load disables the zone silently.} \file{zone.py}:87--88 returns
+\code{None} on \emph{any} exception, and \file{driver.py}:82--84 then simply logs nothing; the driver flies with
+no band and no zone guard. Same for \file{real.launch.py}:77--78 (\code{auto} with a missing file gives ""). A
+typo in a path or a corrupt \code{.npz} removes the main safety layer without a warning. Suggest: log an error and
+refuse to start when \code{flight\_zone\_file} is non-empty but \code{load\_zone} fails.
+
+\item \textbf{The horizontal hold's 0.12 m tolerance is dead.} \file{safety.py}:63--64 clears \code{hold\_target}
+whenever $\sigma_{xy}>0.06$; \file{safety.py}:185 then holds only if a target exists or $\sigma_{xy}<0.06$. So
+between 0.06 and 0.12 m (allowed by \code{pose\_valid(0.4, 0.12)}, line 176) the hold is never active. Either the
+intent was to keep an existing target up to 0.12 m (then do not clear on $\sigma$ in \code{on\_pose}), or 0.12
+should read 0.06.
+
+\item \textbf{The height hold ignores $\sigma_z$.} \file{safety.py}:65--66 clears \code{hold\_zt} when
+$\sigma_z>0.08$, but lines 201--205 immediately recreate it from the uncertain $z$ on the next cycle (the check
+at line 176 is on $\sigma_{xy}$ only). The hold then follows the estimate instead of holding a height. Suggest a
+$\sigma_z$ condition before taking a new height target.
+
+\item \textbf{The zone guard uses the finite-difference velocity.} \file{safety.py}:275 calls
+\code{velocity\_xy()} (0.6 s window, lags about 0.3 s, and a pose jump produces a large spurious velocity, hence a
+spurious brake), while the hold uses the fresher EKF velocity when available (line 180). Using the EKF velocity
+here too would make the 1 s prediction consistent with the hold.
+
+\item \textbf{band\_guard trusts $(x,y)$ without checking $\sigma_{xy}$.} \file{safety.py}:235--242 checks the age
+and $\sigma_z$, then calls \code{height\_limits(z, *self.pose\_xy)}. With the 3D zone, a wrong horizontal estimate
+picks the wrong floor (1.55 m instead of 2.08 m over the furniture, or the reverse, pushing the drone up). Suggest
+falling back to the global $z_{\min}$ of the most restrictive case (2.08 m near the boundary) when
+$\sigma_{xy}$ is large.
+
+\item \textbf{Mock start point is wrong for the 3D zone.} \file{driver.py}:141--146 uses the bounding rectangle.
+With the main marker wall on the west, $\bm n=(1,0)$, and for \file{flight\_zone\_3d.yaml} the fake drone starts at
+$x = 0.205+(1.145-0.3) \approx 1.05$ m, i.e.\ under the \code{above\_east\_furniture} box, where the lower layer is
+no-fly: after the climb to 1.92 m the band guard pushes up and the zone guard pushes west at the same time. Use a
+point with clearance (e.g.\ the maximum of \code{zone["grid"]}).
+
+\item \textcolor{OliveGreen}{\textbf{[Fixed in v1.1, see Appendix~\ref{app:review}.]}} \textbf{A NaN request kills the node.} \file{driver.py}:325--326 calls \code{clip}, i.e.\ \code{round(v)}
+(\file{safety.py}:125); \code{round(float("nan"))} raises \code{ValueError} (checked) inside the subscription
+callback, which ends \code{rclpy.spin} (the drone then lands through \code{shutdown}). Reject non-finite values
+(\code{math.isfinite}) in \code{on\_cmd}.
+
+\item \textbf{Dead \code{busy} argument.} \file{driver.py}:332 returns while \code{busy} is locked, so the
+\code{busy=self.busy.locked()} passed at line 341 is always \code{False}; the \code{busy} branch of
+\code{position\_hold} (\file{safety.py}:165) is unreachable from the driver.
+
+\item \textbf{Stale comments about the 3D zone.} \file{config/flight\_zone\_3d.yaml}:1--2 says "Not used by the driver
+yet", but \file{real.launch.py}:73--74 enforces it with \code{flight\_zone:=3d} (commit \code{aab4639}); the
+comment in \file{marker\_map\_publisher.py}:68 still calls it "proposed".
+
+\item \textbf{Launch help disagrees with the code.} \file{real.launch.py}:158 says "no climbing above max-0.2"; the
+ceiling uses $h_{\max}-0.15$ (\file{safety.py}:215).
+
+\item \textbf{Obsolete re-exports.} \file{driver.py}:30 and 33 import \code{FakeFrameRead}, \code{clearance},
+\code{wrap} "re-exported: missions import them here"; no module imports them from \code{driver} any more (the
+missions import \code{tello\_driver.zone} directly). They can be removed.
+
+\item \textbf{Fake vertical and yaw dynamics differ from \file{model.py}.} \file{fake\_world.py}:195 uses a vertical
+gain 1 (\code{ud * LIN\_GAIN}) while the hold inverts $K_z=0.9$; lines 191 and 205 apply $L_u=0.35$ s and
+$\tau=0.25$ s to yaw, whereas the identified yaw model is $L=0.2$ s, $\tau\approx0$.
+
+\item \textbf{The offline tests are not in the repository.} \file{docs/ARCHITECTURE.md}:62--63 and the docstrings of
+\file{safety.py}/\file{zone.py} cite 400 randomized flights and numbered seeds, but no test file is tracked
+(\code{git ls-files} lists none). The ROS-free design of \code{CommandFilter} is only worth it if that harness is
+kept; commit it (e.g.\ \file{src/tello\_driver/test/}).
+
+\item \textbf{No error handling in the emergency service.} \file{driver.py}:437--441 calls
+\code{tello.emergency()} without \code{try}: if the link is down the service call fails with an exception instead of
+an answer. Minor, but this is the one command that must always answer.
+\end{enumerate}
+\end{review}
