@@ -1,0 +1,144 @@
+\chapter{Nominal pipeline and safety layer}
+\label{ch:safetylayer}
+
+The code grew in two directions at once. One part is what the drone \emph{needs} to fly a mission in a fixed,
+well-prepared room: a link to the drone, a pose from the markers, a filter, a model and a controller. The other part
+was added flight after flight, each time something went wrong: a drift into the furniture, a lost video stream, a
+second program sending commands. When reading the code it is easy to mix the two. This chapter separates them.
+
+\begin{intuition}
+Think of the \emph{nominal pipeline} as the answer to ``what is the shortest program that flies the demo on a good
+day?''. Every line that is not in it is a \emph{guard}: it does nothing while things go well and takes over when they
+do not. Every guard can be switched off by a parameter, and every one of them exists because of a real incident,
+dated below.
+\end{intuition}
+
+% =====================================================================================================
+\section{The nominal pipeline}
+
+On a fixed setup (markers glued where \file{config/markers.yaml} says, camera calibrated, drone on its pad, nobody
+else on the Wi-Fi, a cool battery) one command goes through five pieces:
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{2.8cm}p{4.6cm}p{6.9cm}@{}}
+\toprule
+Piece & File & What it does on a good day \\
+\midrule
+camera $\to$ pose & \file{aruco\_localizer.py} & detect markers, joint PnP, one pose per image (Ch.~\ref{ch:aruco}) \\
+pose $\to$ state & \file{core/ekf\_core.py},\newline \file{core/ekf\_node.py} & fuse delayed poses with the commands sent, 50~Hz state (Ch.~\ref{ch:ekf}) \\
+model & \file{core/model.py} & $K$, $\tau$, $L_u$: how a command becomes a velocity (Ch.~\ref{ch:ident}) \\
+state $\to$ command & \file{missions/tour.py} (\code{goto}),\newline \file{missions/strike.py} & error to a goal $\to$ body-frame velocity (Ch.~\ref{ch:missions}) \\
+command $\to$\newline drone & \file{core/driver.py} & velocity $\to$ \code{rc} integers, 20~Hz, video and telemetry back (Ch.~\ref{ch:driver}) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Plus the offline preparation: the marker map and the room scan (Ch.~\ref{ch:mapping}), and the camera
+calibration. Nothing else is needed to fly. In particular \file{core/safety.py} could be replaced by the identity,
+and \code{Mission.safety()} by \code{pass}: on a perfect day the flight would be the same.
+
+% =====================================================================================================
+\section{The safety layer, feature by feature}
+
+The guards live at three levels, from the outermost (closest to the drone) inwards. A guard at a lower level
+protects against \emph{every} program above it, including the teleop and a buggy mission; that is why the most
+important ones are in the driver.
+
+\subsection{In the driver (every command, whatever program sent it)}
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{2.7cm}p{4.9cm}p{4.0cm}p{3.2cm}@{}}
+\toprule
+Guard & What it does & Why (incident) & Switch / tune \\
+\midrule
+\endhead
+\textbf{No camera, no flight} (\code{send\_rc}, \code{srv\_takeoff}) & takeoff refused without an image in the
+last second; in flight, no image for 1~s $\to$ hover (mission ignored), 5~s $\to$ land & Nov 18: a hot Tello
+(71--80\,\textdegree C) lost its video in flight, the restarts failed, and the drone kept flying on EKF prediction
+alone & \code{require\_video},\newline \code{video\_hover\_}\newline\code{\ after},\newline \code{video\_land\_after} \\
+\textbf{Frozen link} (\code{poll\_state}) & telemetry identical for 3~s in flight $\to$ land & Nov 18, 19:00: the
+state stayed identical for 30~s and the drone ignored every command & \code{state\_freeze\_}\newline\code{\ land} \\
+\textbf{Command timeout} & no request for 0.5~s $\to$ zero (then position hold) & a mission that crashes or hangs
+must not leave the last velocity running & \code{cmd\_timeout} \\
+\textbf{Low battery} & land at 12\,\% & the Tello cuts its motors on its own a little lower & \code{low\_battery} \\
+\textbf{Video watchdog} & no frame for 3~s $\to$ restart the reader & Nov 9: a frozen decoder; a new reader on the
+held port failed with ``Address already in use'' & \code{video\_timeout} \\
+\textbf{Position hold} (\code{safety.py}) & no horizontal command $\to$ hold the position on the EKF, with drift
+compensation & Nov 10--11: the Tello's own hold does not work over this floor (0.4~m in 8~s) & \code{position\_hold},\newline \code{hold\_*} \\
+\textbf{Ceiling} & never above 2.6~m, on the height predicted 1~s ahead & Nov 9: ceiling at 2.80~m & \code{max\_height} \\
+\textbf{Height band} & stay in the zone's height band, where the obstacle grid is valid & band mode (Ch.~\ref{ch:mapping}) & \code{flight\_zone\_file} \\
+\textbf{Obstacle zone} & slow, brake, push back before the obstacles of the room scan & Nov 10: a test drifted
+1~m back towards the furniture & \code{flight\_zone\_file}\newline (empty: off) \\
+\textbf{Blind speed} & no valid pose $\to$ horizontal speed limited to 0.15~m/s & Nov 10 (sim): the drone flew
+blind through a wall, the zone cannot be enforced without a position & \code{blind\_speed} \\
+\textbf{Wall guard} & a marker closer than 0.7~m (from its size in the image) $\to$ no forward, back off & the
+cage touches the wall before the localization notices & \code{min\_wall\_}\newline\code{\ distance} \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{In the localization and the EKF (every measurement)}
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{2.7cm}p{4.9cm}p{4.0cm}p{3.2cm}@{}}
+\toprule
+Guard & What it does & Why & Switch / tune \\
+\midrule
+\endhead
+\textbf{Reprojection limit} & reject a pose whose RMS reprojection error exceeds 3~px (one marker) or 8~px
+(several); with several, try again without the worst marker & a single marker has two mirror solutions
+(Section~\ref{sec:pnp-steps}, \ref{sec:single}); a marker moved since the map & \code{max\_reprojection\_}\newline\code{\ px(\_multi)} \\
+\textbf{Chi-square gate} & an EKF update whose innovation is too unlikely is dropped & the same flips, seen by the
+filter & in \file{core/ekf\_core.py} \\
+\textbf{Uncertain pose} (\code{Mission.on\_pose}) & missions ignore an EKF pose with $\sigma > 0.15$~m & after a few
+seconds without markers the EKF only predicts & \code{max\_pose\_sigma} \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{In the missions (\texorpdfstring{\code{Mission}}{Mission}, \file{missions/base.py})}
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{2.7cm}p{4.9cm}p{4.0cm}p{3.2cm}@{}}
+\toprule
+Guard & What it does & Why & Switch / tune \\
+\midrule
+\endhead
+\textbf{Any key = land} & \code{check\_keys} every tick; Ctrl+C also lands & the operator must always win & --- \\
+\textbf{Pre-flight checks} (\code{wait\_ready}) & refuse without telemetry, without video, below the battery
+minimum, or when another node already publishes commands & a teleop left open would fight the mission &
+\code{min\_battery} \\
+\textbf{Fence / box} & land if the drone leaves the zone rectangle (+0.3~m) or the box around its start & a second
+line behind the driver's zone & \code{box} (fence: set per mission) \\
+\textbf{Height limits} & land outside $[z_{\min}, z_{\max}]$, once reached & Nov 13: a weak climb at 32\,\% battery
+aborted the test too early, hence ``once reached'' & \code{z\_min}, \code{z\_max} \\
+\textbf{Lost markers} & search on the spot, land after \code{lost\_timeout} & the EKF cannot predict for long & \code{lost\_timeout} \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\begin{keypoint}
+For a test on a clean, fixed setup one can relax the layer, never remove it: the guards cost nothing while they do
+not trigger. The two that \emph{do} change a nominal flight are the position hold (it replaces a zero command by a
+hold) and the wall guard (it slows the last 15~cm before a marker). A strike that must touch a balloon close to a
+wall therefore runs with a smaller \code{min\_wall\_distance}, not without the guard.
+\end{keypoint}
+
+% =====================================================================================================
+\section{Testing a guard without a drone}
+
+The simulator (\file{sim/}) reproduces the incidents so that each guard can be tested on the fake drone. For the
+camera failsafe, \file{sim/fake\_tello.py} stops delivering new images while the file named by the environment
+variable \code{FAKE\_VIDEO\_OFF} exists:
+\begin{lstlisting}[language=bash]
+export FAKE_VIDEO_OFF=/tmp/video_off
+touch $FAKE_VIDEO_OFF                       # before takeoff: the takeoff is refused
+ros2 launch tello_driver real.launch.py mock:=true
+rm $FAKE_VIDEO_OFF                          # video back: takeoff accepted
+touch $FAKE_VIDEO_OFF                       # in flight: hover after 1 s, "FAILSAFE ... landing" after 5 s
+\end{lstlisting}
+The telemetry topic carries \code{video\_age} (seconds since the last image) to watch it live.

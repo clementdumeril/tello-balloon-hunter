@@ -3,6 +3,7 @@
 With a marker map, FakeWorld (fake_world.py) simulates the identified dynamics and renders the camera view of the
 markers, delivered VIDEO_DELAY late like the real video. Without one: a plain moving test pattern.
 """
+import os
 import threading
 import time
 
@@ -20,11 +21,15 @@ class FakeFrameRead:
 
     @property
     def frame(self):
+        # test hook: while the file named by FAKE_VIDEO_OFF exists, no new image (a lost stream, for the failsafe)
+        off = os.environ.get("FAKE_VIDEO_OFF")
+        if off and os.path.exists(off):
+            return self._frame
         k = int(time.time() * 30)
         if k != self._t:
             self._t = k
             if self.world is not None:
-                from tello_driver.fake_world import VIDEO_DELAY
+                from tello_driver.sim.fake_world import VIDEO_DELAY
                 now = time.time()
                 self._queue.append((now, self.world.render()))
                 while len(self._queue) > 1 and self._queue[1][0] <= now - VIDEO_DELAY:
@@ -42,7 +47,7 @@ class FakeTello:
     def __init__(self, markers_file=""):
         self.world = None
         if markers_file:
-            from tello_driver.fake_world import FakeWorld
+            from tello_driver.sim.fake_world import FakeWorld
             self.world = FakeWorld(markers_file)
         self.is_flying = False
 

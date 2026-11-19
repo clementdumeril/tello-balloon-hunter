@@ -3,6 +3,7 @@ a short stop, back off to ~1.6 m for the overview, next one. Then back to the st
 
     ros2 launch tello_driver real.launch.py          (terminal 1, drone on the floor 2 m from the marker wall)
     ros2 run tello_driver tello_marker_tour           (terminal 2, NO teleop running; you stay next to the drone)
+    ros2 run tello_driver tello_goto 49 35            (only these markers, in this order, from anywhere in the room)
 
 Survey: a full turn in place after the climb (sees every wall, fixes the position, the EKF learns the drift).
 For each marker: turn to face it, approach at up to 0.5 m/s with a braking profile (stops without overshoot),
@@ -15,14 +16,15 @@ the drone stops and turns to look for them (towards the marker it is going to, t
 """
 import math
 import os
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
 
 from aruco_localization.marker_map import load_marker_map
-from tello_driver import model as M
-from tello_driver.step_test import Abort, StepTest, run, wrap
+from tello_driver.core import model as M
+from tello_driver.missions.base import Abort, Mission, run, wrap
 
 REPO = os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter"))
 
@@ -31,7 +33,7 @@ def clip(v, m):
     return max(-m, min(m, v))
 
 
-class MarkerTour(StepTest):
+class MarkerTour(Mission):
     NODE_NAME = "tello_marker_tour"
     PREFIX = "tour"
     MOVE_TO_ZONE_CENTRE = False  # the tour moves by itself
@@ -142,7 +144,7 @@ class MarkerTour(StepTest):
         (room scan grid, margin + 10 cm; 3D zone: at height z); without grid, clamped into the mission rectangle."""
         f = self.fence
         if self.zone and "grid" in self.zone:
-            from tello_driver.zone import clearance
+            from tello_driver.core.zone import clearance
             for k in range(40):
                 x, y = m.t[0] + (d + 0.05 * k) * n[0], m.t[1] + (d + 0.05 * k) * n[1]
                 if clearance(self.zone, x, y, z)[0] >= self.zone["margin"] + 0.15:  # +0.10 overshot by 5 cm (sim)
@@ -282,7 +284,7 @@ class MarkerTour(StepTest):
         f = self.fence
         cx, cy = (f[0] + f[1]) / 2, (f[2] + f[3]) / 2
         if self.zone and "grid" in self.zone:
-            from tello_driver.zone import clearance
+            from tello_driver.core.zone import clearance
             best = None
             for dx in np.arange(-0.6, 0.61, 0.05):
                 for dy in np.arange(-0.6, 0.61, 0.05):
@@ -364,6 +366,27 @@ class MarkerTour(StepTest):
 
 def main():
     run(MarkerTour)
+
+
+class GotoMarkers(MarkerTour):
+    """tello_goto 49 35: no survey, only the given markers in order (back to the room centre between them), then
+    back above the takeoff pad. Takeoff anywhere: the obstacle grid is the real limit, not the zone rectangle."""
+    NODE_NAME = "tello_goto"
+    PREFIX = "goto"
+
+    def __init__(self):
+        super().__init__()
+        if not self.sequence:
+            raise SystemExit("usage: ros2 run tello_driver tello_goto 49 35   (marker ids, in order)")
+        self.survey = False
+        self.fence_tol = 1.0
+
+
+def goto_main():
+    ids = [a for a in sys.argv[1:] if a.lstrip("-").isdigit()]
+    if ids:
+        os.environ["GOTO_SEQ"] = ",".join(ids)
+    run(GotoMarkers)
 
 
 if __name__ == "__main__":

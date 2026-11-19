@@ -27,10 +27,10 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
-from tello_driver.fake_tello import FakeFrameRead, FakeTello  # noqa: F401  (re-exported for older imports)
-from tello_driver import model as M
-from tello_driver.safety import CommandFilter
-from tello_driver.zone import clearance, load_zone, wrap  # noqa: F401  (re-exported: missions import them here)
+from tello_driver.sim.fake_tello import FakeTello
+from tello_driver.core import model as M
+from tello_driver.core.safety import CommandFilter
+from tello_driver.core.zone import load_zone
 
 
 # ---------------------------------------------------------------- camera info
@@ -174,7 +174,7 @@ class TelloDriver(Node):
         # 0.2-0.6 s instead of 15 s and growing), but only tested on a synthetic stream.
         self.low_latency_video = p("low_latency_video", False).value and not self.mock
         if self.low_latency_video:
-            from tello_driver.video_reader import LowLatencyReader
+            from tello_driver.core.video_reader import LowLatencyReader
             self.reader = LowLatencyReader(log=lambda m: self.get_logger().warn(m, throttle_duration_sec=2.0))
         else:
             self.reader = self.tello.get_frame_read()
@@ -190,6 +190,16 @@ class TelloDriver(Node):
         self.state = {}
         self.last_frame_t = time.time()
         self.video_timeout = p("video_timeout", 3.0).value
+        # NO CAMERA = NO FLIGHT (Nov 18: a hot Tello lost its video stream in flight, restarts failed, and the drone
+        # went on flying with the EKF predicting blind). last_frame_t is pushed forward by the watchdog to give a
+        # restart time; real_frame_t is ONLY set by a real decoded image, so it gives the true age of the video.
+        self.require_video = p("require_video", True).value
+        self.video_hover_after = p("video_hover_after", 1.0).value  # s without image in flight: mission ignored, hover
+        self.video_land_after = p("video_land_after", 5.0).value    # s without image in flight: land
+        self.state_freeze_land = p("state_freeze_land", 3.0).value  # s of identical telemetry in flight: land
+        self.real_frame_t = 0.0
+        self.state_change_t, self.prev_state = time.time(), None
+        self.failsafe_landing = False
         self.restarting = False
         self.create_timer(1 / 100, self.poll_video)
         self.create_timer(0.1, self.poll_state)
@@ -275,7 +285,7 @@ class TelloDriver(Node):
         if frame.shape[:2] == (300, 400) and not frame.any():
             return
         self.last_frame = frame
-        self.last_frame_t = time.time()
+        self.last_frame_t = self.real_frame_t = time.time()
         self.video_count += 1
         if self.last_frame_t - self.video_t0 >= 2.0:
             self.video_fps = self.video_count / (self.last_frame_t - self.video_t0)
@@ -304,12 +314,22 @@ class TelloDriver(Node):
             self.state = dict(self.tello.get_current_state() or {})
         except Exception:  # noqa: BLE001
             return
+        # frozen telemetry in flight = the link to the drone is gone (Nov 18, 19:00: state identical for 30 s while
+        # a 0.5 rad/s turn was commanded and the camera showed no rotation). The Tello's own flight clock 'time'
+        # and its noisy barometer change every second in flight, so 3 s of identical state is not a hover.
+        now = time.time()
+        if self.state != self.prev_state:
+            self.prev_state, self.state_change_t = dict(self.state), now
+        elif (not self.mock and self.tello.is_flying and self.state_freeze_land > 0
+              and now - self.state_change_t > self.state_freeze_land):
+            self.failsafe_land(f"telemetry frozen for {now - self.state_change_t:.0f} s (link to the drone lost?)")
         st = dict(self.state)
         st["stamp"] = self.get_clock().now().nanoseconds * 1e-9
         st["flying"] = bool(self.tello.is_flying)
         # takeoff / climb / land running: not ready for velocity commands
         st["busy"] = self.busy.locked() or self.climb_target is not None
         st["video_fps"] = round(self.video_fps, 1)  # images published per second (the Tello sends 30 at most)
+        st["video_age"] = round(self.video_age(), 2)  # s since the last real image
         st["hold"] = self.safety.hold_target is not None  # position hold active (no horizontal command): flight_report
         st["guard"] = self.safety.guard_now()               # the guard that changed the command, if any
         self.pub_tel.publish(String(data=json.dumps(st)))
@@ -345,6 +365,18 @@ class TelloDriver(Node):
             return  # a takeoff / climb / land command is running: rc would interfere with it
         rc = self.rc_target if time.time() - self.last_cmd < self.cmd_timeout else (0, 0, 0, 0)
         flying = self.tello.is_flying
+        if self.require_video and flying:
+            age = self.video_age()
+            if age > self.video_land_after:
+                self.failsafe_land(f"no camera image for {age:.1f} s")
+                return
+            if age > self.video_hover_after:
+                # the mission's request is dropped (it was computed on a pose the camera no longer confirms); the
+                # hold below keeps the drone in place on the EKF prediction while the stream comes back
+                rc = (0, 0, 0, 0)
+                self.safety.note("no video: hover")
+                self.safety.warn("novideo", f"no camera image for {age:.1f} s: hovering, landing after "
+                                            f"{self.video_land_after:.0f} s")
         hgt, vz = self.safety.height_and_rate(self.state.get("tof"), flying)
         if self.climb_target is not None and flying:
             ud = self.climb_rc(hgt, vz)
@@ -385,12 +417,39 @@ class TelloDriver(Node):
                 self.busy.release()
         threading.Thread(target=worker, daemon=True).start()
 
+    # ---------------------------------------------------------------- camera / link failsafe
+    def video_age(self):
+        """Seconds since the last real camera image (inf before the first one)."""
+        return time.time() - self.real_frame_t if self.real_frame_t else float("inf")
+
+    def failsafe_land(self, reason):
+        """Land once, whatever is running (a stuck takeoff holds the lock: send 'land' without waiting)."""
+        if self.failsafe_landing:
+            return
+        self.failsafe_landing = True
+        self.get_logger().error(f"FAILSAFE: {reason}: landing")
+        self.rc_target, self.climb_target = (0, 0, 0, 0), None
+        if self.busy.locked():
+            self.stop_rc()
+            try:
+                self.tello.send_command_without_return("land")
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().error(f"land failed: {e}")
+        else:
+            self.run_async(self.tello.land, "failsafe land")
+
     # ---------------------------------------------------------------- takeoff / landing
     def srv_takeoff(self, req, res):
         if self.zone_error:
             res.success, res.message = False, self.zone_error
             self.get_logger().error(self.zone_error)
             return res
+        if self.require_video and self.video_age() > 1.0:
+            res.success, res.message = False, (f"no camera image for {self.video_age():.1f} s: takeoff refused "
+                                               "(require_video:=false to override)")
+            self.get_logger().error(res.message)
+            return res
+        self.failsafe_landing = False
         bat = self.state.get("bat", 100)
         if isinstance(bat, (int, float)) and bat < 25:
             res.success, res.message = False, f"battery {bat} % < 25 %: takeoff refused"

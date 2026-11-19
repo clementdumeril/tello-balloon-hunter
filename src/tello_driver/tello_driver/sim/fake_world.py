@@ -17,7 +17,7 @@ LIN_GAIN = 0.38 / 30              # m/s per rc point (measured on the real Tello
 YAW_GAIN = math.radians(18) / 30  # rad/s per rc point
 # The real Tello's identified response (model.py, identification of Nov 13): the fake drone behaves like it.
 # The command delay L_U is applied here, the video delay L_V in the image pipeline (driver's FakeFrameRead).
-from tello_driver import model as M  # noqa: E402
+from tello_driver.core import model as M  # noqa: E402
 TAU = M.TAU_XY                    # s, velocity response time constant
 K_X, K_Y = M.K_X, M.K_Y           # real speed / commanded speed, forward and left
 DELAY = M.L_U                     # s, command -> motion delay (radio + flight controller)

@@ -159,7 +159,7 @@ and why the position hold predicts $0.3$\,s ahead. The identified model per hori
 \begin{equation*}
 \tau\,\dot v(t) = K\,u(t-L_u) - v(t), \qquad K_x = 0.66,\quad K_y = 0.83,\quad \tau = 0.25\text{ s},\quad L_u = 0.35\text{ s},
 \end{equation*}
-identified with the cage on November 13 (\file{model.py}, Chapter~\ref{ch:ident}). $K<1$: the caged drone flies
+identified with the cage on November 13 (\file{core/model.py}, Chapter~\ref{ch:ident}). $K<1$: the caged drone flies
 slower than the \code{rc} gain promises.
 
 \section{The offline pipeline}
@@ -170,34 +170,59 @@ slower than the \code{rc} gain promises.
 \caption{Everything prepared before a flight, and the files it produces.}
 \end{figure}
 
-\section{Files and where they are documented}
+\section{Package layout: why each file exists}\label{sec:layout}
+
+Since November 19 the ROS package \file{tello\_driver} is split by \emph{when the code runs}: \file{core/} runs on
+every flight, whatever the mission; \file{missions/} holds the flight programs; \file{identification/} measures the
+model they all use; \file{sim/} replaces the drone in tests. The executable names (\code{ros2 run tello\_driver
+...}) did not change. Every \file{\_\_init\_\_.py} repeats this list in its docstring.
+Chapter~\ref{ch:safetylayer} then separates, inside these files, the nominal pipeline from the safety layer.
 
 \begin{center}
 \small
-\begin{longtable}{@{}p{7.6cm}p{6.6cm}c@{}}
+\begin{longtable}{@{}p{5.2cm}p{8.4cm}c@{}}
 \toprule
-File & Role & Chapter \\
+File & Why it exists & Ch. \\
 \midrule
 \endhead
-\file{aruco\_localization/aruco\_localizer.py} & marker detection, joint PnP, \topic{/aruco/pose} & \ref{ch:aruco} \\
-\file{aruco\_localization/marker\_map.py} & loads \file{markers.yaml}, marker corner geometry & \ref{ch:aruco} \\
-\file{aruco\_localization/marker\_map\_publisher.py} & static TFs, RViz room / zone / markers & \ref{ch:aruco} \\
-\file{tello\_driver/ekf\_core.py}, \file{ekf\_node.py} & the EKF and its ROS wrapper & \ref{ch:ekf} \\
-\file{tello\_driver/model.py}, \file{home.py} & identified constants, takeoff pad & \ref{ch:ekf} \\
-\file{tello\_driver/driver.py} & link to the Tello, services, 20\,Hz loop & \ref{ch:driver} \\
-\file{tello\_driver/safety.py} & \code{CommandFilter}: the safety chain & \ref{ch:driver} \\
-\file{tello\_driver/zone.py} & flight zone, clearance grids, 3D boxes & \ref{ch:driver} \\
-\file{tello\_driver/video\_reader.py} & low-latency H.264 decoding & \ref{ch:driver} \\
-\file{tello\_driver/fake\_tello.py}, \file{fake\_world.py} & the simulated drone (\code{mock:=true}) & \ref{ch:driver} \\
-\file{tello\_driver/trajectory.py} & minimum-jerk legs & \ref{ch:missions} \\
-\file{tello\_driver/marker\_tour.py}, \file{patrol.py}, \file{strike.py} & missions & \ref{ch:missions} \\
-\file{tello\_driver/goto\_markers.py}, \file{teleop.py} & goto mission, keyboard & \ref{ch:missions} \\
-\file{tello\_driver/step\_test.py}, \file{step\_fit.py} & identification flight and fit & \ref{ch:ident} \\
-\file{tello\_driver/session\_recorder.py} & flight logs & \ref{ch:ident} \\
-\file{tools/flight\_report.py}, \file{calibrate\_camera.py}, \file{make\_print\_sheets.py} & analysis, calibration, printing & \ref{ch:ident} \\
-\file{tools/room\_mapper.py}, \file{align\_scan.py}, \file{room\_mesh\_to\_map.py} & marker map, room scan & \ref{ch:mapping} \\
-\file{tools/free\_zone.py}, \file{zone\_view.py}, \file{set\_home.py} & flight zone, viewer, takeoff pad & \ref{ch:mapping} \\
-\file{tello\_driver/launch/real.launch.py}, \file{tello.bat} & starting everything & \ref{ch:mapping} \\
+\multicolumn{3}{@{}l}{\textbf{\file{src/aruco\_localization/aruco\_localization/}}: camera $\to$ pose} \\
+\file{aruco\_localizer.py} & marker detection, joint PnP, \topic{/aruco/pose} & \ref{ch:aruco} \\
+\file{marker\_map.py} & loads \file{markers.yaml}, marker corner geometry (also used by the tools) & \ref{ch:aruco} \\
+\file{marker\_map\_publisher.py} & static TFs, RViz room / zone / markers & \ref{ch:aruco} \\
+\midrule
+\multicolumn{3}{@{}l}{\textbf{\file{src/tello\_driver/tello\_driver/core/}}: runs on every flight} \\
+\file{driver.py} & the only node that talks to the Tello: video, telemetry, services, 20\,Hz \code{rc}; camera and link failsafe & \ref{ch:driver} \\
+\file{safety.py} & \code{CommandFilter}: hold, ceiling, band, zone, wall guards on every command & \ref{ch:driver} \\
+\file{zone.py} & flight zone, clearance grids, 3D boxes & \ref{ch:driver} \\
+\file{ekf\_core.py} & the EKF, pure numpy (also replayed offline by \file{tools/ekf\_replay.py}) & \ref{ch:ekf} \\
+\file{ekf\_node.py} & its ROS wrapper: \topic{/aruco/pose} + \topic{/tello/rc\_sent} in, \topic{/ekf/pose} out & \ref{ch:ekf} \\
+\file{model.py} & the identified constants $K$, $\tau$, $L_u$, shared by EKF, guards, missions, sim & \ref{ch:ekf} \\
+\file{home.py} & the takeoff pad, for the return before landing & \ref{ch:missions} \\
+\file{video\_reader.py} & optional low-latency H.264 decoding (\code{low\_latency\_video:=true}) & \ref{ch:driver} \\
+\file{ros\_env.py} & local-only DDS settings for every node & \ref{ch:driver} \\
+\file{session\_recorder.py} & flight logs (video, poses, commands) & \ref{ch:ident} \\
+\file{teleop.py} & keyboard flight; its \code{read\_key} is the ``any key = land'' of the missions & \ref{ch:missions} \\
+\midrule
+\multicolumn{3}{@{}l}{\textbf{\file{missions/}}: flight programs} \\
+\file{base.py} & \code{Mission}: inputs, takeoff, start point, safety checks, 20\,Hz loop, search, logs & \ref{ch:missions} \\
+\file{tour.py} & \code{goto} in front of a marker; \code{tello\_marker\_tour} and \code{tello\_goto 49 35} & \ref{ch:missions} \\
+\file{patrol.py} & laps of the zone, type a marker id to go to it & \ref{ch:missions} \\
+\file{strike.py}, \file{trajectory.py} & fast planned legs with model feedforward (quintic trajectories) & \ref{ch:missions} \\
+\midrule
+\multicolumn{3}{@{}l}{\textbf{\file{identification/}}: where \file{core/model.py} comes from} \\
+\file{step\_test.py} & identification / validation flight (velocity doublets), a \code{Mission} on the raw pose & \ref{ch:ident} \\
+\file{step\_fit.py} & fits gain, time constant and delay per axis $\to$ \file{model.yaml} & \ref{ch:ident} \\
+\midrule
+\multicolumn{3}{@{}l}{\textbf{\file{sim/}}: tests without hardware (\code{mock:=true})} \\
+\file{fake\_tello.py} & same interface as djitellopy's \code{Tello}; \code{FAKE\_VIDEO\_OFF} cuts its video & \ref{ch:driver} \\
+\file{fake\_world.py} & identified dynamics + rendered camera view of the marker map & \ref{ch:driver} \\
+\midrule
+\multicolumn{3}{@{}l}{\textbf{\file{tools/}} (offline, run by hand) and launch} \\
+\file{flight\_report.py}, \file{ekf\_replay.py},\newline \file{calibrate\_camera.py}, \file{make\_print\_sheets.py} & analysis, EKF replay, calibration, printing & \ref{ch:ident} \\
+\file{room\_mapper.py}, \file{align\_scan.py},\newline \file{room\_mesh\_to\_map.py} & marker map, room scan & \ref{ch:mapping} \\
+\file{free\_zone.py}, \file{zone\_view.py}, \file{set\_home.py} & flight zone, viewer, takeoff pad & \ref{ch:mapping} \\
+\file{ext\_camera.py} & external camera: self-calibration on the wall markers, balloons in the map (Windows side) & --- \\
+\file{tello\_driver/launch/}\newline\file{real.launch.py}, \file{tello.bat} & starting everything & \ref{ch:mapping} \\
 \bottomrule
 \end{longtable}
 \end{center}

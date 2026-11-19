@@ -38,7 +38,7 @@ prediction runs: the drone ``knows roughly how it will evolve'', and $\mathbf P$
 Direction & Topic & Content and use \\
 \midrule
 in  & \topic{/tello/rc\_sent} (\code{Twist}) & the body-frame velocity command \emph{really} sent to the Tello by the driver, after
-      its position hold and guards (published at $20$~Hz by \code{send\_rc}, \file{driver.py}:344--347). This is the input $\mathbf u$. \\
+      its position hold and guards (published at $20$~Hz by \code{send\_rc}, \file{core/driver.py}:344--347). This is the input $\mathbf u$. \\
 in  & \topic{/aruco/pose} (\code{PoseWithCovarianceStamped}) & marker pose of \code{base\_link} in \topic{map}, with a diagonal covariance. Measurement. \\
 in  & \topic{/tello/telemetry} (\code{String}, JSON) & $10$~Hz state of the Tello: \code{tof} (distance sensor, cm), \code{yaw} (IMU heading, degrees clockwise),
       \code{flying}. Measurements and takeoff detection. \\
@@ -49,7 +49,7 @@ out & \topic{/ekf/path} (\code{nav\_msgs/Path}) & trail for RViz, one pose every
 out & TF \topic{map} $\to$ \topic{base\_link} & the drone in RViz follows the filter, not the raw markers (those go to \topic{base\_link\_aruco}). \\
 \bottomrule
 \end{tabularx}
-\caption{Interface of \code{tello\_ekf} (\file{ekf\_node.py}:45--58).}
+\caption{Interface of \code{tello\_ekf} (\file{core/ekf\_node.py}:45--58).}
 \end{table}
 
 The important design choice is the input: the filter is fed the command the driver \emph{actually} transmitted, not
@@ -58,11 +58,11 @@ hold command, clip it, or zero it in front of a wall; if the EKF predicted with 
 moves while the driver is braking it.
 
 %=====================================================================================================================
-\section[The identified model: model.py]{The identified model: \file{model.py}}
+\section[The identified model: model.py]{The identified model: \file{core/model.py}}
 
-\file{model.py} contains no function: it is the single place where the numbers of the drone's response live. It is
-imported by the EKF node, the safety chain (\file{safety.py}:35), the missions (\file{marker\_tour.py}, \file{strike.py},
-\file{patrol.py}) and the simulated drone (\file{fake\_world.py}:21--24), so the estimator, the controllers and the
+\file{core/model.py} contains no function: it is the single place where the numbers of the drone's response live. It is
+imported by the EKF node, the safety chain (\file{core/safety.py}:35), the missions (\file{missions/tour.py}, \file{missions/strike.py},
+\file{missions/patrol.py}) and the simulated drone (\file{sim/fake\_world.py}:21--24), so the estimator, the controllers and the
 simulator always agree on one model.
 
 Per horizontal body axis, from the commanded velocity $u$ to the velocity $v$ the drone reaches (the Tello's own
@@ -91,11 +91,11 @@ Constant & Value & Meaning & EKF symbol \\
 \code{K\_MEAN} & $0.745$ & mean of $K_x$, $K_y$ (code wanting one $K$) & \code{K\_xy} (fallback) \\
 \bottomrule
 \end{tabular}
-\caption{Constants of \file{model.py}:18--25.}
+\caption{Constants of \file{core/model.py}:18--25.}
 \label{tab:model}
 \end{table}
 
-Where the numbers come from (docstring, \file{model.py}:1--17): identification flight \code{step\_20261113\_180041}
+Where the numbers come from (docstring, \file{core/model.py}:1--17): identification flight \code{step\_20261113\_180041}
 (six velocity doublets per horizontal axis), validated on a separate flight with fit scores of $81\,\%$ forward, $67\,\%$ left,
 $87\,\%$ yaw. The fit determines well only $L+\tau$ (a delay and a lag look alike on noisy data): $0.73$~s forward and
 $0.85$~s left. The code therefore uses one $\tau$ for both axes and chooses $L_U$ so that
@@ -105,34 +105,34 @@ weight, more drag); flying without it would need a new identification.
 
 \begin{keypoint}
 The \code{DroneEKF} constructor still has the \emph{old} defaults (\code{K\_xy=1.15}, \code{tau\_xy=0.55},
-\code{L\_u=0.30}, \file{ekf\_core.py}:38). The node overrides all of them with the \file{model.py} values
-(\file{ekf\_node.py}:34--37), but anything that builds a \code{DroneEKF()} without arguments (the replay tool, see
+\code{L\_u=0.30}, \file{core/ekf\_core.py}:38). The node overrides all of them with the \file{core/model.py} values
+(\file{core/ekf\_node.py}:34--37), but anything that builds a \code{DroneEKF()} without arguments (the replay tool, see
 Section~\ref{sec:replay}) runs the old, cage-less model.
 \end{keypoint}
 
 %---------------------------------------------------------------------------------------------------------------------
-\subsection[The takeoff pad: home.py]{The takeoff pad: \file{home.py}}
+\subsection[The takeoff pad: home.py]{The takeoff pad: \file{core/home.py}}
 
 The drone always takes off from the same spot, a marker (id 48) lying on the floor. Its camera looks forward, so it never
 sees that marker; instead \file{tools/set\_home.py} learns the pad position from the first wall-marker poses after each
 climb and writes \file{config/home.yaml} (a local file, not committed). Two constants and one function:
 
 \code{REPO} is the environment variable \code{TELLO\_REPO} or \code{\~{}/tello\_ws/src/tello-balloon-hunter};
-\code{HOME\_FILE} is \code{REPO/config/home.yaml} (\file{home.py}:14--15).
+\code{HOME\_FILE} is \code{REPO/config/home.yaml} (\file{core/home.py}:14--15).
 
 \func{load\_home}{(path=HOME\_FILE) -> dict | None}
 Reads the YAML file and returns \code{\{x, y, yaw\_deg, marker, samples\}} with \code{yaw\_deg} defaulting to $0$,
 \code{marker} to $48$ (key \code{pad\_marker}) and \code{samples} to $1$. It returns \code{None} if \code{x} or \code{y}
-is missing, and also on any I/O, parse or type error (\file{home.py}:18--28): a missing pad file is not an error, it
+is missing, and also on any I/O, parse or type error (\file{core/home.py}:18--28): a missing pad file is not an error, it
 just means the EKF will wait for markers. Users: the EKF node (start on the pad) and the missions (land back on it,
-\file{step\_test.py}:341--342).
+\file{missions/base.py}).
 
 %=====================================================================================================================
 \section{State, input and conventions}
 
 \subsection{The state vector}
 
-\file{ekf\_core.py}:27--28 defines $N_X = 10$ and the index constants \code{IX, IY, IZ, IVX, IVY, IVZ, IYAW, IB, IDX, IDY}
+\file{core/ekf\_core.py}:27--28 defines $N_X = 10$ and the index constants \code{IX, IY, IZ, IVX, IVY, IVZ, IYAW, IB, IDX, IDY}
 used everywhere (also imported by the node and the replay tool). The state is
 \begin{equation}
   \mathbf s = \begin{bmatrix} x & y & z & v_x & v_y & v_z & \psi & b & d_x & d_y \end{bmatrix}^{\!\top}.
@@ -167,13 +167,13 @@ slowly varying velocity the filter learns while it sees markers.
 is the \emph{body-frame} command really sent (m/s forward, m/s left, m/s up, rad/s counter-clockwise), rebuilt by the driver
 from the integer rc values: $u_x = \text{fb}\cdot g$, $u_y = -\text{lr}\cdot g$, $u_z = \text{ud}\cdot g$,
 $\omega_z = -\text{yaw}\cdot g_\omega$ with $g = 0.38/30$~m/s per rc point and $g_\omega = 18^\circ/30$ per point
-(\file{driver.py}:70--71, 344--346). It is not a state and has no noise of its own: all the uncertainty about what the
+(\file{core/driver.py}:70--71, 344--346). It is not a state and has no noise of its own: all the uncertainty about what the
 command does is put into $\mathbf Q$.
 
 \subsection{Yaw wrapping}
 
 \func{wrap}{(a) -> float}
-\code{atan2(sin a, cos a)} (\file{ekf\_core.py}:31--32): brings any angle back to $(-\pi,\pi]$. It is applied to the
+\code{atan2(sin a, cos a)} (\file{core/ekf\_core.py}:31--32): brings any angle back to $(-\pi,\pi]$. It is applied to the
 predicted yaw after every step, to every angle innovation (so that $179^\circ$ measured against $-179^\circ$ predicted is an
 error of $-2^\circ$, not $358^\circ$), and to the yaw after every update. $b$ is wrapped when it is initialised and is
 not re-wrapped afterwards; it is only ever used inside \code{wrap(}$\psi+b$\code{)}, so that is harmless.
@@ -337,7 +337,7 @@ heading from the offset; the markers (which see $\psi$ only) make $b$ observable
 \centering
 \begin{tabularx}{\textwidth}{@{}lX@{}}
 \toprule
-Equation & Code (\file{ekf\_core.py}) \\
+Equation & Code (\file{core/ekf\_core.py}) \\
 \midrule
 delayed input $\bar{\mathbf u}=\mathbf u(t-L_u)$ & \code{command\_at}, lines 58--67; called at line 113 \\
 $\alpha$, $\beta$, $b_x,b_y$, $c_x,c_y$ & lines 76--81 \\
@@ -356,7 +356,7 @@ $\mathbf H_{\text{IMU}}$ & \code{update\_imu\_yaw}, lines 244--248 \\
 \end{table}
 
 %=====================================================================================================================
-\section[ekf\_core.py, function by function]{\file{ekf\_core.py}, function by function}
+\section[ekf\_core.py, function by function]{\file{core/ekf\_core.py}, function by function}
 
 The module docstring (lines 1--21) summarises the design; the class \code{DroneEKF} is all of the rest.
 
@@ -432,7 +432,7 @@ position uncertainty must keep up with the real error, otherwise the guards trus
 122--123).
 \end{intuition}
 
-How fast the uncertainty grows without markers, measured by running the filter offline with the \file{model.py}
+How fast the uncertainty grows without markers, measured by running the filter offline with the \file{core/model.py}
 parameters after a steady hover on markers (\code{sigma\_xy} $=\sqrt{\max(P_{xx},P_{yy})}$):
 \begin{center}
 \begin{tabular}{@{}lcccccc@{}}
@@ -555,7 +555,7 @@ its yaw.
 $\sqrt{\max(P_{xx},P_{yy})}$, the horizontal standard deviation (worst axis), used for logs and the replay.
 
 %=====================================================================================================================
-\section[ekf\_node.py: the ROS wrapper]{\file{ekf\_node.py}: the ROS wrapper}
+\section[ekf\_node.py: the ROS wrapper]{\file{core/ekf\_node.py}: the ROS wrapper}
 
 The node owns one \code{DroneEKF} and calls it from its callbacks. All callbacks run in one single-threaded executor
 (\code{rclpy.spin}), so there are no races on the filter. The filter time is the wall clock \code{time.time()}, not the
@@ -565,7 +565,7 @@ message stamps.
 The quaternion of a pure rotation about $z$: $(0, 0, \sin\frac\psi2, \cos\frac\psi2)$.
 
 \func{EkfNode.\_\_init\_\_}{() -> None}
-Node name \code{tello\_ekf}. Builds the filter from \file{model.py} with ROS parameters to override:
+Node name \code{tello\_ekf}. Builds the filter from \file{core/model.py} with ROS parameters to override:
 \begin{center}
 \begin{tabular}{@{}lll@{}}
 \toprule
@@ -642,10 +642,10 @@ executable \code{tello\_ekf} and started by \file{real.launch.py}:55.
 
 A grep for \topic{/ekf/} over \file{src/} gives the consumers:
 \begin{itemize}
-\item \textbf{The driver's safety chain.} \file{driver.py}:124--128 subscribes to \topic{/ekf/pose} (parameter
+\item \textbf{The driver's safety chain.} \file{core/driver.py}:124--128 subscribes to \topic{/ekf/pose} (parameter
   \code{pose\_topic}), \topic{/ekf/velocity} and \topic{/ekf/drift}. \code{on\_pose} (lines 315--319) passes
   $x,y,z,\psi$, $\sigma_{xy} = \sqrt{\max(\text{cov}[0],\text{cov}[7])}$ and $\sigma_z = \sqrt{\text{cov}[14]}$ to
-  \code{CommandFilter.on\_pose} (\file{safety.py}:60), which drops the hold target when the estimate jumps by more than
+  \code{CommandFilter.on\_pose} (\file{core/safety.py}:60), which drops the hold target when the estimate jumps by more than
   $15$~cm or $\sigma_{xy} > 6$~cm. The position hold needs a pose younger than $0.4$~s with $\sigma_{xy}<12$~cm
   (\code{pose\_valid(0.4, 0.12)}, line 176), takes a new hold target only if $\sigma_{xy}<6$~cm, predicts the position
   $L_u$ ahead with the EKF velocity and subtracts the EKF drift as a feed-forward (\code{hold\_axis}, lines 150--157):
@@ -653,14 +653,14 @@ A grep for \topic{/ekf/} over \file{src/} gives the consumers:
   The flight-zone guard needs $\sigma_{xy}<25$~cm (\code{pose\_valid(0.5, 0.25)}, line 264), otherwise blind mode
   ($0.15$~m/s max); the height band needs $\sigma_z \le 10$~cm (line 236). This is why an honest $\mathbf P$ matters: the
   growing covariance is what switches these guards off.
-\item \textbf{The missions.} \code{StepTest.on\_pose} (\file{step\_test.py}:159--170) ignores any pose with
+\item \textbf{The missions.} \code{Mission.on\_pose} (\file{missions/base.py}) ignores any pose with
   $\sigma_{xy} > $ \code{max\_pose\_sigma} $=0.15$~m, ``treated like no pose''. \code{MarkerTour} (and its subclasses
-  \code{GotoMarkers}, \code{Patrol}) and \code{Strike} set \code{POSE\_TOPIC = "/ekf/pose"} (\file{marker\_tour.py}:38,
-  \file{strike.py}:37); \code{MarkerTour} also subscribes to \topic{/ekf/drift} (line 74) and subtracts it from its velocity
+  \code{GotoMarkers}, \code{Patrol}) and \code{Strike} set \code{POSE\_TOPIC = "/ekf/pose"} (\file{missions/tour.py}:38,
+  \file{missions/strike.py}:37); \code{MarkerTour} also subscribes to \topic{/ekf/drift} (line 74) and subtracts it from its velocity
   request (lines 250--251). The identification flight \code{tello\_step\_test} deliberately uses the raw
-  \topic{/aruco/pose} (\file{step\_test.py}:88): identifying the model with an estimate that already contains the model
+  \topic{/aruco/pose} (\file{missions/base.py}): identifying the model with an estimate that already contains the model
   would be circular.
-\item \textbf{Recording.} \file{session\_recorder.py}:60 writes \topic{/ekf/pose} to \code{ekf.csv} ($t,x,y,z,\sigma_{xy}$) next
+\item \textbf{Recording.} \file{core/session\_recorder.py}:60 writes \topic{/ekf/pose} to \code{ekf.csv} ($t,x,y,z,\sigma_{xy}$) next
   to \code{rc\_sent.csv}, for flight reports and replays.
 \item \textbf{RViz} shows \topic{base\_link} from the EKF TF and \topic{/ekf/path}.
 \end{itemize}
@@ -669,7 +669,7 @@ A grep for \topic{/ekf/} over \file{src/} gives the consumers:
 \section[Replaying a flight: ekf\_replay.py]{Replaying a flight: \file{tools/ekf\_replay.py}}
 \label{sec:replay}
 
-Because \file{ekf\_core.py} has no ROS dependency, a recorded flight can be fed through it offline. The tool answers one
+Because \file{core/ekf\_core.py} has no ROS dependency, a recorded flight can be fed through it offline. The tool answers one
 question: \emph{how long can the drone fly without markers?} It hides the marker poses periodically and compares the dead
 reckoning with the hidden poses.
 
@@ -722,55 +722,55 @@ publication & $30$~Hz pose/velocity/drift/TF, path every $0.2$~s \\
 
 \begin{review}
 \begin{enumerate}[leftmargin=*]
-\item \textcolor{OliveGreen}{\textbf{[Fixed in v1.1, see Appendix~\ref{app:review}.]}} \textbf{ToF and IMU updates are erased by the next marker pose.} \file{ekf\_core.py}:214--217 rewinds to the snapshot
+\item \textcolor{OliveGreen}{\textbf{[Fixed in v1.1, see Appendix~\ref{app:review}.]}} \textbf{ToF and IMU updates are erased by the next marker pose.} \file{core/ekf\_core.py}:214--217 rewinds to the snapshot
   at $t_{\text{recv}}-L_v$ and re-propagates with the model only. \code{update\_height} and \code{update\_imu\_yaw}
   (lines 232, 247) modify only the current state, not the history, so any of them that happened in the last $0.2$~s is
   discarded by the rewind. With poses arriving faster than every $0.2$~s (the normal case with markers in view) these
   updates have essentially no lasting effect. Verified offline: with $30$~Hz poses at $z=1.80$ and ToF readings at $1.90$,
   the final estimate is exactly $1.800$; with $2$~Hz poses it is $1.885$. Fix: store measurements in the history and
   re-apply them during re-propagation, or apply ToF/IMU with their own delay into the past.
-\item \textbf{Image stamp ignored.} \file{ekf\_node.py}:73 passes \code{self.now()} and the core assumes the image is exactly
-  $L_v$ old (\file{ekf\_core.py}:191), although \file{aruco\_localizer.py}:276 stamps \topic{/aruco/pose} with the image
+\item \textbf{Image stamp ignored.} \file{core/ekf\_node.py}:73 passes \code{self.now()} and the core assumes the image is exactly
+  $L_v$ old (\file{core/ekf\_core.py}:191), although \file{aruco\_localizer.py}:276 stamps \topic{/aruco/pose} with the image
   time. Any variation of the video/detection latency (Wi-Fi, CPU load) becomes a timing error. Using the header stamp
   (same clock) would make the delay compensation exact.
 \item \textbf{Replay uses the old model.} \file{tools/ekf\_replay.py}:40 builds \code{DroneEKF()} with the constructor
-  defaults (\file{ekf\_core.py}:38: $K=1.15$, $\tau=0.55$, $L_u=0.30$), not the caged-drone values of \file{model.py}
+  defaults (\file{core/ekf\_core.py}:38: $K=1.15$, $\tau=0.55$, $L_u=0.30$), not the caged-drone values of \file{core/model.py}
   ($0.66/0.83$, $0.25$, $0.35$) that the node uses. Replay results do not describe the flying filter. Fix: default
-  \code{ekf\_kwargs} from \file{model.py} as in \file{ekf\_node.py}:34--37, or move those defaults into the core.
+  \code{ekf\_kwargs} from \file{core/model.py} as in \file{core/ekf\_node.py}:34--37, or move those defaults into the core.
 \item \textbf{Replay of a tour session feeds the EKF its own output.} \file{tools/ekf\_replay.py}:24 reads \code{poses.csv}
   as marker poses, but \code{MarkerTour} records whatever arrives on its \code{POSE\_TOPIC}, which is \topic{/ekf/pose}
-  (\file{marker\_tour.py}:38, written at \file{step\_test.py}:170). Only \code{tello\_step\_test} sessions contain raw ArUco
+  (\file{missions/tour.py}:38, written at \file{missions/base.py}). Only \code{tello\_step\_test} sessions contain raw ArUco
   poses, although the replay docstring (line 2) also names marker-tour sessions.
 \item \textbf{Replay input is the request, not the command sent.} \file{tools/ekf\_replay.py}:26 uses \code{commands.csv},
-  the mission's request (\file{step\_test.py}:270), whereas the live EKF uses \topic{/tello/rc\_sent}, recorded in
-  \code{sent.csv} (\file{step\_test.py}:151). Hold corrections and guards are therefore missing in the replay. Also, the
+  the mission's request (\file{missions/base.py}), whereas the live EKF uses \topic{/tello/rc\_sent}, recorded in
+  \code{sent.csv} (\file{missions/base.py}). Hold corrections and guards are therefore missing in the replay. Also, the
   replay applies \code{update\_height} on the ground (\file{tools/ekf\_replay.py}:52, no \code{flying} test, unlike
-  \file{ekf\_node.py}:93) and never calls \code{takeoff()} nor \code{init\_at}.
-\item \textbf{$\mathbf Q$ depends on the step size.} \file{ekf\_core.py}:98--101 use $(q\Delta t)^2$: the variance added per
+  \file{core/ekf\_node.py}:93) and never calls \code{takeoff()} nor \code{init\_at}.
+\item \textbf{$\mathbf Q$ depends on the step size.} \file{core/ekf\_core.py}:98--101 use $(q\Delta t)^2$: the variance added per
   second is $q^2\Delta t_{\text{step}}$, so it changes with the step length (a filter run with $0.1$~s steps would add $5\times$
   more). The drift term (line 103, $q_d^2\Delta t$) is the consistent random-walk form. Harmless today because steps are
   almost always $20$~ms, but the tuning of \code{accel\_noise} is tied to that number.
-\item \textbf{No Joseph form.} \file{ekf\_core.py}:140 uses $(\mathbf I-\mathbf K\mathbf H)\mathbf P$, which is only optimal
+\item \textbf{No Joseph form.} \file{core/ekf\_core.py}:140 uses $(\mathbf I-\mathbf K\mathbf H)\mathbf P$, which is only optimal
   for the exact gain and can lose positive definiteness numerically; the symmetrisation does not fix that. With
   $\mathbf P$ entries ranging from $10^3$ (uninitialised) to $10^{-6}$, the Joseph form is cheap insurance
   ($10\times10$ matrices).
-\item \textbf{Cross-covariance of $b$ zeroed at initialisation.} \file{ekf\_core.py}:240 sets the row and column of $b$
+\item \textbf{Cross-covariance of $b$ zeroed at initialisation.} \file{core/ekf\_core.py}:240 sets the row and column of $b$
   to zero, although $b = \psi_{\text{IMU}} - \hat\psi$ implies $\operatorname{cov}(b,\psi) = -P_{\psi\psi}$. The filter
   therefore believes $\psi$ and $b$ are independent, and the first IMU updates move $\psi$ more than they should.
   Setting \code{P[IB, IYAW] = P[IYAW, IB] = -P[IYAW, IYAW]} (and the other cross terms with the opposite sign of
   $\psi$'s) would be exact.
-\item \textbf{Fast restart.} \file{ekf\_core.py}:205: 8 consecutive rejections ($\approx0.27$~s at $30$~fps) reset the filter.
+\item \textbf{Fast restart.} \file{core/ekf\_core.py}:205: 8 consecutive rejections ($\approx0.27$~s at $30$~fps) reset the filter.
   A short burst of a wrong marker match can therefore throw away a good estimate; a time-based criterion or requiring the
   rejected poses to be mutually consistent would be more robust.
-\item \textbf{Same delay for yaw as for translation.} \file{ekf\_core.py}:113 delays all four inputs by $L_u = 0.35$~s,
-  while \file{model.py}:13 reports for yaw ``$L$ $0.20$~s, $\tau\approx0$'' (and for the other axes $L$ is the total
+\item \textbf{Same delay for yaw as for translation.} \file{core/ekf\_core.py}:113 delays all four inputs by $L_u = 0.35$~s,
+  while \file{core/model.py}:13 reports for yaw ``$L$ $0.20$~s, $\tau\approx0$'' (and for the other axes $L$ is the total
   command $\to$ pose delay). If that $0.20$~s is the total, the yaw command acts in the model about $0.35$~s too late.
   Worth checking against the identification data.
-\item \textbf{Stale comment and unused code.} \file{ekf\_core.py}:51 documents \code{hist} as \code{(t, s, P, u\_applied)};
+\item \textbf{Stale comment and unused code.} \file{core/ekf\_core.py}:51 documents \code{hist} as \code{(t, s, P, u\_applied)};
   the code stores \code{(t, s, P)} (line 127). \code{init\_buf} and \code{b\_init} are created lazily with
   \code{getattr} (lines 170, 238) instead of in \code{\_\_init\_\_}, and \code{init\_buf} keeps growing (up to $\sim30$
   entries per second) while only its last three are tested. Minor.
-\item \textbf{Parameters not exposed.} \file{ekf\_node.py}:34--37 exposes \code{accel\_noise} and \code{drift\_noise}
+\item \textbf{Parameters not exposed.} \file{core/ekf\_node.py}:34--37 exposes \code{accel\_noise} and \code{drift\_noise}
   but not \code{yaw\_rate\_noise}, \code{history\_s}, the gates or the measurement noises, so tuning those needs a code
   change.
 \end{enumerate}

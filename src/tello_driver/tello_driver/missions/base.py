@@ -1,21 +1,14 @@
-"""Identification flight: velocity doublets of several amplitudes and durations on each axis, then fitted.
+"""Mission base class: everything a flight program needs around its own logic.
 
-    ros2 launch tello_driver real.launch.py                                  (terminal 1)
-    ros2 run tello_driver tello_step_test                                    identification flight (~3.5 min)
-    ros2 run tello_driver tello_step_test --ros-args -p schedule:=valid      validation flight (~2 min)
+Every mission (tour / goto, patrol, strike, and the identification flight) is a subclass of Mission and is started
+with run(cls). Mission gives it:
+  - the inputs: pose (EKF or raw ArUco), telemetry, video heartbeat, IMU heading fallback;
+  - takeoff + climb + start point (prepare), return above the pad (return_home), a P recentre (recentre);
+  - a 20 Hz loop with the mission-level safety checks (run), and a marker search when the pose is lost;
+  - the logs of every flight (poses / commands / telemetry / sent.csv in ~/tello_ws/sessions/<prefix>_<time>/);
+  - run(): Ctrl+C or any key lands, a refused takeoff aborts cleanly.
 
-Each doublet: hover 2 s, +A for T, -A for T (the drone comes back), hover 3 s; the tested axis is open loop, the
-others hold the position; the drone re-centres (middle of the flight zone and of the height band) before each one.
-Several amplitudes AND durations (Nov 13: 2 identical doublets could not separate the delay L from the time
-constant tau), both signs. Up/down: short doublets (A*T <= 12 cm, the height-band guard must not cut them) but strong
-(rc >= 20: the Tello did not react at all to 8-12 rc points up/down, Nov 13); before: the band guard cut them
-(it did on Nov 13 and spoiled the vertical fit). The command REALLY sent by the driver (after its guards) is
-recorded in sent.csv and used by the fit. After landing: identification -> tello_step_fit (model.yaml);
-validation -> the latest identified model is simulated on this flight (validation.txt / .png).
-
-SAFETY: ANY KEY = stop and land. Ctrl+C = land. Automatic landing if the drone leaves a box around its start
-point (default +-0.8 m horizontally, 0.4-2.4 m high), if no marker is seen for 3 s, or on low battery.
-It refuses to start if another node (e.g. the teleop) also sends velocity commands.
+These checks are a SECOND layer: the driver applies its own guards (core/safety.py) to every command anyway.
 """
 import csv
 import json
@@ -37,23 +30,12 @@ from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
-from tello_driver.teleop import read_key
+from tello_driver.core.teleop import read_key
 
 RATE = 20.0
 
-# (amplitude, half-duration) of the doublets, per axis kind: m/s or rad/s, s. Signs alternate.
-SCHEDULES = {
-    "ident": {"xy": [(0.15, 1.8), (0.25, 1.2), (0.35, 0.8), (0.25, 1.8), (0.35, 1.2), (0.15, 0.8)],
-              "z": [(0.30, 0.4), (0.25, 0.5), (0.30, 0.3), (0.25, 0.4)],  # rc >= 20: the Tello ignored 8-12 (Nov 13)
-              "yaw": [(0.3, 1.2), (0.5, 1.0), (0.7, 0.6), (0.5, 0.6)]},
-    "valid": {"xy": [(0.20, 1.0), (0.30, 1.5), (0.30, 0.6), (0.20, 1.5)],
-              "z": [(0.28, 0.4), (0.30, 0.35)],
-              "yaw": [(0.4, 0.8), (0.6, 1.0)]},
-}
-
-
 class Abort(Exception):
-    pass
+    """Stop the mission: run() sends zero, then lands."""
 
 
 class Lost(Exception):
@@ -81,20 +63,18 @@ def driver_zone_file(node, timeout=5.0):
         node.destroy_client(cli)
 
 
-class StepTest(Node):
-    NODE_NAME = "tello_step_test"
-    PREFIX = "step"
-    MOVE_TO_ZONE_CENTRE = True
-    POSE_TOPIC = "/aruco/pose"
-    BAND_DEFAULT = True   # band mode everywhere (launch default); band:=false = zone 1.4-2.4 m
+class Mission(Node):
+    """Subclasses set the class constants below and override mission() (or main(), to change prepare())."""
+    NODE_NAME = "tello_mission"
+    PREFIX = "mission"            # session folder ~/tello_ws/sessions/<PREFIX>_<time>
+    MOVE_TO_ZONE_CENTRE = True    # after takeoff, fly to the centre of the flight zone before starting
+    POSE_TOPIC = "/ekf/pose"      # missions fly on the EKF; the identification overrides it with the raw ArUco pose
+    BAND_DEFAULT = True           # band mode everywhere (launch default); band:=false = zone 1.4-2.4 m
+    MIN_BATTERY = 30              # % to start
 
     def __init__(self):
         super().__init__(self.NODE_NAME)
         p = self.declare_parameter
-        self.schedule = p("schedule", "ident").value     # ident | valid (see SCHEDULES)
-        if self.schedule not in SCHEDULES:
-            raise SystemExit(f"schedule must be one of {list(SCHEDULES)}")
-        self.axes = [a.strip() for a in p("axes", "x,y,z,yaw").value.split(",") if a.strip()]
         self.box = p("box", 0.8).value                  # m, horizontal half-size around the start point
         self.z_min, self.z_max = p("z_min", 0.4).value, p("z_max", 2.4).value
         # no marker for that long (searching all the time) -> land; shorter losses: the drone stays up and searches
@@ -109,7 +89,7 @@ class StepTest(Node):
         if not zf:
             zf = os.path.join(os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter")),
                               "config", "flight_zone_band.yaml" if self.band else "flight_zone.yaml")
-        from tello_driver.zone import load_zone
+        from tello_driver.core.zone import load_zone
         self.zone = load_zone(zf)
         self.band_z = None
         if self.band:
@@ -119,11 +99,10 @@ class StepTest(Node):
             self.band_z = (self.zone["z_min"], self.zone["z_max"])
             # abort limits: the band +-0.3 m (an identification pulse or a braking overshoot may leave it briefly)
             self.z_min, self.z_max = self.band_z[0] - 0.3, self.band_z[1] + 0.3
-        # identification: 3.5 min of flight and a full climb needed (at 32 % the Tello only climbed to 1.28 m)
-        self.min_battery = p("min_battery", 50 if self.PREFIX == "step" else 30).value
-        from tello_driver.home import HOME_FILE
+        self.min_battery = p("min_battery", self.MIN_BATTERY).value
+        from tello_driver.core.home import HOME_FILE
         p("home_file", HOME_FILE)
-        prefix = self.PREFIX + ("val" if self.PREFIX == "step" and self.schedule == "valid" else "")
+        prefix = self.session_prefix()
         out = Path(p("out_dir", str(Path.home() / "tello_ws/sessions")).value) / datetime.now().strftime(f"{prefix}_%Y%m%d_%H%M%S")
         out.mkdir(parents=True, exist_ok=True)
         self.out = out
@@ -154,6 +133,9 @@ class StepTest(Node):
         self.w_sent.writerow(["t", "cx", "cy", "cz", "cw"])
         self.create_subscription(Twist, "/tello/rc_sent", lambda m: self.w_sent.writerow(
             [f"{time.time():.4f}", f"{m.linear.x:.3f}", f"{m.linear.y:.3f}", f"{m.linear.z:.3f}", f"{m.angular.z:.3f}"]), 50)
+
+    def session_prefix(self):
+        return self.PREFIX
 
     # ---------------------------------------------------------------- inputs
     def on_pose(self, m):
@@ -238,7 +220,7 @@ class StepTest(Node):
             _, x, y, z, _ = self.pose
             zn = self.zone
             if zn and "grid" in zn:
-                from tello_driver.zone import clearance
+                from tello_driver.core.zone import clearance
                 d, _ = clearance(zn, x, y, z)
                 if d < zn["margin"] - 0.2:
                     raise Abort(f"{d:.2f} m from an obstacle at ({x:+.2f}, {y:+.2f}) m")
@@ -338,13 +320,13 @@ class StepTest(Node):
     def return_home(self):
         """Fly back above the takeoff pad (config/home.yaml) at the current height, so that the landing ends on
         it. Skipped when the pad is unknown, or not in the free space at this height."""
-        from tello_driver.home import HOME_FILE, load_home
+        from tello_driver.core.home import load_home
         h = load_home(self.get_parameter("home_file").value)
         if h is None or self.pose_age() > 0.5:
             self.recentre()
             return
         if self.zone and "grid" in self.zone:
-            from tello_driver.zone import clearance
+            from tello_driver.core.zone import clearance
             c = clearance(self.zone, h["x"], h["y"])
             if c is not None and c[0] < self.zone["margin"]:
                 self.say(f"pad ({h['x']:+.2f}, {h['y']:+.2f}) too close to an obstacle at this height: landing here")
@@ -367,19 +349,6 @@ class StepTest(Node):
         return {"cx": clip(0.6 * (c * ex + s * ey), 0.2), "cy": clip(0.6 * (-s * ex + c * ey), 0.2),
                 "cz": clip(0.6 * (z0 - z), 0.2), "cw": clip(0.8 * wrap(yaw0 - yaw), 0.3)}
 
-    def doublet(self, segment, axis, sign, amp, dur):
-        """Hover (position held) - pulse +A for dur - pulse -A for dur - hover. During the pulses the tested axis is
-        open loop and the other axes keep holding the position (u logged = asked; sent.csv = really sent)."""
-        key = {"x": "cx", "y": "cy", "z": "cz", "yaw": "cw"}[axis]
-
-        def cmd(u):
-            c = self.hold_cmd()
-            if u is not None:
-                c[key] = u
-            self.send(**c, segment=segment, axis=axis, u=c[key])
-        for u, d in ((None, 2.0), (sign * amp, dur), (-sign * amp, dur), (None, 3.0)):
-            self.run(d, lambda u=u: cmd(u), restart_on_loss=True)
-
     def wait_ready(self):
         self.say("Waiting for the driver and the telemetry...")
         t0 = time.time()
@@ -400,7 +369,11 @@ class StepTest(Node):
 
     def main(self):
         self.prepare()
-        self.run_tests()
+        self.mission()
+
+    def mission(self):
+        """The flight itself, after prepare(). Subclasses override it (or main())."""
+        self.return_home()
 
     def prepare(self):
         """Checks, takeoff + climb (done by the driver), start point. Shared with the marker tour."""
@@ -471,45 +444,19 @@ class StepTest(Node):
         self.say(f"Start point ({self.p0[0]:+.2f}, {self.p0[1]:+.2f}, {self.p0[2]:.2f}) m, "
                  f"yaw {math.degrees(self.p0[3]):.0f} deg.")
 
-    def run_tests(self):
-        names = {"x": "forward/back", "y": "left/right", "z": "up/down", "yaw": "turn"}
-        sched = SCHEDULES[self.schedule]
-        plan = [(axis, a, d) for axis in self.axes for a, d in sched["xy" if axis in ("x", "y") else axis]]
-        unit = {"x": "m/s", "y": "m/s", "z": "m/s", "yaw": "rad/s"}
-        self.say(f"{self.schedule} flight: {len(plan)} doublets")
-        seg = 0
-        for n, (axis, amp, dur) in enumerate(plan):
-            sign = 1 if sum(1 for q in plan[:n] if q[0] == axis) % 2 == 0 else -1
-            for attempt in range(3):
-                self.say(f"[{n + 1}/{len(plan)}] {names[axis]}: {sign * amp:+.2f} {unit[axis]} for {dur:.1f} s, then back"
-                         + (f" (retry {attempt})" if attempt else ""))
-                self.recentre()
-                try:
-                    self.doublet(seg, axis, sign, amp, dur)
-                    seg += 1
-                    break
-                except Lost:
-                    self.failed_segments.append(seg)
-                    seg += 1
-                    self.say("  markers lost during the test: searching, then repeating it")
-                    self.search_until_found(self.p0[3])
-        self.return_home()
-        self.say("Done: landing.")
-
     def close(self):
         for f in (self.f_pose, self.f_cmd, self.f_tel, self.f_sent):
             f.close()
         (self.out / "failed_segments.txt").write_text(" ".join(map(str, self.failed_segments)))
 
+    def after_landing(self):
+        """Called by run() after a flight that ended normally (not aborted), once landed and the logs closed."""
 
-def main():
-    run(StepTest, fit_after=True)
 
-
-def run(cls, fit_after=False):
+def run(cls):
     os.environ.setdefault("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST")
     os.environ.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "LARGE_DATA")
-    from tello_driver.ros_env import local_ros_env
+    from tello_driver.core.ros_env import local_ros_env
     local_ros_env()  # + the Fast DDS profile (loopback only, small packets)
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)  # Ctrl+C must still be able to land
     node = cls()
@@ -536,20 +483,8 @@ def run(cls, fit_after=False):
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
         node.close()
         print(f"Data saved in {node.out}")
-    if ok and fit_after:
-        from tello_driver import step_fit
-        if getattr(node, "schedule", "ident") == "valid":
-            ident = step_fit.latest_identification(before=node.out)
-            if ident is None:
-                print("No identification flight to validate: run tello_step_test first")
-            else:
-                step_fit.validate(ident, node.out)
-        else:
-            step_fit.fit(node.out)
-            print(f"Model: {node.out / 'model.yaml'}   plots: {node.out / 'step_fit.png'}, {node.out / 'cost_map.png'}")
+    if ok:
+        node.after_landing()
     node.destroy_node()
     rclpy.shutdown()
 
-
-if __name__ == "__main__":
-    main()

@@ -23,10 +23,10 @@ import time
 
 import numpy as np
 
-from tello_driver import model as M
-from tello_driver.marker_tour import MarkerTour, clip
-from tello_driver.step_test import Abort, run, wrap
-from tello_driver.teleop import read_key
+from tello_driver.core import model as M
+from tello_driver.missions.tour import MarkerTour, clip
+from tello_driver.missions.base import Abort, run, wrap
+from tello_driver.core.teleop import read_key
 
 
 class Patrol(MarkerTour):
@@ -147,7 +147,7 @@ class Patrol(MarkerTour):
         k = min(range(4), key=lambda i: math.hypot(wps[i][0] - x, wps[i][1] - y))
         z_t = self.z_patrol or (self.band_z[1] - 0.05 if self.band_z else self.p0[2])
         if self.zone and "grid" in self.zone:  # 3D zone: the path must be free at that height (L shape)
-            from tello_driver.zone import clearance
+            from tello_driver.core.zone import clearance
             for a, b in wps:
                 if clearance(self.zone, a, b, z_t)[0] < self.zone["margin"] + 0.1:
                     raise Abort(f"patrol corner ({a:+.2f}, {b:+.2f}) not in the flight zone at {z_t:.2f} m "

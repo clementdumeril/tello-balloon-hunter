@@ -19,7 +19,7 @@ from rclpy.node import Node
 from std_msgs.msg import String
 from tf2_ros import TransformBroadcaster
 
-from tello_driver.ekf_core import IB, IDX, IDY, IVX, IVY, IVZ, IX, IY, IYAW, IZ, DroneEKF
+from tello_driver.core.ekf_core import IB, IDX, IDY, IVX, IVY, IVZ, IX, IY, IYAW, IZ, DroneEKF
 
 
 def quat_yaw(yaw):
@@ -30,13 +30,13 @@ class EkfNode(Node):
     def __init__(self):
         super().__init__("tello_ekf")
         p = self.declare_parameter
-        from tello_driver import model as M  # the identified model (model.py)
+        from tello_driver.core import model as M  # the identified model (model.py)
         self.ekf = DroneEKF(K_xy=M.K_MEAN, K_x=p("K_x", M.K_X).value, K_y=p("K_y", M.K_Y).value,
                             tau_xy=p("tau_xy", M.TAU_XY).value, K_z=p("K_z", M.K_Z).value, K_w=M.K_W,
                             tau_z=p("tau_z", M.TAU_Z).value, L_u=p("L_u", M.L_U).value, L_v=p("L_v", M.L_V).value,
                             accel_noise=p("accel_noise", 0.6).value, drift_noise=p("drift_noise", 0.01).value)
         self.child = p("child_frame", "base_link").value
-        from tello_driver.home import HOME_FILE, load_home
+        from tello_driver.core.home import HOME_FILE, load_home
         self.home = load_home(p("home_file", HOME_FILE).value)  # takeoff pad: the filter starts there
         self.home_used = False
         if self.home:
@@ -145,7 +145,7 @@ class EkfNode(Node):
 
 
 def main():
-    from tello_driver.ros_env import local_ros_env
+    from tello_driver.core.ros_env import local_ros_env
     local_ros_env()
     rclpy.init()
     node = EkfNode()

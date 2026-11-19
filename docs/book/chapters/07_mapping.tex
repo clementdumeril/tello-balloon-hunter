@@ -565,7 +565,7 @@ the $1.80 \times 2.40$~m mission rectangle.}
 rectangle, the margin and the grid; \code{make\_grid} adds the gradient $(\partial c/\partial x, \partial
 c/\partial y)$ (pointing away from obstacles) and, where the clearance is flat and too small, a vector towards the
 nearest cell with room; \code{clearance(zone, x, y)} returns $(c, \text{unit direction})$ at the nearest cell.
-The safety layer (\file{safety.py}) brakes and pushes back with it; \file{marker\_map\_publisher} shows the
+The safety layer (\file{core/safety.py}) brakes and pushes back with it; \file{marker\_map\_publisher} shows the
 rectangle (yellow) and the grid as an \code{OccupancyGrid} on \topic{/room/free\_space} (100 where $c < m$).
 
 \subsection{The 3D L-shaped zone (\texorpdfstring{\file{config/flight\_zone\_3d.yaml}}{flight\_zone\_3d.yaml})}
@@ -708,7 +708,7 @@ Node (package / executable) & Parameters \\
 \bottomrule
 \end{tabularx}
 \end{center}
-With \code{mock:=true} the same nodes run, but the driver instantiates \code{FakeTello} (\file{fake\_tello.py}) with
+With \code{mock:=true} the same nodes run, but the driver instantiates \code{FakeTello} (\file{sim/fake\_tello.py}) with
 the marker map as its virtual world, so the localizer, EKF and RViz are exercised without hardware.
 
 \func{zone\_file}{(arg, band=False) -> path or ""}
@@ -873,11 +873,11 @@ All points below were checked in the code (and, where stated, against the data i
   point inside a box grown by 0.25 m''. Re-running the test with \code{surface\_points} on
   \file{room\_map.obj}: 3105 points fall in the \code{above\_east\_furniture} box grown by 0.25~m, and points up to
   $z = 1.90$~m lie \emph{directly under} that box ($x \approx 1.33$--$1.35$, $y$ 0.55--1.38), i.e.\ only 0.18~m
-  below its 2.08~m floor. The test passes with a growth of 0.15~m, not 0.25~m. Since \file{safety.py}:247 tolerates
+  below its 2.08~m floor. The test passes with a growth of 0.15~m, not 0.25~m. Since \file{core/safety.py}:247 tolerates
   0.10~m below the floor of the allowed height range before reacting, the cage could come within $\sim$8~cm (centre)
   of the wardrobe top. Raise that box floor to $\approx 2.15$~m or trim its east edge.
 \item \textcolor{OliveGreen}{\textbf{[Fixed in v1.1, see Appendix~\ref{app:review}.]}} \textbf{\file{config/flight\_zone\_3d.yaml}:1--2 --- stale status.} ``Not used by the driver yet'', but
-  \file{real.launch.py}:73 accepts \code{flight\_zone:=3d} and \file{zone.py}:70 enforces it (layers, height
+  \file{real.launch.py}:73 accepts \code{flight\_zone:=3d} and \file{core/zone.py}:70 enforces it (layers, height
   limits). The reader may believe the zone is only decorative.
 \item \textbf{\file{tools/free\_zone.py}:91--100 --- hidden extra margin.} The $5\times5$ dilation meant to close
   holes before the flood fill also defines \code{inside}, so every obstacle is effectively grown by 2 cells
@@ -894,7 +894,7 @@ All points below were checked in the code (and, where stated, against the data i
   Also :146 draws a caption wider than the image: it is cut in \file{flight\_zone\_band.png}.
 \item \textbf{\file{tools/set\_home.py}:252--255 --- NaN pad.} If no sample lies within 0.25~m of the
   coordinate-wise median (e.g.\ two flights more than 0.5~m apart), \code{keep} is all \code{False}, the medians of
-  empty arrays are NaN and \code{x: nan} is written to \file{home.yaml}; \file{home.py} \code{load\_home} parses it
+  empty arrays are NaN and \code{x: nan} is written to \file{home.yaml}; \file{core/home.py} \code{load\_home} parses it
   with \code{float()} and the EKF would be initialised at NaN. Fall back to all samples when \code{keep.sum() == 0}.
 \item \textbf{\file{tools/room\_mapper.py}:483 --- vertical from all markers.} ``Up'' is the mean $y$ axis of
   \emph{every} mapped marker. A marker on the floor or ceiling (e.g.\ the pad marker 48 if it ever appears in a
@@ -920,4 +920,4 @@ All points below were checked in the code (and, where stated, against the data i
   YAMLs are ASCII today.
 \end{enumerate}
 \end{review}
-ussy
+\fussy

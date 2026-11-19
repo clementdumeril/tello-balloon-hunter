@@ -84,17 +84,17 @@ TF \topic{base\_link}$\to$ \topic{tello\_camera\_optical} (static) & & map publi
 
 ``Latched'' means a QoS profile with \code{depth=1} and \code{DurabilityPolicy.TRANSIENT\_LOCAL}: a subscriber that
 starts later (RViz opened after the launch) still receives the last message. The consumers were checked in the code:
-\file{ekf\_node.py}:53 subscribes \topic{/aruco/pose} with depth 20; \file{driver.py}:130 forwards
-\topic{/aruco/nearest\_marker} to \code{safety.on\_nearest\_marker}; \file{patrol.py}:61 parses \topic{/aruco/ids};
-\file{session\_recorder.py}:42--43 saves the debug image (at most one per second) and the poses;
-\file{marker\_tour.py}:77 and \file{step\_test.py}:88 also read \topic{/aruco/pose}.
+\file{core/ekf\_node.py}:53 subscribes \topic{/aruco/pose} with depth 20; \file{core/driver.py}:130 forwards
+\topic{/aruco/nearest\_marker} to \code{safety.on\_nearest\_marker}; \file{missions/patrol.py}:61 parses \topic{/aruco/ids};
+\file{core/session\_recorder.py}:42--43 saves the debug image (at most one per second) and the poses;
+\file{missions/tour.py}:77 and \file{missions/base.py} also read \topic{/aruco/pose}.
 
 \section{The configuration files}
 
 \subsection{\texttt{config/markers.yaml}: the marker map}
 
 This file is the single source of truth for the marker layout, used by the real localizer, the fake camera of the
-simulator (\file{fake\_world.py}) and the map publisher. It was produced by \file{tools/room\_mapper.py}: 244 hand-held
+simulator (\file{sim/fake\_world.py}) and the map publisher. It was produced by \file{tools/room\_mapper.py}: 244 hand-held
 photos, then a bundle adjustment (reprojection RMS 1.13~px) that solved all marker poses at once. Its format:
 
 \begin{lstlisting}
@@ -140,7 +140,7 @@ $\mathbf t_k$ its centre, the four corners in detection order (top-left, top-rig
 \subsection{\texttt{config/tello\_camera.yaml}: intrinsics and distortion}
 
 Standard ROS \code{camera\_info} YAML, produced by \file{tools/calibrate\_camera.py} with a checkerboard (26 sharp
-views, RMS 0.236~px, Nov~9). The driver loads it (\code{camera\_info\_file}, \file{driver.py}:278) and republishes it
+views, RMS 0.236~px, Nov~9). The driver loads it (\code{camera\_info\_file}, \file{core/driver.py}:278) and republishes it
 on \topic{/tello/camera\_info} with every frame. Values for the $960\times 720$ stream:
 \begin{equation}
 \mathbf K = \begin{bmatrix} f_x & 0 & c_x\\ 0 & f_y & c_y\\ 0&0&1\end{bmatrix}
@@ -260,7 +260,7 @@ ${}^m\mathbf T_k$ (section~\ref{sec:single}).
 
 Orientation: the roll, pitch, yaw of the drone are those of ${}^m\mathbf R_b$. The localizer publishes it as a
 quaternion; the EKF extracts only the yaw, $\psi = \operatorname{atan2}(2(q_wq_z+q_xq_y),\,1-2(q_y^2+q_z^2))$
-(\file{ekf\_node.py}:70), which equals $\operatorname{atan2}(R_{21},R_{11})$ of ${}^m\mathbf R_b$.
+(\file{core/ekf\_node.py}:70), which equals $\operatorname{atan2}(R_{21},R_{11})$ of ${}^m\mathbf R_b$.
 
 \input{chapters/02b_pnp}
 
@@ -308,7 +308,7 @@ quaternion (see the review).
 OpenCV constant. \code{cv2} is imported inside the function so the module can be imported without OpenCV.
 
 \func{marker\_image}{(dictionary\_name, marker\_id, px\_per\_module=100) -> (img, bits)}
-Renders a marker image with a one-module white quiet zone, for the fake camera (\file{fake\_world.py}:45) and the
+Renders a marker image with a one-module white quiet zone, for the fake camera (\file{sim/fake\_world.py}:45) and the
 print sheets. \code{bits} is the dictionary's \code{markerSize} (6), the image side is $(6+2)\times 100$~px plus a
 100~px white border; it uses \code{generateImageMarker} (OpenCV $\geq$ 4.7) or \code{drawMarker} (4.6).
 
@@ -398,7 +398,7 @@ centre (\code{camera\_offset}, default \code{[0.05, 0.0, 0.0]}) and rotated so t
 forward axis $x_b$. Without the rotation, the ``camera looking along $z$'' convention of OpenCV would be read as
 ``drone pointing up''. Having it in TF (rather than hard-coded in the localizer) also lets RViz draw the camera
 frustum attached to the drone, and the driver stamps its images with \code{frame\_id = "tello\_camera\_optical"}
-(\file{driver.py}:69).
+(\file{core/driver.py}:69).
 \end{keypoint}
 
 \subsection{\texttt{on\_image}: the main callback, step by step}
@@ -417,7 +417,7 @@ edge, $0$ on the optical axis, $+1.06$ at the right edge since $c_x=466.6<480$),
 $s_{\max}=\max_j\lVert \mathbf p_j-\mathbf p_{j-1}\rVert$ (\code{np.roll} pairs each corner with the previous one, so
 the four sides are measured). It publishes the string \code{"id:u:size,..."}, e.g. \code{"49:-0.120:96,21:0.410:88"},
 or an empty string. This is published on every processed frame, so an empty string means ``nothing seen now''.
-\file{patrol.py} uses it to turn towards a marker using the camera only, independently of the map and the pose.
+\file{missions/patrol.py} uses it to turn towards a marker using the camera only, independently of the map and the pose.
 
 \paragraph{3. Correspondences (lines 134--142).} For each detected id present in the map and not blacklisted
 (\code{self.moved.get(id,0) >= 3}), it appends the four map corners \code{mk.corners\_map()} to \code{obj}, the four
@@ -435,7 +435,7 @@ d_{\text{near}} = \min_{k\in\text{used}} \frac{f_x\,\ell_k}{\max(s_{\max,k},\,1)
 The longest side is used because foreshortening (seeing the marker at an angle) only shortens the sides; the longest
 one is the closest to the frontal size. This is a monocular range-from-size estimate, independent of the pose (it
 does not care if PnP fails later), but it does depend on the map for $\ell_k$ and only uses mapped, non-blacklisted
-markers. It is published on \topic{/aruco/nearest\_marker}. The driver's \code{wall\_guard} (\file{safety.py}:351--365)
+markers. It is published on \topic{/aruco/nearest\_marker}. The driver's \code{wall\_guard} (\file{core/safety.py}:351--365)
 forbids forward motion and backs off ($fb\leq -12$) below \code{min\_wall = 0.7}~m (a marker 246~px wide) and scales
 the forward command down linearly between 0.70 and 0.85~m; it ignores readings older than 0.4~s, which is how ``no
 marker'' is handled, since nothing is published in that case.
@@ -575,7 +575,7 @@ The $6\times6$ row-major covariance is diagonal: indices 0, 7, 14 ($x,y,z$) get 
 (roll, pitch, yaw) get $\sigma_\psi^2$. Examples with $f_x=910.5$: $e=0.5$, $\bar d=2$, $n=4$ gives 0.8~mm, so the 1~cm
 floor applies (the usual case); $e=6$~px, $\bar d=3$~m, $n=3$ gives $\sigma_p=1.7$~cm and $\sigma_\psi=0.33^\circ$, so
 the $0.5^\circ$ floor ($8.7$~mrad) applies. The EKF reads only \code{covariance[0]} and \code{covariance[35]}
-(\file{ekf\_node.py}:71--72) as the position and yaw standard deviations of its update. The message is stored in
+(\file{core/ekf\_node.py}:71--72) as the position and yaw standard deviations of its update. The message is stored in
 \code{self.last\_pose}. A \code{TransformStamped} with the same header, child \code{self.child\_frame}
 (\topic{base\_link\_aruco}) and the same pose is broadcast on \topic{/tf}: the EKF owns \topic{base\_link}, so the raw
 measurement gets its own frame for comparison in RViz.
@@ -694,7 +694,7 @@ Same pattern as the localizer.
 \section{Communication and latency}
 
 \begin{itemize}
-\item \textbf{Stamps.} The driver stamps each image when it reaches the PC (\file{driver.py}:285) with
+\item \textbf{Stamps.} The driver stamps each image when it reaches the PC (\file{core/driver.py}:285) with
   \code{frame\_id = tello\_camera\_optical} and gives the same stamp to the \code{camera\_info}. The localizer copies
   that stamp to the pose, the TF, the path and the debug image. The pose therefore describes the drone about 0.2~s in
   the past (video latency); the EKF applies it at that time and re-propagates to now.
@@ -776,7 +776,7 @@ All items were checked in the current code; none was changed.
   BGR $\to$ gray. The BGR image is needed only every 3rd frame for the debug overlay; converting \code{rgb8} directly
   with \code{COLOR\_RGB2GRAY} and building BGR only when debugging saves a full-frame copy per frame.
 \item \textbf{\code{u} normalisation} -- \file{aruco\_localizer.py}:129 divides by $c_x=466.6$ rather than half the
-  width, so the documented ``$-1..+1$'' range is really about $[-1, 1.06]$. Harmless but surprising to \file{patrol.py}.
+  width, so the documented ``$-1..+1$'' range is really about $[-1, 1.06]$. Harmless but surprising to \file{missions/patrol.py}.
 \item \textbf{Dead code} -- \code{self.ambiguous} (\file{aruco\_localizer.py}:70, 158, 264) is incremented but never read
   or logged; \code{rpy\_from\_matrix} (\file{marker\_map.py}:57--62) is never called; the
   \code{SOLVEPNP\_ITERATIVE} fallback (lines 160, 184) cannot trigger on OpenCV $\geq$ 4.5.3, which both supported
@@ -791,7 +791,7 @@ All items were checked in the current code; none was changed.
   flight frames.
 \item \textbf{Covariance model} -- \file{aruco\_localizer.py}:272--284: isotropic $\sigma_p$ although PnP depth error
   is much larger than lateral error ($\delta Z/Z=\delta s/s$ versus $Z/f_x$ per pixel); roll and pitch get the yaw
-  value; no correlations. Acceptable because the EKF only reads entries 0 and 35 (\file{ekf\_node.py}:71--72), but the
+  value; no correlations. Acceptable because the EKF only reads entries 0 and 35 (\file{core/ekf\_node.py}:71--72), but the
   1~cm floor dominates almost always, so the EKF effectively sees a constant $\sigma_p$.
 \item \textbf{Tilt check not re-applied after LM} -- \file{aruco\_localizer.py}:163 refines the IPPE choice with LM
   but the $30^\circ$ tilt rule (238) is not re-checked on the refined pose; only the 3~px and jump tests remain.

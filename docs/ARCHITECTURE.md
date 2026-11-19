@@ -33,18 +33,23 @@ flowchart LR
 
 | Node | File | Role |
 |---|---|---|
-| `tello_driver` | `tello_driver/driver.py` | Link to the drone (djitellopy), video (`video_reader.py`), telemetry, takeoff + climb, landing; every command goes through `safety.py` |
+| `tello_driver` | `core/driver.py` | Link to the drone (djitellopy), video, telemetry, takeoff + climb, landing; every command goes through `core/safety.py`; no camera image = no takeoff, hover after 1 s, land after 5 s |
 | `aruco_localizer` | `aruco_localization/aruco_localizer.py` | One joint PnP over the corners of all visible markers → `/aruco/pose`; distance to the closest marker → `/aruco/nearest_marker` |
-| `tello_ekf` | `tello_driver/ekf_node.py` + `ekf_core.py` | Drone state estimate, TF `map → base_link` |
+| `tello_ekf` | `core/ekf_node.py` + `core/ekf_core.py` | Drone state estimate, TF `map → base_link` |
 | `marker_map_publisher` | `aruco_localization/marker_map_publisher.py` | Static TF of the markers and the camera mount; room scan and free space for RViz |
-| `session_recorder` | `tello_driver/session_recorder.py` | Saves every flight in `~/tello_ws/sessions/<time>/` |
-| missions / teleop | `goto_markers.py`, `marker_tour.py`, `strike.py`, `teleop.py` | Velocity requests on `/tello/cmd_vel_safe` |
+| `session_recorder` | `core/session_recorder.py` | Saves every flight in `~/tello_ws/sessions/<time>/` |
+| missions / teleop | `missions/tour.py` (tour + goto), `missions/patrol.py`, `missions/strike.py`, `core/teleop.py` | Velocity requests on `/tello/cmd_vel_safe`; all missions subclass `missions/base.py:Mission` |
 
 All nodes are started by `src/tello_driver/launch/real.launch.py` (except the mission / teleop, run in a second
-terminal). `mock:=true` replaces the Tello by `fake_tello.py` + `fake_world.py`: a virtual camera renders the real
+terminal). `mock:=true` replaces the Tello by `sim/fake_tello.py` + `sim/fake_world.py`: a virtual camera renders the real
 marker map and the drone moves with the identified dynamics; every other node is the real one.
 
-## What happens to a command (`safety.py`, 20 Hz)
+Package layout (`src/tello_driver/tello_driver/`, paths above are relative to it): `core/` runs on every flight,
+`missions/` holds the flight programs (base class `Mission` in `missions/base.py`), `identification/` the step test
+and the model fit, `sim/` the fake drone. Each `__init__.py` says why each of its files exists; the code book
+(chapters 1 and 5) separates the nominal pipeline from the safety layer.
+
+## What happens to a command (`core/safety.py`, 20 Hz)
 
 ```
 request (mission / teleop, zero after 0.5 s without one)

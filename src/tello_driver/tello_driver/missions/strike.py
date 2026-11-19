@@ -23,14 +23,14 @@ from pathlib import Path
 import numpy as np
 
 from aruco_localization.marker_map import load_marker_map
-from tello_driver.zone import clearance
-from tello_driver.step_test import RATE, Abort, StepTest, run, wrap
-from tello_driver.trajectory import Quintic, check
+from tello_driver.core.zone import clearance
+from tello_driver.missions.base import RATE, Abort, Mission, run, wrap
+from tello_driver.missions.trajectory import Quintic, check
 
 REPO = os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter"))
 
 
-class Strike(StepTest):
+class Strike(Mission):
     NODE_NAME = "tello_strike"
     PREFIX = "strike"
     MOVE_TO_ZONE_CENTRE = True
@@ -45,7 +45,7 @@ class Strike(StepTest):
         self.v_max, self.a_max = p("v_max", 0.8).value, p("a_max", 1.0).value
         self.u_max = p("u_max", 0.9).value  # command limit used by the planner (driver max_rc 80 ~ 1.0 m/s)
         self.kp, self.kp_z, self.kp_yaw = p("kp", 0.8).value, p("kp_z", 0.8).value, p("kp_yaw", 1.0).value
-        from tello_driver import model as M  # identified model (model.py); one K: the mean of forward and left
+        from tello_driver.core import model as M  # identified model (model.py); one K: the mean of forward and left
         self.K, self.tau, self.L_u = p("model_K", M.K_MEAN).value, p("model_tau", M.TAU_XY).value, p("model_L_u", M.L_U).value
         self.ki = p("ki", 0.3).value  # integral: cancels the drift (the Tello's own hold does not work here)
         self.integ = np.zeros(2)

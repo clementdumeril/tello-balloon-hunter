@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "tello_driver"))
-from tello_driver.ekf_core import DroneEKF, IX, IY, IZ, IYAW  # noqa: E402
+from tello_driver.core.ekf_core import DroneEKF, IX, IY, IZ, IYAW  # noqa: E402
 
 
 def load(folder):

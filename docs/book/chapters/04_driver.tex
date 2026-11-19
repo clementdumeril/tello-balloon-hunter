@@ -3,10 +3,10 @@
 \setlength{\emergencystretch}{3em}
 
 This chapter covers the node that talks to the drone, \code{tello\_driver}, and the three plain-Python modules it
-is built on: \file{safety.py} (the chain of guards every command goes through), \file{zone.py} (the obstacle-free
-flight zone) and \file{video\_reader.py} (an optional low-latency video decoder). It ends with the fake drone
-(\file{fake\_tello.py}, \file{fake\_world.py}) that replaces the Tello when the launch file is started with
-\code{mock:=true}, and the small \file{ros\_env.py} helper.
+is built on: \file{core/safety.py} (the chain of guards every command goes through), \file{core/zone.py} (the obstacle-free
+flight zone) and \file{core/video\_reader.py} (an optional low-latency video decoder). It ends with the fake drone
+(\file{sim/fake\_tello.py}, \file{sim/fake\_world.py}) that replaces the Tello when the launch file is started with
+\code{mock:=true}, and the small \file{core/ros\_env.py} helper.
 
 Every number quoted here comes from the code or from the configuration files at the time of writing. The line
 numbers in the code review refer to the same version.
@@ -46,12 +46,12 @@ The \code{djitellopy} link, connection checks, \code{streamon}, video watchdog &
 Conversion m/s $\rightarrow$ rc joystick points, axis signs & a property of the drone, not of a mission \\
 Command timeout (0.5 s) and the 20 Hz rc loop & the Tello keeps flying with the last rc value it received \\
 Takeoff, the climb to the marker height, landing, low battery & must work for every client \\
-Position hold, ceiling, height band, flight zone, wall ahead (\file{safety.py}) & must protect every client \\
+Position hold, ceiling, height band, flight zone, wall ahead (\file{core/safety.py}) & must protect every client \\
 Publishing \topic{/tello/rc\_sent} & the EKF needs what was \emph{really} sent, after the guards \\
 \midrule
 \textbf{Elsewhere} & \\
 \midrule
-State estimation (\file{ekf\_node.py}, \file{ekf\_core.py}) & heavy, testable on recorded flights (replay) \\
+State estimation (\file{core/ekf\_node.py}, \file{core/ekf\_core.py}) & heavy, testable on recorded flights (replay) \\
 Marker detection and PnP (\file{aruco\_localizer.py}) & vision, separate package \\
 Where to go: goals, paths, search behaviour (missions) & changes per task; may be wrong without risk \\
 Visualisation of the zone (\file{marker\_map\_publisher.py}) & RViz only, no effect on the flight \\
@@ -59,12 +59,12 @@ Visualisation of the zone (\file{marker\_map\_publisher.py}) & RViz only, no eff
 \end{tabularx}
 \end{center}
 
-Inside the driver there is a second split. \file{driver.py} contains the ROS wiring and the drone link;
-\file{safety.py} (class \code{CommandFilter}) contains every decision about the commands and imports no ROS module.
+Inside the driver there is a second split. \file{core/driver.py} contains the ROS wiring and the drone link;
+\file{core/safety.py} (class \code{CommandFilter}) contains every decision about the commands and imports no ROS module.
 The driver feeds it numbers (pose, velocity, drift, height, marker distance) and asks for the filtered command.
 The filter can therefore be run in a plain Python loop against a simulated drone; its docstrings mention such
 "stress tests" (seeds 27, 142, 203, 367), but the test script itself is not in the repository (see the code review).
-\file{zone.py} is ROS-free for the same reason, and the missions import it too.
+\file{core/zone.py} is ROS-free for the same reason, and the missions import it too.
 
 \subsection{Interfaces of the node}
 
@@ -123,7 +123,7 @@ The constructor does everything in a fixed order; each step matters.
 
 \begin{enumerate}[leftmargin=*,itemsep=2pt]
 \item \textbf{Parameters.} The main ones are listed in Table~\ref{tab:driver-params}. The model parameters default
-to the constants of \file{model.py} ($K_x=0.66$, $K_y=0.83$, $\tau=0.25$ s, $L_u=0.35$ s, $K_z=0.9$).
+to the constants of \file{core/model.py} ($K_x=0.66$, $K_y=0.83$, $\tau=0.25$ s, $L_u=0.35$ s, $K_z=0.9$).
 \item \textbf{Zone.} \code{self.zone = load\_zone(flight\_zone\_file)} (Section~\ref{sec:zonepy}); if a zone was
 loaded, its bounding rectangle is logged.
 \item \textbf{Safety filter.} A \code{CommandFilter} is built with the zone, the gains, the model and all the
@@ -158,7 +158,7 @@ telemetry dict \code{state}, then the four timers of Table~\ref{tab:timers}.
 \toprule
 \textbf{Parameter} & \textbf{Default} & \textbf{Meaning} \\
 \midrule
-\code{mock} & false & fake drone (\file{fake\_tello.py}) \\
+\code{mock} & false & fake drone (\file{sim/fake\_tello.py}) \\
 \code{lin\_gain} & $0.38/30\approx0.01267$ & m/s per rc point (measured Nov 7) \\
 \code{yaw\_gain} & $18^\circ/30\approx0.01047$ & rad/s per rc point \\
 \code{max\_rc} & 80 & saturation of every rc axis ($\approx1.01$ m/s) \\
@@ -173,11 +173,11 @@ telemetry dict \code{state}, then the four timers of Table~\ref{tab:timers}.
 \code{hold\_kp}, \code{hold\_kv}, \code{hold\_ki} & 0.8, 0.4, 0.15 & hold gains \\
 \code{hold\_vmax}, \code{hold\_kp\_z}, \code{hold\_drift\_ff} & 0.4 m/s, 1.0, true & hold limits, drift cancel \\
 \code{pose\_topic} & \topic{/ekf/pose} & pose for the hold and the guards \\
-\code{low\_latency\_video} & false & use \file{video\_reader.py} \\
+\code{low\_latency\_video} & false & use \file{core/video\_reader.py} \\
 \code{video\_timeout}, \code{network\_timeout} & 3 s, 30 s & watchdog, Wi-Fi wait \\
 \bottomrule
 \end{tabular}
-\caption{Parameters of \code{tello\_driver} (\file{driver.py}, lines 66--96 and 125--185).}
+\caption{Parameters of \code{tello\_driver} (\file{core/driver.py}, lines 66--96 and 125--185).}
 \label{tab:driver-params}
 \end{table}
 
@@ -434,7 +434,7 @@ $$
 
 \subsection{The model used inside the filter}
 
-All predictions use the identified horizontal model of \file{model.py} (drone with its cage, Nov 13 flights): per
+All predictions use the identified horizontal model of \file{core/model.py} (drone with its cage, Nov 13 flights): per
 axis, from a velocity command $u$ (m/s) to the real velocity $v$,
 $$
 \tau\,\dot v(t) = K\,u(t-L_u) - v(t), \qquad K_x = 0.66,\ K_y = 0.83,\ \tau = 0.25\ \text{s},\ L_u = 0.35\ \text{s},
@@ -725,7 +725,7 @@ the Euclidean distance from the cell to the nearest obstacle cell $\mathcal O$ (
 in the height range of the zone, or the outside of the room). Computing that for every cell at once is a
 \textbf{Euclidean distance transform} (EDT): given a binary image, it returns for every pixel the distance to the
 nearest pixel of the other class. OpenCV (\code{cv2.distanceTransform}, used by \file{tools/free\_zone.py}) and
-SciPy (\code{scipy.ndimage.distance\_transform\_edt}, used by \file{zone.py}) both implement it in linear time.
+SciPy (\code{scipy.ndimage.distance\_transform\_edt}, used by \file{core/zone.py}) both implement it in linear time.
 
 The gradient $\nabla c$ points in the direction where the distance to obstacles grows fastest, i.e.\ \emph{away
 from the nearest obstacle}; for an exact distance field $\lVert\nabla c\rVert=1$ almost everywhere, and the
@@ -734,7 +734,7 @@ direction is $\hat{\bm u} = \nabla c/\lVert\nabla c\rVert$. So the clearance is 
 \item the \textbf{driver's guard} (\code{grid\_guard}): how much room is left ($c - m$) and which direction is
 "towards the obstacle" ($-\hat{\bm u}$);
 \item the \textbf{missions' planning}: a waypoint or a takeoff point is acceptable only if
-$c \ge m + $ a few cm (e.g.\ \file{marker\_tour.py} uses $m+0.15$ m, \file{patrol.py} $m+0.1$ m);
+$c \ge m + $ a few cm (e.g.\ \file{missions/tour.py} uses $m+0.15$ m, \file{missions/patrol.py} $m+0.1$ m);
 \item \textbf{RViz}: \topic{/room/free\_space}, an occupancy grid with 100 where $c<m$.
 \end{itemize}
 The \textbf{margin} $m$ is the clearance under which a point is no-fly: the drone with its cage is about 0.2 m
@@ -873,7 +873,7 @@ no grid.
 \emph{"We delimited a zone. How? Is it only in the driver node? How does it work in ROS?"}
 
 The zone is three things: \textbf{data} (a YAML file, possibly with an \code{.npz}), \textbf{code} that interprets it
-(\file{zone.py}, a plain module), and a \textbf{parameter} that tells each node which file to use. There is no zone
+(\file{core/zone.py}, a plain module), and a \textbf{parameter} that tells each node which file to use. There is no zone
 topic and no zone server. The path is chosen once, in \file{real.launch.py}:
 
 \begin{lstlisting}
@@ -900,7 +900,7 @@ parameter \code{flight\_zone\_file} to two nodes of the launch, and \code{takeof
 \midrule
 \code{tello\_driver} & parameter \code{flight\_zone\_file} from the launch & \code{load\_zone} $\to$ \code{CommandFilter}: \textbf{enforcement} (band and zone guards) \\
 \code{marker\_map\_publisher} & same parameter from the launch & RViz only: boxes on \topic{/room/flight\_zone} (yellow: rectangle of a 2D file; green: the boxes of \file{flight\_zone\_3d.yaml}), \topic{/room/free\_space} from the \code{.npz} \\
-missions (\code{StepTest} and its subclasses: tour, goto, patrol, strike) & own parameter; if empty, \emph{asks the running driver} for its \code{flight\_zone\_file} (\code{GetParameters} service of the driver, function \code{driver\_zone\_file} in \file{step\_test.py}); else the default file & \code{load\_zone} again in their own process: \textbf{planning} (choosing targets with enough clearance, landing if the zone is left) \\
+missions (\code{Mission} and its subclasses: tour, goto, patrol, strike) & own parameter; if empty, \emph{asks the running driver} for its \code{flight\_zone\_file} (\code{GetParameters} service of the driver, function \code{driver\_zone\_file} in \file{missions/base.py}); else the default file & \code{load\_zone} again in their own process: \textbf{planning} (choosing targets with enough clearance, landing if the zone is left) \\
 \code{tello\_teleop} & does not know the zone & protected by the driver \\
 \bottomrule
 \end{tabularx}
@@ -1077,70 +1077,70 @@ flights are for.
 
 \begin{review}
 \begin{enumerate}[leftmargin=*,itemsep=3pt]
-\item \textcolor{OliveGreen}{\textbf{[Fixed in v1.1, see Appendix~\ref{app:review}.]}} \textbf{A zone file that fails to load disables the zone silently.} \file{zone.py}:87--88 returns
-\code{None} on \emph{any} exception, and \file{driver.py}:82--84 then simply logs nothing; the driver flies with
+\item \textcolor{OliveGreen}{\textbf{[Fixed in v1.1, see Appendix~\ref{app:review}.]}} \textbf{A zone file that fails to load disables the zone silently.} \file{core/zone.py}:87--88 returns
+\code{None} on \emph{any} exception, and \file{core/driver.py}:82--84 then simply logs nothing; the driver flies with
 no band and no zone guard. Same for \file{real.launch.py}:77--78 (\code{auto} with a missing file gives ""). A
 typo in a path or a corrupt \code{.npz} removes the main safety layer without a warning. Suggest: log an error and
 refuse to start when \code{flight\_zone\_file} is non-empty but \code{load\_zone} fails.
 
-\item \textbf{The horizontal hold's 0.12 m tolerance is dead.} \file{safety.py}:63--64 clears \code{hold\_target}
-whenever $\sigma_{xy}>0.06$; \file{safety.py}:185 then holds only if a target exists or $\sigma_{xy}<0.06$. So
+\item \textbf{The horizontal hold's 0.12 m tolerance is dead.} \file{core/safety.py}:63--64 clears \code{hold\_target}
+whenever $\sigma_{xy}>0.06$; \file{core/safety.py}:185 then holds only if a target exists or $\sigma_{xy}<0.06$. So
 between 0.06 and 0.12 m (allowed by \code{pose\_valid(0.4, 0.12)}, line 176) the hold is never active. Either the
 intent was to keep an existing target up to 0.12 m (then do not clear on $\sigma$ in \code{on\_pose}), or 0.12
 should read 0.06.
 
-\item \textbf{The height hold ignores $\sigma_z$.} \file{safety.py}:65--66 clears \code{hold\_zt} when
+\item \textbf{The height hold ignores $\sigma_z$.} \file{core/safety.py}:65--66 clears \code{hold\_zt} when
 $\sigma_z>0.08$, but lines 201--205 immediately recreate it from the uncertain $z$ on the next cycle (the check
 at line 176 is on $\sigma_{xy}$ only). The hold then follows the estimate instead of holding a height. Suggest a
 $\sigma_z$ condition before taking a new height target.
 
-\item \textbf{The zone guard uses the finite-difference velocity.} \file{safety.py}:275 calls
+\item \textbf{The zone guard uses the finite-difference velocity.} \file{core/safety.py}:275 calls
 \code{velocity\_xy()} (0.6 s window, lags about 0.3 s, and a pose jump produces a large spurious velocity, hence a
 spurious brake), while the hold uses the fresher EKF velocity when available (line 180). Using the EKF velocity
 here too would make the 1 s prediction consistent with the hold.
 
-\item \textbf{band\_guard trusts $(x,y)$ without checking $\sigma_{xy}$.} \file{safety.py}:235--242 checks the age
+\item \textbf{band\_guard trusts $(x,y)$ without checking $\sigma_{xy}$.} \file{core/safety.py}:235--242 checks the age
 and $\sigma_z$, then calls \code{height\_limits(z, *self.pose\_xy)}. With the 3D zone, a wrong horizontal estimate
 picks the wrong floor (1.55 m instead of 2.08 m over the furniture, or the reverse, pushing the drone up). Suggest
 falling back to the global $z_{\min}$ of the most restrictive case (2.08 m near the boundary) when
 $\sigma_{xy}$ is large.
 
-\item \textbf{Mock start point is wrong for the 3D zone.} \file{driver.py}:141--146 uses the bounding rectangle.
+\item \textbf{Mock start point is wrong for the 3D zone.} \file{core/driver.py}:141--146 uses the bounding rectangle.
 With the main marker wall on the west, $\bm n=(1,0)$, and for \file{flight\_zone\_3d.yaml} the fake drone starts at
 $x = 0.205+(1.145-0.3) \approx 1.05$ m, i.e.\ under the \code{above\_east\_furniture} box, where the lower layer is
 no-fly: after the climb to 1.92 m the band guard pushes up and the zone guard pushes west at the same time. Use a
 point with clearance (e.g.\ the maximum of \code{zone["grid"]}).
 
-\item \textcolor{OliveGreen}{\textbf{[Fixed in v1.1, see Appendix~\ref{app:review}.]}} \textbf{A NaN request kills the node.} \file{driver.py}:325--326 calls \code{clip}, i.e.\ \code{round(v)}
-(\file{safety.py}:125); \code{round(float("nan"))} raises \code{ValueError} (checked) inside the subscription
+\item \textcolor{OliveGreen}{\textbf{[Fixed in v1.1, see Appendix~\ref{app:review}.]}} \textbf{A NaN request kills the node.} \file{core/driver.py}:325--326 calls \code{clip}, i.e.\ \code{round(v)}
+(\file{core/safety.py}:125); \code{round(float("nan"))} raises \code{ValueError} (checked) inside the subscription
 callback, which ends \code{rclpy.spin} (the drone then lands through \code{shutdown}). Reject non-finite values
 (\code{math.isfinite}) in \code{on\_cmd}.
 
-\item \textbf{Dead \code{busy} argument.} \file{driver.py}:332 returns while \code{busy} is locked, so the
+\item \textbf{Dead \code{busy} argument.} \file{core/driver.py}:332 returns while \code{busy} is locked, so the
 \code{busy=self.busy.locked()} passed at line 341 is always \code{False}; the \code{busy} branch of
-\code{position\_hold} (\file{safety.py}:165) is unreachable from the driver.
+\code{position\_hold} (\file{core/safety.py}:165) is unreachable from the driver.
 
 \item \textbf{Stale comments about the 3D zone.} \file{config/flight\_zone\_3d.yaml}:1--2 says "Not used by the driver
 yet", but \file{real.launch.py}:73--74 enforces it with \code{flight\_zone:=3d} (commit \code{aab4639}); the
 comment in \file{marker\_map\_publisher.py}:68 still calls it "proposed".
 
 \item \textbf{Launch help disagrees with the code.} \file{real.launch.py}:158 says "no climbing above max-0.2"; the
-ceiling uses $h_{\max}-0.15$ (\file{safety.py}:215).
+ceiling uses $h_{\max}-0.15$ (\file{core/safety.py}:215).
 
-\item \textbf{Obsolete re-exports.} \file{driver.py}:30 and 33 import \code{FakeFrameRead}, \code{clearance},
+\item \textbf{Obsolete re-exports.} \file{core/driver.py}:30 and 33 import \code{FakeFrameRead}, \code{clearance},
 \code{wrap} "re-exported: missions import them here"; no module imports them from \code{driver} any more (the
 missions import \code{tello\_driver.zone} directly). They can be removed.
 
-\item \textbf{Fake vertical and yaw dynamics differ from \file{model.py}.} \file{fake\_world.py}:195 uses a vertical
+\item \textbf{Fake vertical and yaw dynamics differ from \file{core/model.py}.} \file{sim/fake\_world.py}:195 uses a vertical
 gain 1 (\code{ud * LIN\_GAIN}) while the hold inverts $K_z=0.9$; lines 191 and 205 apply $L_u=0.35$ s and
 $\tau=0.25$ s to yaw, whereas the identified yaw model is $L=0.2$ s, $\tau\approx0$.
 
 \item \textbf{The offline tests are not in the repository.} \file{docs/ARCHITECTURE.md}:62--63 and the docstrings of
-\file{safety.py}/\file{zone.py} cite 400 randomized flights and numbered seeds, but no test file is tracked
+\file{core/safety.py}/\file{core/zone.py} cite 400 randomized flights and numbered seeds, but no test file is tracked
 (\code{git ls-files} lists none). The ROS-free design of \code{CommandFilter} is only worth it if that harness is
 kept; commit it (e.g.\ \file{src/tello\_driver/test/}).
 
-\item \textbf{No error handling in the emergency service.} \file{driver.py}:437--441 calls
+\item \textbf{No error handling in the emergency service.} \file{core/driver.py}:437--441 calls
 \code{tello.emergency()} without \code{try}: if the link is down the service call fails with an exception instead of
 an answer. Minor, but this is the one command that must always answer.
 \end{enumerate}

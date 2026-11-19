@@ -12,17 +12,20 @@ front of a marker, the corner of a patrol path, a strike point), and publish a v
 This chapter documents every mission file, function by function:
 
 \begin{itemize}[nosep]
-  \item \file{trajectory.py}: minimum-jerk (quintic) trajectories and their safety check;
-  \item \file{marker\_tour.py}: the \code{MarkerTour} node and its reusable pieces (feasible points in front of a
-        marker, turning to find markers, the set-point controller \code{goto});
-  \item \file{goto\_markers.py}: \code{tello\_goto 49 35}, a thin subclass of \code{MarkerTour};
-  \item \file{patrol.py}: laps around the zone, ``type a marker number'', lap statistics;
-  \item \file{strike.py}: fast planned legs and strike / retreat, the only user of \file{trajectory.py};
-  \item \file{home.py} and \file{teleop.py}: the takeoff pad and the keyboard teleop.
+  \item \file{missions/base.py}: the \code{Mission} base class (inputs, takeoff, safety checks, 20~Hz loop);
+  \item \file{missions/trajectory.py}: minimum-jerk (quintic) trajectories and their safety check;
+  \item \file{missions/tour.py}: the \code{MarkerTour} node and its reusable pieces (feasible points in front of a
+        marker, turning to find markers, the set-point controller \code{goto}), and \code{GotoMarkers}
+        (\code{tello\_goto 49 35}), a thin subclass of it;
+  \item \file{missions/patrol.py}: laps around the zone, ``type a marker number'', lap statistics;
+  \item \file{missions/strike.py}: fast planned legs and strike / retreat, the only user of \file{missions/trajectory.py};
+  \item \file{core/home.py} and \file{core/teleop.py}: the takeoff pad and the keyboard teleop.
 \end{itemize}
 
 All paths below are relative to \file{src/tello\_driver/tello\_driver/}. Line numbers refer to the version of the
-code this chapter was written against (commit \code{aab4639}).
+code this chapter was written against (commit \code{aab4639}); since the restructure of November 19 (files moved
+into \file{core/}, \file{missions/}, \file{identification/}, \file{sim/}, Section~\ref{sec:layout}) the names
+and the logic are unchanged but the line numbers have shifted.
 
 \begin{intuition}
 A mission is a loop at 20~Hz that does three things: (1) read the latest pose estimate, (2) compute an error to a
@@ -38,22 +41,29 @@ model feedforward} (\code{Strike.track}, used only by \code{tello\_strike}).
 
 \subsection{Who inherits from whom}
 
-All missions are subclasses of \code{StepTest} (\file{step\_test.py}), the identification-flight node. This is
-historical: the identification flight was the first program that had to take off, hold a start point, react to
-keys and land safely, so the later missions inherited that machinery instead of copying it.
+All missions are subclasses of \code{Mission} (\file{missions/base.py}). Historically this machinery lived in
+\code{StepTest}, the identification-flight node: it was the first program that had to take off, hold a start
+point, react to keys and land safely, so the later missions inherited from it, and an identification class was the
+parent of the strike. On November 19 it was extracted: \code{Mission} keeps everything generic (inputs, takeoff
+and start point, \code{safety()}, \code{run()}, search, \code{return\_home()}, logs), and \code{StepTest}
+(\file{identification/step\_test.py}) is now one more subclass that only adds the doublets, the schedules and the
+fit after landing. A subclass sets a few class constants (\code{NODE\_NAME}, \code{PREFIX},
+\code{POSE\_TOPIC}, \code{MOVE\_TO\_ZONE\_CENTRE}, \code{MIN\_BATTERY}) and overrides \code{mission()} (the flight
+after \code{prepare()}) or \code{main()}; \code{after\_landing()} runs after a flight that ended normally.
 
 \begin{center}
 \begin{tabular}{@{}lll@{}}
 \toprule
 Class & File & Parent \\
 \midrule
-\code{StepTest} & \file{step\_test.py} & \code{rclpy.node.Node} \\
-\code{MarkerTour} & \file{marker\_tour.py} & \code{StepTest} \\
-\code{GotoMarkers} & \file{goto\_markers.py} & \code{MarkerTour} \\
-\code{Patrol} & \file{patrol.py} & \code{MarkerTour} \\
-\code{PatrolNode} & \file{patrol.py} & \code{Patrol} \\
-\code{Strike} & \file{strike.py} & \code{StepTest} (\emph{not} \code{MarkerTour}) \\
-\code{Teleop} & \file{teleop.py} & \code{rclpy.node.Node} (standalone) \\
+\code{Mission} & \file{missions/base.py} & \code{rclpy.node.Node} \\
+\code{StepTest} & \file{identification/step\_test.py} & \code{Mission} \\
+\code{MarkerTour} & \file{missions/tour.py} & \code{Mission} \\
+\code{GotoMarkers} & \file{missions/tour.py} & \code{MarkerTour} \\
+\code{Patrol} & \file{missions/patrol.py} & \code{MarkerTour} \\
+\code{PatrolNode} & \file{missions/patrol.py} & \code{Patrol} \\
+\code{Strike} & \file{missions/strike.py} & \code{Mission} (\emph{not} \code{MarkerTour}) \\
+\code{Teleop} & \file{core/teleop.py} & \code{rclpy.node.Node} (standalone) \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -61,7 +71,7 @@ Class & File & Parent \\
 The executables are declared in \file{src/tello\_driver/setup.py}:
 \code{tello\_marker\_tour}, \code{tello\_goto}, \code{tello\_patrol}, \code{tello\_strike} and
 \code{tello\_teleop}. Each \code{main()} calls
-\code{run(cls)} from \file{step\_test.py} (except the teleop, which has its own loop).
+\code{run(cls)} from \file{missions/base.py} (except the teleop, which has its own loop).
 
 \subsection{How the EKF is used: which topic each mission reads}
 
@@ -70,12 +80,12 @@ Essentially yes, with two important refinements: the missions also read the \emp
 whether the EKF pose is backed by a real measurement, and the EKF pose is discarded when its uncertainty is too
 large.
 
-\code{StepTest.\_\_init\_\_} subscribes to the topic named by the class attribute \code{POSE\_TOPIC}
-(overridable with the ROS parameter \code{pose\_topic}). \code{StepTest} itself uses \topic{/aruco/pose} (the
+\code{Mission.\_\_init\_\_} subscribes to the topic named by the class attribute \code{POSE\_TOPIC}
+(overridable with the ROS parameter \code{pose\_topic}). \code{Mission} itself uses \topic{/aruco/pose} (the
 identification must not use the EKF, whose model is what is being identified), but every mission overrides it:
-\code{MarkerTour.POSE\_TOPIC = "/ekf/pose"} (\file{marker\_tour.py}:38) and
-\code{Strike.POSE\_TOPIC = "/ekf/pose"} (\file{strike.py}:37). The EKF publishes \topic{/ekf/pose} at 30~Hz as
-soon as it is initialised, \emph{predicted} even without markers (\file{ekf\_node.py}:56,98).
+\code{MarkerTour.POSE\_TOPIC = "/ekf/pose"} (\file{missions/tour.py}:38) and
+\code{Strike.POSE\_TOPIC = "/ekf/pose"} (\file{missions/strike.py}:37). The EKF publishes \topic{/ekf/pose} at 30~Hz as
+soon as it is initialised, \emph{predicted} even without markers (\file{core/ekf\_node.py}:56,98).
 
 \begin{center}
 \small
@@ -100,26 +110,26 @@ Topic & Used for & Tour/Goto & Patrol & Strike \\
 \begin{keypoint}
 Every mission flies on \topic{/ekf/pose}. But the marker tour and the patrol additionally gate
 \emph{translations} on the age of the last \topic{/aruco/pose}: the EKF prediction may bridge 0.7--1~s without a
-marker, never more (the comment in \file{marker\_tour.py}:201--202 recalls a flight where the mission flew 0.7~m
+marker, never more (the comment in \file{missions/tour.py}:201--202 recalls a flight where the mission flew 0.7~m
 forward on prediction alone). \code{Strike} does not subscribe to \topic{/aruco/pose}: it trusts the EKF pose as
-long as \code{StepTest.on\_pose} accepts it, i.e.\ while its standard deviation is below
+long as \code{Mission.on\_pose} accepts it, i.e.\ while its standard deviation is below
 \code{max\_pose\_sigma} = 0.15~m.
 \end{keypoint}
 
-The filter in \code{StepTest.on\_pose} (\file{step\_test.py}:159) matters: with
+The filter in \code{Mission.on\_pose} (\file{missions/base.py}) matters: with
 $\sigma_{xy} = \sqrt{\max(P_{xx}, P_{yy})}$ read from the covariance, a message with $\sigma_{xy} > 0.15$~m is
 dropped, so \code{self.pose} is not refreshed and \code{pose\_age()} grows. The yaw is extracted from the
 quaternion, $\psi = \operatorname{atan2}(2(q_w q_z + q_x q_y), 1 - 2(q_y^2+q_z^2))$, and the offset between that
 yaw and the IMU heading is stored in \code{yaw\_offset} for later use when markers are out of view.
 
 % =====================================================================================================
-\section{The inherited toolbox (\texorpdfstring{\texttt{StepTest}}{StepTest})}
+\section{The inherited toolbox (\texorpdfstring{\texttt{Mission}}{Mission})}
 
-\code{StepTest} is documented with the identification in another chapter; here are only the methods every mission
+\code{Mission} is documented with the identification in another chapter; here are only the methods every mission
 relies on, because they define the timing and the failure behaviour of all the code below.
 
 \func{run}{(seconds, fn, restart\_on\_loss=False, search\_on\_loss=True) -> None}
-The 20~Hz loop (\code{RATE = 20.0}, \file{step\_test.py}:42). At each tick it calls \code{safety()}, then
+The 20~Hz loop (\code{RATE = 20.0}, \file{missions/base.py}). At each tick it calls \code{safety()}, then
 \code{fn()}; \code{fn} sends one command and returns \code{None} to continue or \code{False} to stop. Between
 ticks it spins ROS (\code{rclpy.spin\_once}) until the next deadline, so callbacks (poses, telemetry) are
 processed. With \code{search\_on\_loss=True} (the default), a pose older than 1~s suspends \code{fn} and calls
@@ -131,7 +141,7 @@ default.
 Checked every tick: a key press (\code{check\_keys}), battery $<20\,\%$, distance to the obstacle grid
 ($<$ margin $-0.2$~m), the mission rectangle \code{self.fence} $\pm$ \code{fence\_tol}, the height limits (once
 reached), and finally \code{pose\_age() > lost\_max}. An \code{Abort} propagates up to \code{run(cls)} in
-\file{step\_test.py}:507, whose \code{finally} publishes a zero \code{Twist} and calls the \code{land} service.
+\file{missions/base.py}, whose \code{finally} publishes a zero \code{Twist} and calls the \code{land} service.
 \emph{This is how ``landing on lost markers'' is implemented}: there is no explicit landing code in the
 missions, only a timeout that raises.
 
@@ -204,7 +214,7 @@ The jerk is $60\,d/T^3$ at both ends and $-30\,d/T^3$ in the middle: finite ever
 quintic (a trapezoidal velocity profile has infinite jerk at its corners and makes a multirotor pitch abruptly).
 
 \func{s\_profile}{(r) -> (s, s', s'')}
-Evaluates the three polynomials above, with $r$ first clamped to $[0,1]$ (\file{trajectory.py}:14--18). The
+Evaluates the three polynomials above, with $r$ first clamped to $[0,1]$ (\file{missions/trajectory.py}:14--18). The
 clamp means that after $T$ the trajectory simply stays at $\mathbf p_1$ with zero velocity: \code{Strike.track}
 relies on this when it keeps calling \code{traj.at(t)} during its settling time.
 
@@ -228,7 +238,7 @@ $$
 The docstring explains why: without it the command saturated and the drone lagged 24~cm behind in simulation.
 
 The default \code{tau=0.55}, \code{K=1.15} are an older model; \code{Strike} always overrides them with
-\code{qkw()} = \code{\{u\_max: 0.9, tau: M.TAU\_XY = 0.25, K: M.K\_MEAN = 0.745\}} from \file{model.py}.
+\code{qkw()} = \code{\{u\_max: 0.9, tau: M.TAU\_XY = 0.25, K: M.K\_MEAN = 0.745\}} from \file{core/model.py}.
 
 \paragraph{Concrete numbers.} With the strike defaults $v_{\max}=0.8$, $a_{\max}=1.0$, $u_{\max}=0.9$,
 $K=0.745$, $\tau = 0.25$ (computed with the same code):
@@ -295,7 +305,7 @@ approach to 0.9~m, hold 1~s, back off to 1.6~m, next one; then back to the start
 also the library on which \code{tello\_goto} and \code{tello\_patrol} are built.
 
 \func{clip}{(v, m) -> float}
-$\max(-m, \min(m, v))$: symmetric saturation. Also imported by \file{patrol.py}.
+$\max(-m, \min(m, v))$: symmetric saturation. Also imported by \file{missions/patrol.py}.
 
 \func{MarkerTour.\_\_init\_\_}{() -> None}
 Declares the parameters, with their defaults:
@@ -342,7 +352,7 @@ The axis-aligned mission rectangle. Start from \code{room\_box} shrunk by the ma
 at its normal $\mathbf n = R_{:,3}$: if $n_x > 0.9$ the marker is on a wall facing $+x$ (west wall), so
 $x_{\min} \leftarrow \max(x_{\min}, t_x + 0.6)$; symmetrically for $-x$, $+y$, $-y$. Finally intersect with the
 zone rectangle from the room scan (\code{x\_min}\dots\code{y\_max} of \file{config/flight\_zone\_band.yaml}).
-An empty rectangle raises \code{Abort}. \code{StepTest.safety} lands if the drone leaves this rectangle by more
+An empty rectangle raises \code{Abort}. \code{Mission.safety} lands if the drone leaves this rectangle by more
 than \code{fence\_tol} (0.3~m; 1.0~m for goto and patrol, which can take off anywhere).
 
 \subsection{Where to stop in front of a marker}
@@ -426,7 +436,7 @@ Then the control law. With the EKF pose $(x,y,z,\psi)$ and target $(x_t,y_t,z_t)
   \item World-frame velocity, minus the drift learnt by the EKF (if received in the last 0.5~s):
         $$ \mathbf v^w = v\,\frac{\mathbf e}{d} - \boldsymbol\delta . $$
   \item Rotation to the body frame and inversion of the static gains of the model
-        ($K_X = 0.66$ forward, $K_Y = 0.83$ left, from \file{model.py}):
+        ($K_X = 0.66$ forward, $K_Y = 0.83$ left, from \file{core/model.py}):
 $$
 \begin{bmatrix} u_x \\ u_y \end{bmatrix} =
 \begin{bmatrix} 1/K_X & 0 \\ 0 & 1/K_Y \end{bmatrix}
@@ -495,13 +505,13 @@ off to \code{p} (tol 0.15). Then \code{goto} the start point, \code{return\_home
 
 \subsection{Landing when markers are lost}
 
-There is no ``land'' call in \file{marker\_tour.py}. Three mechanisms combine:
+There is no ``land'' call in \file{missions/tour.py}. Three mechanisms combine:
 \begin{enumerate}[nosep]
   \item Short loss ($>0.7$~s since the last marker): \code{goto} hovers, the driver's position hold keeps the
         drone in place on the EKF prediction.
   \item Longer loss ($>1$~s): \code{goto} turns towards \code{look\_at} (the marker it is going to) and sweeps
         $\pm40^\circ$.
-  \item \code{StepTest.safety} raises \code{Abort} when \code{pose\_age() > lost\_max} (12~s for the tour),
+  \item \code{Mission.safety} raises \code{Abort} when \code{pose\_age() > lost\_max} (12~s for the tour),
         and \code{run(cls)} lands in its \code{finally}.
 \end{enumerate}
 Because \code{pose\_age()} is the age of the last \emph{accepted EKF} pose, the 12~s count starts when the EKF's
@@ -532,13 +542,13 @@ camera sweeps every wall). Typing a marker number and ENTER interrupts the lap: 
 
 The author asked why there are several patrols. There are three distinct things with that name:
 \begin{enumerate}[nosep]
-  \item \code{Patrol.patrol()} in \file{patrol.py}:143 --- the rectangular laps of \code{tello\_patrol}, built on
+  \item \code{Patrol.patrol()} in \file{missions/patrol.py}:143 --- the rectangular laps of \code{tello\_patrol}, built on
         \code{MarkerTour}, reactive control, continuous yaw rotation.
-  \item \code{Strike.patrol()} in \file{strike.py}:144 --- a \emph{different} mission: straight left-right legs
+  \item \code{Strike.patrol()} in \file{missions/strike.py}:144 --- a \emph{different} mission: straight left-right legs
         across the zone, facing the marker wall, each leg a planned quintic; selected by the \code{mode}
         parameter of \code{tello\_strike} (\code{mode:=patrol}, \code{strike}, or the default
         \code{patrol,strike}). It is the ``patroller of the final demo'' rehearsal.
-  \item \code{PatrolNode} in \file{patrol.py}:274 --- not a mission, a two-line subclass of \code{Patrol} that adds
+  \item \code{PatrolNode} in \file{missions/patrol.py}:274 --- not a mission, a two-line subclass of \code{Patrol} that adds
         a second \topic{/aruco/pose} subscription counting poses (\code{pose\_count}) for the lap statistics.
         \code{main()} runs \code{PatrolNode}, not \code{Patrol}.
 \end{enumerate}
@@ -549,16 +559,16 @@ They do not share code; they were written at different times for different purpo
 
 The author's question: \emph{``In patrol there is strike, self.mode, self.strike, self.retreat, self.track\dots\
 why don't we use the trajectory module already?''} The attributes \code{self.mode}, \code{self.strike},
-\code{self.track}, \code{retreat\_d} do not exist in \file{patrol.py}; they belong to \file{strike.py}, which
+\code{self.track}, \code{retreat\_d} do not exist in \file{missions/patrol.py}; they belong to \file{missions/strike.py}, which
 \emph{does} use the trajectory module (\code{from tello\_driver.trajectory import Quintic, check},
-\file{strike.py}:28; every move of \code{Strike} is \code{self.track(Quintic(...))}). \file{patrol.py} imports
-only \code{MarkerTour}, \code{clip}, \code{model}, \code{step\_test} and \code{teleop.read\_key}; \file{marker\_tour.py}
-does not import \file{trajectory.py} either. So:
+\file{missions/strike.py}:28; every move of \code{Strike} is \code{self.track(Quintic(...))}). \file{missions/patrol.py} imports
+only \code{MarkerTour}, \code{clip}, \code{model}, \code{step\_test} and \code{teleop.read\_key}; \file{missions/tour.py}
+does not import \file{missions/trajectory.py} either. So:
 
 \begin{center}
 \begin{tabular}{@{}lll@{}}
 \toprule
-Mission & Motion law & Uses \file{trajectory.py} \\
+Mission & Motion law & Uses \file{missions/trajectory.py} \\
 \midrule
 \code{tello\_marker\_tour}, \code{tello\_goto} & \code{MarkerTour.goto} (set point, saturated P) & no \\
 \code{tello\_patrol} & own lap law + \code{goto} for the marker visit & no \\
@@ -568,7 +578,7 @@ Mission & Motion law & Uses \file{trajectory.py} \\
 \end{center}
 
 Reasons visible in the code for not using it in the patrol: a quintic is \emph{rest-to-rest}, while the patrol
-explicitly does not stop at corners (``corner reached: next one (no stop)'', \file{patrol.py}:187); the patrol
+explicitly does not stop at corners (``corner reached: next one (no stop)'', \file{missions/patrol.py}:187); the patrol
 rotates continuously, which the strike tracker does not model (it holds a fixed heading); and the patrol must keep
 going when markers drop out (it then turns blind without translating), which a time-indexed reference handles
 only by freezing. Nothing prevents using \code{Quintic} for the ``fly in front of marker \code{mid}'' part of
@@ -596,7 +606,7 @@ the last second.
 How many frames contained marker \code{mid} in the last \code{window} seconds, and its mean $u$.
 
 \func{check\_keys}{() -> None, raises Abort}
-Overrides \code{StepTest.check\_keys} (called by \code{safety()} every tick). Drains all pending keys: digits
+Overrides \code{Mission.check\_keys} (called by \code{safety()} every tick). Drains all pending keys: digits
 accumulate in \code{buf}; backspace erases; ENTER with a number sets \code{self.request} (if the id is in the
 map); ENTER alone prints the current lap statistics; \code{+}/\code{-} change the patrol speed by
 0.05~m/s within $[0.05, 0.8]$; \code{*}/\code{/} the turning speed by 5~deg/s within $[0, 90]$; anything else
@@ -656,7 +666,7 @@ $(\text{pose\_count} - \text{poses0})/\text{duration}$, path error RMS and max, 
 stretch. The docstring's tuning recipe: raise the speeds while these numbers stay good.
 
 \func{on\_pose}{(m) -> None}
-Calls \code{StepTest.on\_pose}, then stores $\sigma_{xy} = \sqrt{\max(P_{xx},P_{yy})}$ from the EKF covariance
+Calls \code{Mission.on\_pose}, then stores $\sigma_{xy} = \sqrt{\max(P_{xx},P_{yy})}$ from the EKF covariance
 (also for poses rejected as too uncertain, which is what the statistic should show).
 
 \subsection{Finding a typed marker}
@@ -681,7 +691,7 @@ print the partial lap; \code{find(mid)}. The only exits are exceptions (key, bat
 marker not found), all of which land.
 
 \func{close}{() -> None}
-Closes \file{laps.csv} then the \code{StepTest} files.
+Closes \file{laps.csv} then the \code{Mission} files.
 
 \func{\_count\_marker\_poses}{(node) -> None}
 Adds a \topic{/aruco/pose} subscription whose callback increments \code{node.pose\_count} and sets
@@ -835,7 +845,7 @@ Writes \file{results.csv} (kind, id, distance, planned and real time, RMS and ma
 prints it.
 
 \func{close}{() -> None}
-\code{StepTest.close()} then closes \file{tracking.csv}.
+\code{Mission.close()} then closes \file{tracking.csv}.
 
 \subsection{State machine of \texorpdfstring{\texttt{tello\_strike}}{tello\_strike}}
 
@@ -867,12 +877,12 @@ any & key, battery, obstacle, \code{pose\_age} $>15$~s & $\rightarrow$ LAND \\
 Reads \file{config/home.yaml} (path from \code{TELLO\_REPO}, default \file{\textasciitilde/tello\_ws/src/tello-balloon-hunter}):
 returns \code{\{x, y, yaw\_deg, marker, samples\}} (pad marker default 48) or \code{None} if the file is missing,
 malformed, or has no \code{x}/\code{y}. The file is written by \file{tools/set\_home.py} from the first poses of
-real climbs. Missions use it through \code{StepTest.return\_home}; the EKF uses it to initialise on the pad.
+real climbs. Missions use it through \code{Mission.return\_home}; the EKF uses it to initialise on the pad.
 
 % =====================================================================================================
 \section{Keyboard teleop (\texorpdfstring{\texttt{teleop.py}}{teleop.py})}
 
-The teleop is a standalone node, not a \code{StepTest}: no pose, no EKF, no mission safety; it relies entirely
+The teleop is a standalone node, not a \code{Mission}: no pose, no EKF, no mission safety; it relies entirely
 on the driver's safety chain (position hold, zone, ceiling, wall guard, 0.5~s command watchdog).
 
 \func{Teleop.\_\_init\_\_}{() -> None}
@@ -912,7 +922,7 @@ Reads raw bytes with \code{os.read} on the stdin file descriptor (not \code{sys.
 would swallow the rest of an arrow escape sequence and \code{select} would see nothing). Keeps unread bytes in
 the module-level \code{\_pending}; an \code{ESC} prefix is read as a 3-byte sequence mapped through \code{ARROWS}
 (both \code{ESC [ A} and \code{ESC O A} forms); other bytes are returned one at a time, lower-cased. This function
-is reused by \code{StepTest} and \code{Patrol} for their keyboard handling.
+is reused by \code{Mission} and \code{Patrol} for their keyboard handling.
 
 \func{main}{() -> None}
 Sets the local-only DDS environment (\code{local\_ros\_env}), initialises \code{rclpy} \emph{without} its signal
@@ -949,65 +959,65 @@ Marker loss & hover 0.7~s, search 1~s & turn blind & freeze reference, hover \\
 All items were checked in the code; line numbers refer to commit \code{aab4639}.
 \begin{enumerate}[leftmargin=*]
   \item \textbf{Two implementations of ``point in front of a marker''.} \code{MarkerTour.feasible}
-        (\file{marker\_tour.py}:140) and \code{Strike.point\_in\_front} (\file{strike.py}:167) do the same
+        (\file{missions/tour.py}:140) and \code{Strike.point\_in\_front} (\file{missions/strike.py}:167) do the same
         5~cm back-off loop with the same $+0.15$~m, but the first passes the height to \code{clearance} (3D
         layers) and handles the field-of-view distance and the upper-layer trick, the second uses the
         height-independent smallest layer via \code{roomy}. A strike target behind the east furniture is
         therefore placed farther than the tour would. One shared function would remove the divergence.
-  \item \textbf{Three turning controllers.} \code{goto(yaw\_only=True)} (\file{marker\_tour.py}:209--231,
-        gain 0.9, max 0.5, $5^\circ$), \code{Strike.turn\_to} (\file{strike.py}:114, gain 1.2, max 0.9, $6^\circ$)
-        and \code{StepTest.recentre}'s yaw term. Same job, different gains and tolerances.
+  \item \textbf{Three turning controllers.} \code{goto(yaw\_only=True)} (\file{missions/tour.py}:209--231,
+        gain 0.9, max 0.5, $5^\circ$), \code{Strike.turn\_to} (\file{missions/strike.py}:114, gain 1.2, max 0.9, $6^\circ$)
+        and \code{Mission.recentre}'s yaw term. Same job, different gains and tolerances.
   \item \textbf{Inconsistent model inversion.} \code{goto} and \code{Patrol} divide body commands by
-        $K_X = 0.66$ and $K_Y = 0.83$ (\file{marker\_tour.py}:255, \file{patrol.py}:201); \code{Strike.track}
-        uses one mean $K = 0.745$ in the world frame and rotates afterwards (\file{strike.py}:91--99), so its
+        $K_X = 0.66$ and $K_Y = 0.83$ (\file{missions/tour.py}:255, \file{missions/patrol.py}:201); \code{Strike.track}
+        uses one mean $K = 0.745$ in the world frame and rotates afterwards (\file{missions/strike.py}:91--99), so its
         forward feedforward is 11\,\% too small and its lateral one 11\,\% too large. Rotating first and dividing
         per axis would match the identified model.
   \item \textbf{The planner caps strike speed at $\approx$0.66~m/s.} With \code{u\_max} 0.9 and $K = 0.745$
-        (\file{strike.py}:46,49; \file{trajectory.py}:30--34), \code{v\_max} = 0.8 is never reached; the
+        (\file{missions/strike.py}:46,49; \file{missions/trajectory.py}:30--34), \code{v\_max} = 0.8 is never reached; the
         parameter is misleading. Document it or derive \code{v\_max} from \code{u\_max K}.
-  \item \textbf{Integral never reset.} \code{self.integ} is created once (\file{strike.py}:51) and keeps
-        accumulating across all legs and strikes (\file{strike.py}:90). Arguably intended (drift is slow), but
+  \item \textbf{Integral never reset.} \code{self.integ} is created once (\file{missions/strike.py}:51) and keeps
+        accumulating across all legs and strikes (\file{missions/strike.py}:90). Arguably intended (drift is slow), but
         after a leg with a large error it starts the next one with up to 0.15~m/s of bias; resetting or decaying
         it at the start of \code{track} would make legs independent.
-  \item \textbf{Dead code in \file{strike.py}.} \code{state = \{"done": False\}} is written
-        (\file{strike.py}:75,105) but never read; \code{src} in \code{src, dst = ...} (\file{strike.py}:160) is
+  \item \textbf{Dead code in \file{missions/strike.py}.} \code{state = \{"done": False\}} is written
+        (\file{missions/strike.py}:75,105) but never read; \code{src} in \code{src, dst = ...} (\file{missions/strike.py}:160) is
         unused; \code{vd} is computed only for the log.
-  \item \textbf{\code{closest\_since} re-reads the CSV from disk} (\file{strike.py}:211--220) after every dash,
+  \item \textbf{\code{closest\_since} re-reads the CSV from disk} (\file{missions/strike.py}:211--220) after every dash,
         although the positions are available in memory inside \code{track}; the file grows with the flight and
         the read happens between the dash and the retreat, while the drone is close to the wall.
   \item \textbf{\code{PatrolNode} and duplicated \topic{/aruco/pose} subscriptions.} \code{MarkerTour} already
-        subscribes to \topic{/aruco/pose} to set \code{marker\_t} (\file{marker\_tour.py}:77);
+        subscribes to \topic{/aruco/pose} to set \code{marker\_t} (\file{missions/tour.py}:77);
         \code{\_count\_marker\_poses} adds a second subscription that sets \code{marker\_t} again and counts poses
-        (\file{patrol.py}:264--278). \code{Patrol} alone would run with \code{pose\_count} stuck at 0 (it is set in
-        \code{main}, \file{patrol.py}:248, and again in \code{PatrolNode}, :277). Folding the counter into
+        (\file{missions/patrol.py}:264--278). \code{Patrol} alone would run with \code{pose\_count} stuck at 0 (it is set in
+        \code{main}, \file{missions/patrol.py}:248, and again in \code{PatrolNode}, :277). Folding the counter into
         \code{Patrol.\_\_init\_\_} removes a class and a subscription.
-  \item \textbf{The ``lost markers'' landing timer is not a marker timer.} \code{StepTest.safety} compares
-        \code{pose\_age()} with \code{lost\_max} (\file{step\_test.py}:260), but for the missions
+  \item \textbf{The ``lost markers'' landing timer is not a marker timer.} \code{Mission.safety} compares
+        \code{pose\_age()} with \code{lost\_max} (\file{missions/base.py}), but for the missions
         \code{pose\_age()} is the age of the last \emph{accepted EKF} pose, which keeps refreshing at 30~Hz while
         $\sigma_{xy} \le 0.15$~m. The ``no marker seen for 12 s'' message really means ``12~s after the EKF
         became too uncertain''. Likewise \code{search\_heading} starts its $\pm40^\circ$ sweep on
-        \code{pose\_age() > 3} (\file{step\_test.py}:281), so during the first seconds of a loss, while the EKF is
+        \code{pose\_age() > 3} (\file{missions/base.py}), so during the first seconds of a loss, while the EKF is
         still confident, \code{goto}'s search only turns towards \code{look\_at} and does not sweep. Using
         \code{marker\_age()} in both places would match the documented behaviour.
   \item \textbf{Esc does not land in the patrol.} The docstring says ``ANY OTHER KEY (space, q, Esc\dots) = stop
-        and land'' (\file{patrol.py}:11), but a lone \code{ESC} byte is treated by \code{read\_key} as an
+        and land'' (\file{missions/patrol.py}:11), but a lone \code{ESC} byte is treated by \code{read\_key} as an
         incomplete escape sequence and \code{ARROWS.get(b"\textbackslash x1b")} returns \code{None}
-        (\file{teleop.py}:144--148), which \code{Patrol.check\_keys} (and \code{StepTest.check\_keys}) treat as
+        (\file{core/teleop.py}:144--148), which \code{Patrol.check\_keys} (and \code{Mission.check\_keys}) treat as
         ``no key''. Space or \code{q} work; Esc is silently ignored.
   \item \textbf{Patrol corner slowdown inactive at normal speeds.} The corner switches at $d < 0.15$~m
-        (\file{patrol.py}:187) while $\sqrt{2a_{\max}d}$ (\file{patrol.py}:194) only limits below
+        (\file{missions/patrol.py}:187) while $\sqrt{2a_{\max}d}$ (\file{missions/patrol.py}:194) only limits below
         $v_p = 0.42$~m/s at that distance; the comment ``slows down before the corner'' holds only for fast
         patrols. Similarly in \code{goto} the braking curve is dominated by $k_p d$ except in the last
-        $\approx$5~cm (\file{marker\_tour.py}:245).
+        $\approx$5~cm (\file{missions/tour.py}:245).
   \item \textbf{First lap statistics are not comparable.} The lap ends when the target index returns to the
-        first corner (\file{patrol.py}:189), so lap 1 is ``approach + 3 legs'' and later laps are 4 legs; and
+        first corner (\file{missions/patrol.py}:189), so lap 1 is ``approach + 3 legs'' and later laps are 4 legs; and
         after each \code{find()} a new lap starts from the nearest corner. Lap 1 and post-search laps should be
         flagged in \file{laps.csv}.
-  \item \textbf{Recomputed centroid.} \code{turn} recomputes the marker centroid (\file{marker\_tour.py}:269)
+  \item \textbf{Recomputed centroid.} \code{turn} recomputes the marker centroid (\file{missions/tour.py}:269)
         that \code{\_\_init\_\_} already stored in \code{self.centroid} (:69--70).
   \item \textbf{\code{find} may fly to a marker it did not centre.} The centring phase times out after 8~s
-        without any check (\file{patrol.py}:237), and the subsequent \code{goto} uses only the map; that is fine
-        for localisation, but the docstring's ``(no map)'' (\file{patrol.py}:207) describes only the search.
+        without any check (\file{missions/patrol.py}:237), and the subsequent \code{goto} uses only the map; that is fine
+        for localisation, but the docstring's ``(no map)'' (\file{missions/patrol.py}:207) describes only the search.
   \item \textbf{Trajectory module unused by two of three missions.} The approach legs of \code{go\_sequence},
         \code{MarkerTour.main} and \code{Patrol.find} are rest-to-rest moves to a known point, exactly what
         \code{Quintic} + \code{check} + \code{track} provide, with a validated, predictable timing. Moving

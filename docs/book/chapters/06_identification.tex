@@ -12,9 +12,9 @@ every flight, that the whole chain still behaves. Six programs are involved:
 \toprule
 Program & Role & Main output \\
 \midrule
-\file{tello\_driver/step\_test.py} & identification / validation flight & \file{step\_<time>/*.csv} \\
-\file{tello\_driver/step\_fit.py} & fits $\tau \dot v = K u(t-L) - v$ per axis & \file{model.yaml}, plots \\
-\file{tello\_driver/session\_recorder.py} & records every flight (ROS node) & \file{sessions/<time>/} \\
+\file{identification/step\_test.py} & identification / validation flight & \file{step\_<time>/*.csv} \\
+\file{identification/step\_fit.py} & fits $\tau \dot v = K u(t-L) - v$ per axis & \file{model.yaml}, plots \\
+\file{core/session\_recorder.py} & records every flight (ROS node) & \file{sessions/<time>/} \\
 \file{tools/flight\_report.py} & after-flight metrics and verdicts & \file{report.txt}, \file{report.png} \\
 \file{tools/calibrate\_camera.py} & checkerboard calibration & \file{tello\_camera.yaml} \\
 \file{tools/make\_print\_sheets.py} & printable markers and checkerboard & \file{docs/print/*.pdf} \\
@@ -22,7 +22,7 @@ Program & Role & Main output \\
 \end{tabular}
 \end{center}
 
-The identified constants are copied by hand into \file{tello\_driver/model.py}, ``the ONE place where the
+The identified constants are copied by hand into \file{core/model.py}, ``the ONE place where the
 model lives''. Section~\ref{sec:ident-use} shows every place that reads them.
 
 % =====================================================================================================
@@ -54,8 +54,8 @@ A delay $L$ and a lag $\tau$ look alike in a position trace: both make the drone
 curvature of the first few tenths of a second distinguishes them, and that part is buried in the
 $\sim$1--2\,cm noise of the ArUco pose. Hence the fit determines $L+\tau$ well and $L$, $\tau$ separately
 poorly: in the $(\tau, L)$ plane the cost has a long valley along the line $L+\tau = \text{const}$.
-This is why \file{step\_fit.py} draws \file{cost\_map.png} and reports the spread of $L+\tau$, and why
-\file{model.py} chose $\tau_{xy}=0.25$\,s ``to keep the measured $L+\tau$''.
+This is why \file{identification/step\_fit.py} draws \file{cost\_map.png} and reports the spread of $L+\tau$, and why
+\file{core/model.py} chose $\tau_{xy}=0.25$\,s ``to keep the measured $L+\tau$''.
 \end{intuition}
 
 \paragraph{The excitation: doublets.} A doublet of amplitude $A$ and half-duration $T$ is $u=+A$ during $T$,
@@ -79,10 +79,17 @@ doublet starts and the Tello's slow drift ($\sim$10\,cm/s on its own, Nov 10).
 
 Run with \code{ros2 run tello\_driver tello\_step\_test} while \code{real.launch.py} runs in another terminal
 (the driver, localizer and EKF must be up). The parameter \code{schedule:=valid} flies a shorter
-\emph{validation} flight with different doublets. The class \code{StepTest} is also the base class of the
-missions (\code{MarkerTour} in \file{marker\_tour.py} inherits it), which explains a few hooks
-(\code{fence}, \code{MOVE\_TO\_ZONE\_CENTRE}, \code{POSE\_TOPIC}, \code{PREFIX}) that the identification itself
-does not use.
+\emph{validation} flight with different doublets.
+
+\begin{keypoint}
+Until November 18 the class \code{StepTest} was also the base class of every mission. Since the restructure of
+November 19 the generic part (parameters \code{box}, \code{z\_min}, \code{lost\_timeout}, the flight zone, the
+log files, \code{on\_pose}, \code{safety}, \code{send}, \code{run}, \code{search\_*}, \code{recentre},
+\code{return\_home}, \code{hold\_cmd}, \code{wait\_ready}, \code{prepare}, \code{close} and the module function
+\code{run(cls)}) lives in \code{Mission}, \file{missions/base.py}. The descriptions below are unchanged and apply
+to those methods there. \code{StepTest(Mission)} keeps only \code{SCHEDULES}, the parameters \code{schedule} and
+\code{axes}, \code{doublet}, \code{run\_tests} (its \code{mission()}) and \code{after\_landing} (the fit).
+\end{keypoint}
 
 \subsection{Module level}
 
@@ -215,7 +222,7 @@ Calls \topic{/tello\_driver/takeoff} or \topic{/tello\_driver/land}; raises \cod
 2\,s.
 
 \func{check\_keys}{(self)}
-Non-blocking \code{read\_key(0)} (from \file{teleop.py}); any key returns a value and raises
+Non-blocking \code{read\_key(0)} (from \file{core/teleop.py}); any key returns a value and raises
 \code{Abort("key pressed")}.
 
 \func{safety}{(self)}
@@ -320,7 +327,7 @@ Builds the plan \code{[(axis, A, T)]} from the schedule, axis by axis. The sign 
 (+ for the 1st, 3rd, \dots\ doublet of an axis, $-$ otherwise) so that both directions are excited. For each
 doublet, up to 3 attempts: \code{recentre()}, then \code{doublet()}; on \code{Lost} the segment number goes to
 \code{failed\_segments}, a new number is used for the retry, and the drone searches for the markers. Segment
-numbers are therefore unique and \file{step\_fit.py} can simply skip the failed ones. Ends with
+numbers are therefore unique and \file{identification/step\_fit.py} can simply skip the failed ones. Ends with
 \code{return\_home()}.
 
 \func{close}{(self)}
@@ -329,10 +336,12 @@ Closes the four CSV files and writes \file{failed\_segments.txt} (space-separate
 \subsection{Entry points}
 
 \func{main}{() -> None}
-\code{run(StepTest, fit\_after=True)}.
+\code{run(StepTest)}. After a normal landing, \code{run} calls \code{StepTest.after\_landing()}: identification
+$\to$ \code{step\_fit.fit}, validation $\to$ \code{step\_fit.validate} on the latest identification.
 
-\func{run}{(cls, fit\_after=False)}
-Shared by the step test and the missions. Forces local-only DDS discovery
+\func{run}{(cls)}
+In \file{missions/base.py}, shared by the step test and the missions (it used to take a \code{fit\_after} flag;
+the fit is now the step test's own \code{after\_landing()}). Forces local-only DDS discovery
 (\code{ROS\_AUTOMATIC\_DISCOVERY\_RANGE=LOCALHOST}, \code{local\_ros\_env()}), initialises rclpy with
 \code{SignalHandlerOptions.NO} so that Ctrl+C raises \code{KeyboardInterrupt} in Python instead of shutting
 rclpy down (the node must still be able to call \emph{land}), prints paragraphs 3--4 of the module docstring,
@@ -505,7 +514,7 @@ names after replacing \code{stepval} by \code{step}; it works because the timest
 For each axis of the validation flight, simulate the identified $(K, \tau, L)$ and the reference
 \code{MODEL\_IN\_USE}, fit \emph{only} $c_j, d_j$ (\code{solve(\dots, K=K)}), and report fit \% and RMS for both.
 Writes \file{validation.txt} and \file{validation.png}. This is the honest test: the parameters were not tuned on
-this data. The Nov 13 numbers quoted in \file{model.py}: 81\,\% forward, 67\,\% left, 87\,\% yaw, against
+this data. The Nov 13 numbers quoted in \file{core/model.py}: 81\,\% forward, 67\,\% left, 87\,\% yaw, against
 48/54/30\,\% for the previous model.
 
 \func{main}{()}
@@ -514,7 +523,7 @@ Dispatches \code{--validate} or fits the given folder (default: the last \file{s
 % =====================================================================================================
 \section{From the fit to \texorpdfstring{\texttt{model.py}}{model.py}: who uses the numbers}\label{sec:ident-use}
 
-\file{model.py} contains only constants (the drone flies with its protective cage, which makes it slower: $K$
+\file{core/model.py} contains only constants (the drone flies with its protective cage, which makes it slower: $K$
 0.66--0.83 instead of $\sim$1.15 without):
 
 \begin{center}
@@ -538,34 +547,34 @@ authors fixed one $\tau_{xy} = 0.25$\,s for both axes and chose $L_U$ so that $L
 falls in the measured range. Consumers:
 
 \begin{itemize}
-\item \textbf{EKF} (\file{ekf\_node.py} passes them to \code{DroneEKF}, \file{ekf\_core.py}). The prediction is
+\item \textbf{EKF} (\file{core/ekf\_node.py} passes them to \code{DroneEKF}, \file{core/ekf\_core.py}). The prediction is
 the same model, in the world frame and with the learnt drift $d$:
 $\tau\dot{\mathbf v} = R(\psi)\operatorname{diag}(K_x, K_y)\,\mathbf u(t - L_u) + \mathbf d - \mathbf v$,
 discretised exactly like \code{response()}: \code{a\_xy = dt / tau\_xy}, $v \mathrel{+}= a(\cdot - v)$. The input
 is the buffered \topic{/tello/rc\_sent} read $L_u$ in the past (\code{command\_at}), and each marker pose is applied
 at $t_{\text{recv}} - L_v$ and re-propagated to now.
-\item \textbf{Position hold} (\file{safety.py}, \code{position\_hold}/\code{hold\_axis}). Three uses:
+\item \textbf{Position hold} (\file{core/safety.py}, \code{position\_hold}/\code{hold\_axis}). Three uses:
 (i) the error is computed on the position \emph{predicted at the time the command acts},
 $e = p^\star - (p + v L_U)$; (ii) when the pilot releases the keys the hold target is where the drone will stop
 on its own, $p + (L_U + \tau)v$ (0.60\,s $\times$ speed); (iii) the desired world velocity is rotated to the body
 frame and the model is \emph{inverted}, $u_x = b_x / K_X$, $u_y = b_y / K_Y$ (and $/K_Z$ vertically), so a
 desired 0.1\,m/s forward becomes a command of 0.15.
-\item \textbf{Zone guard} (\file{safety.py}): the position in $H = 1$\,s if the command $w$ is kept, from the
+\item \textbf{Zone guard} (\file{core/safety.py}): the position in $H = 1$\,s if the command $w$ is kept, from the
 closed-form solution of the model after the delay:
 $$
 p(H) = p + v L_U + K w (H - L_U) + (v - K w)\,\tau\left(1 - e^{-(H - L_U)/\tau}\right),
 $$
 with $K = $ \code{K\_MEAN}; obtained by integrating $v(s) = Kw + (v-Kw)e^{-s/\tau}$ over $[0, H-L_U]$.
-\item \textbf{Fake drone} (\file{fake\_world.py}): the simulator moves with the same $K_X, K_Y, \tau, L_U$, and
+\item \textbf{Fake drone} (\file{sim/fake\_world.py}): the simulator moves with the same $K_X, K_Y, \tau, L_U$, and
 delays the rendered images by $L_V$, so \code{mock:=true} reproduces the real timing.
-\item \textbf{Missions} (\file{marker\_tour.py}, \file{patrol.py}, \file{strike.py}): divide their velocity
-requests by $K_X$/$K_Y$, and \file{patrol.py} anticipates the heading by $\omega L_U$.
+\item \textbf{Missions} (\file{missions/tour.py}, \file{missions/patrol.py}, \file{missions/strike.py}): divide their velocity
+requests by $K_X$/$K_Y$, and \file{missions/patrol.py} anticipates the heading by $\omega L_U$.
 \end{itemize}
 
 \begin{keypoint}
 Identification is not a one-off: changing the hardware (e.g.\ flying without the cage) invalidates
-\file{model.py}. The procedure is \code{tello\_step\_test}, then \code{schedule:=valid}, then copy the validated
-numbers into \file{model.py} (nothing reads \file{model.yaml} automatically).
+\file{core/model.py}. The procedure is \code{tello\_step\_test}, then \code{schedule:=valid}, then copy the validated
+numbers into \file{core/model.py} (nothing reads \file{model.yaml} automatically).
 \end{keypoint}
 
 % =====================================================================================================
@@ -620,7 +629,7 @@ maximum \code{temph}; closes the files.
 \func{main}{()}
 Spins until Ctrl+C or external shutdown, then \code{close()} in a \code{finally}.
 
-Note that \file{step\_test.py} writes its \emph{own} folder (\file{step\_\dots}) with a different
+Note that \file{identification/step\_test.py} writes its \emph{own} folder (\file{step\_\dots}) with a different
 \file{poses.csv} (epoch times, yaw in radians, image stamp): the fit never reads the session recorder's files.
 
 % =====================================================================================================

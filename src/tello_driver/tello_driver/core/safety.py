@@ -21,8 +21,8 @@ overshoots 7-9 cm after a key release (old: 24 cm). Height: same loop on the EKF
 import math
 import time
 
-from tello_driver import model as M
-from tello_driver.zone import clearance, height_limits, wrap
+from tello_driver.core import model as M
+from tello_driver.core.zone import clearance, height_limits, wrap
 
 
 class CommandFilter:
