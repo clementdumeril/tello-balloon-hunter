@@ -14,6 +14,7 @@ with several of one colour, the most confident detection of each image is kept.
 import json
 import os
 import socket
+import struct
 import time
 from pathlib import Path
 
@@ -23,6 +24,7 @@ import rclpy.executors
 import yaml
 from geometry_msgs.msg import Point
 from rclpy.node import Node
+from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -42,6 +44,12 @@ class Balloons(Node):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", self.port))
         self.sock.setblocking(False)
+        # the Logitech image with its detections (JPEG on port+1) -> /balloons/image, shown in RViz
+        self.sock_img = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock_img.bind(("0.0.0.0", self.port + 1))
+        self.sock_img.setblocking(False)
+        self.img_frame, self.img_parts = -1, {}
+        self.pub_img = self.create_publisher(Image, "/balloons/image", 1)
         self.hist = {c: [] for c in RGB}   # colour -> [(t_received, x, y, z)]
         self.last = {}                     # colour -> (t, x, y, z, n): last estimate, kept forever
         self.n_rx, self.t_rx = 0, 0.0
@@ -52,7 +60,39 @@ class Balloons(Node):
         self.create_timer(5.0, self.report)
         self.get_logger().info(f"listening for tools/ext_camera.py detect on UDP {self.port}")
 
+    def poll_image(self):
+        """The image comes in 1200-byte pieces (frame, index, count: 3 x uint16, then data); a complete frame
+        is published, an incomplete one is dropped when the next frame starts."""
+        jpg = None
+        while True:
+            try:
+                pkt, _ = self.sock_img.recvfrom(65536)
+            except BlockingIOError:
+                break
+            if len(pkt) < 6:
+                continue
+            f, k, n = struct.unpack("!HHH", pkt[:6])
+            if f != self.img_frame:
+                self.img_frame, self.img_parts = f, {}
+            self.img_parts[k] = pkt[6:]
+            if len(self.img_parts) == n:
+                jpg = b"".join(self.img_parts[i] for i in range(n))
+                self.img_parts = {}
+        if jpg is None:
+            return
+        import cv2
+        img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return
+        m = Image()
+        m.header.stamp, m.header.frame_id = self.get_clock().now().to_msg(), "ext_camera"
+        m.height, m.width = img.shape[:2]
+        m.encoding, m.step = "bgr8", img.shape[1] * 3
+        m.data = img.tobytes()
+        self.pub_img.publish(m)
+
     def poll(self):
+        self.poll_image()
         while True:
             try:
                 data, _ = self.sock.recvfrom(65536)

@@ -56,7 +56,12 @@ class Hunt(Strike):
         self.z_reach = p("z_reach", 0.25).value                  # balloon centre this far from the band: reachable
         self.blue_clear = p("blue_clear", 0.5).value
         self.repeat = p("repeat", False).value
-        self.hfov, self.vfov = math.radians(p("cam_hfov_deg", 60.0).value), math.radians(p("cam_vfov_deg", 44.0).value)
+        # patrol HIGH (Nov 19 flight: at 1.6 m, facing the 44/1/3/28 wall whose markers are at 2.0-2.5 m, it lost them)
+        # second flight: 1.95 still too low; patrol at the height of marker 35 (2.08 m), band raised to 2.15 for it
+        self.patrol_z = min(p("patrol_z", 2.08).value, self.z_lim[1] - 0.05)
+        # vertical: only the markers well inside the image count (the ones near the top/bottom edge are often missed)
+        self.hfov, self.vfov = math.radians(p("cam_hfov_deg", 60.0).value), math.radians(p("cam_vfov_deg", 30.0).value)
+        self.hold_z = None                                       # height held during the turns
         self.see_max = p("see_max", 3.5).value                   # m: markers farther than that are not detected
         self.enough = p("enough_markers", 3).value               # markers in view all along a move: enough
         self.K_body = (M.K_X, M.K_Y)
@@ -179,7 +184,7 @@ class Hunt(Strike):
     def patrol_points(self):
         """4 points of the zone (its corners pulled towards the centre until they have room), in a loop."""
         f = self.zone
-        z = min(max(self.z_fly, self.z_lim[0]), self.z_lim[1])
+        z = min(max(self.patrol_z, self.z_lim[0]), self.z_lim[1])
         c = np.array([(f["x_min"] + f["x_max"]) / 2, (f["y_min"] + f["y_max"]) / 2])
         pts = []
         for cx, cy in ((f["x_min"], f["y_min"]), (f["x_max"], f["y_min"]), (f["x_max"], f["y_max"]), (f["x_min"], f["y_max"])):
@@ -206,12 +211,22 @@ class Hunt(Strike):
         self.say("Patrol: " + " -> ".join(f"({p[0]:+.2f}, {p[1]:+.2f})" for p in pts) +
                  f" at {self.patrol_v} m/s. Waiting for the red balloon (external camera).")
         t0, k = time.time(), 0
+        # the heading at takeoff faces the main marker wall (x = -1.25 m, 16 markers 1.5-2.3 m high): keep it
+        # whenever it sees enough markers, turn away only where it does not
+        if getattr(self, "patrol_yaw", None) is None:   # once: after an attack the heading is another one
+            self.patrol_yaw = self.pose[4]
+        self.hold_z = pts[0][2]
+        up = self.here().copy()
+        up[2] = self.hold_z
+        self.say(f"Climbing to the patrol height {self.hold_z:.2f} m")
+        self.track(Quintic(self.here(), up, 0.3, 0.6, **self.qkw()), self.patrol_yaw, "climb",
+                   settle=0.5, tol=0.08, stop=self.red_ready)
         if self.red_ready():
             return True
         while time.time() - t0 < self.patrol_timeout:
             dst = pts[k % len(pts)]
             traj = Quintic(self.here(), dst, self.patrol_v, 0.6, **self.qkw())
-            yaw, n = self.best_heading(self.path_pts(traj), self.pose[4])
+            yaw, n = self.best_heading(self.path_pts(traj), self.patrol_yaw)
             self.turn_to(yaw)
             if self.red_ready():
                 return True
@@ -223,12 +238,33 @@ class Hunt(Strike):
         self.say(f"No red balloon in {self.patrol_timeout:.0f} s.")
         return False
 
+    def turn_to(self, yaw_t, timeout=6.0):
+        """Turn in place HOLDING THE HEIGHT (Nov 19: a plain yaw command let the drone sink 1.79 -> 1.59 m) and
+        slowly enough (0.6) for the markers to stay detected while the image sweeps."""
+        def step():
+            fresh = self.pose_age() <= 0.6
+            yaw = self.pose[4] if fresh else self.yaw_estimate()
+            if yaw is None:
+                self.send()
+                return None
+            cz = 0.0
+            if fresh and self.hold_z is not None:
+                cz = max(-0.4, min(0.4, 1.5 * (self.hold_z - self.pose[3])))
+            e = wrap(yaw_t - yaw)
+            if abs(e) < math.radians(6):
+                self.send(cz=cz)
+                return False
+            self.send(cz=cz, cw=max(-0.6, min(0.6, 1.2 * e)), blind=True)
+            return None
+        self.run(timeout, step, search_on_loss=False)
+
     # ---------------------------------------------------------------- attack
     def attack(self):
         t_seen = time.time()
         B = self.red_stable()
         self.run(0.2, lambda: self.send())  # stop the patrol leg
         start = self.here()
+        self.hold_z = start[2]
         traj, end, u = self.plan_dash(start, B)
         if traj is None:
             self.say(f"  cannot attack: {end}")

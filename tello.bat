@@ -17,11 +17,12 @@ if /i "%~1"=="mock" (
     set "LAUNCH_ARGS=mock:=true"
     goto start_ros
 )
-if /i "%~1"=="hunt" (
-    rem the external camera sees the balloons and sends them to ROS (UDP 9870); Esc in its window stops it
-    echo Starting the balloon detection on the Logitech camera ...
-    start "Balloons - Logitech camera" /d "%~dp0" cmd /k python tools\ext_camera.py detect --diameter 0.28
-)
+rem hunt: the external camera sees the balloons and sends them to ROS, UDP 9870; Esc in its window stops it.
+rem No parentheses block here: a ")" in a comment inside one closed it early and the camera never started (Nov 19).
+if /i not "%~1"=="hunt" goto no_cam
+echo Starting the balloon detection on the Logitech camera ...
+start "Balloons - Logitech camera" /d "%~dp0." cmd /k python tools\ext_camera.py detect --diameter 0.28
+:no_cam
 
 rem ---- 1. Wi-Fi: the dongle on the Tello (the built-in card stays on the internet)
 echo Connecting "%TELLO_IF%" to %TELLO_SSID% ... (drone ON, LED blinking yellow)

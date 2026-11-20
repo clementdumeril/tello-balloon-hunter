@@ -86,6 +86,11 @@ Visualization Manager:
       Enabled: true
       Topic:
         Value: /aruco/debug_image
+    - Class: rviz_default_plugins/Image
+      Name: Logitech camera (balloon detections)
+      Enabled: true
+      Topic:
+        Value: /balloons/image
   Global Options:
     Fixed Frame: map
     Frame Rate: 30

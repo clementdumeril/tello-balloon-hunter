@@ -22,6 +22,7 @@ import argparse
 import json
 import math
 import socket
+import struct
 import sys
 import time
 from pathlib import Path
@@ -36,6 +37,7 @@ from aruco_localization.marker_map import load_marker_map  # noqa: E402
 
 CALIB_OUT = REPO / "config" / "ext_camera.yaml"
 UDP = ("127.0.0.1", 9870)   # WSL mirrored networking: Windows localhost is WSL localhost
+UDP_IMG = ("127.0.0.1", 9871)  # the annotated image (JPEG) for RViz
 
 
 def open_cam(idx, w=1280, h=720):
@@ -248,7 +250,7 @@ def cmd_detect(a):
     rec_dir = REPO / "logs" / "balloons"
     rec_dir.mkdir(parents=True, exist_ok=True)
     rec = None
-    t_last, fps = time.time(), 0.0
+    t_last, fps, t_img, n_img = time.time(), 0.0, 0.0, 0
     stats = {"frames": 0, "colour": {"red": 0, "blue": 0}, "yolo": {"red": 0, "blue": 0}}
     while True:
         ok, img = cap.read()
@@ -282,16 +284,27 @@ def cmd_detect(a):
                 balloons.append({"colour": c, "x": round(float(p[0]), 3), "y": round(float(p[1]), 3),
                                  "z": round(float(p[2]), 3), "dist": round(float(d), 2), "score": round(s, 2)})
         sock.sendto(json.dumps({"t": t, "balloons": balloons}).encode(), UDP)
+        for name, col in (("colour", (0, 255, 255)), ("yolo", (255, 0, 255))):
+            for c, box, s in dets[name]:
+                x0, y0, x1, y1 = map(int, box)
+                cv2.rectangle(img, (x0, y0), (x1, y1), col, 2)
+                cv2.putText(img, f"{name[0]}:{c} {s:.2f}", (x0, y0 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
+        for i, b in enumerate(balloons):
+            cv2.putText(img, f"{b['colour']} ({b['x']:+.2f},{b['y']:+.2f},{b['z']:.2f}) m", (10, 25 + 22 * i),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(img, f"{fps:.1f} fps", (10, img.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        # the annotated image, small, ~5 Hz, to RViz (balloons node -> /balloons/image). In 1200-byte pieces: the
+        # WSL mirrored loopback drops UDP packets above ~1.5 kB (measured Nov 19). Piece: frame, index, count, data
+        if time.time() - t_img > 0.2:
+            t_img = time.time()
+            ok, jpg = cv2.imencode(".jpg", cv2.resize(img, (640, 360)), [cv2.IMWRITE_JPEG_QUALITY, 60])
+            if ok:
+                data = jpg.tobytes()
+                parts = [data[i:i + 1200] for i in range(0, len(data), 1200)]
+                n_img = (n_img + 1) % 65536
+                for k, part in enumerate(parts):
+                    sock.sendto(struct.pack("!HHH", n_img, k, len(parts)) + part, UDP_IMG)
         if not a.no_show:
-            for name, col in (("colour", (0, 255, 255)), ("yolo", (255, 0, 255))):
-                for c, box, s in dets[name]:
-                    x0, y0, x1, y1 = map(int, box)
-                    cv2.rectangle(img, (x0, y0), (x1, y1), col, 2)
-                    cv2.putText(img, f"{name[0]}:{c} {s:.2f}", (x0, y0 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
-            for i, b in enumerate(balloons):
-                cv2.putText(img, f"{b['colour']} ({b['x']:+.2f},{b['y']:+.2f},{b['z']:.2f}) m", (10, 25 + 22 * i),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            cv2.putText(img, f"{fps:.1f} fps", (10, img.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             cv2.imshow("balloons (Esc: quit, S: save image)", img)
             k = cv2.waitKey(1) & 0xFF
             if k == 27:
