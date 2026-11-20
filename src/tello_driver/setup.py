@@ -26,6 +26,7 @@ setup(
         "tello_goto = tello_driver.missions.tour:goto_main",
         "tello_patrol = tello_driver.missions.patrol:main",
         "tello_strike = tello_driver.missions.strike:main",
+        "tello_hunt = tello_driver.missions.hunt:main",
         # identification of the model
         "tello_step_test = tello_driver.identification.step_test:main",
         "tello_step_fit = tello_driver.identification.step_fit:main",

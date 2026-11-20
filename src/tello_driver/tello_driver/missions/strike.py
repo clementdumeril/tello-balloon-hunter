@@ -47,6 +47,7 @@ class Strike(Mission):
         self.kp, self.kp_z, self.kp_yaw = p("kp", 0.8).value, p("kp_z", 0.8).value, p("kp_yaw", 1.0).value
         from tello_driver.core import model as M  # identified model (model.py); one K: the mean of forward and left
         self.K, self.tau, self.L_u = p("model_K", M.K_MEAN).value, p("model_tau", M.TAU_XY).value, p("model_L_u", M.L_U).value
+        self.K_body = None  # (K forward, K left): per-axis feedforward (the hunt); None: one K (strike as tested)
         self.ki = p("ki", 0.3).value  # integral: cancels the drift (the Tello's own hold does not work here)
         self.integ = np.zeros(2)
         self.strike_d, self.retreat_d = p("strike_distance", 0.9).value, p("retreat_distance", 1.6).value
@@ -62,9 +63,9 @@ class Strike(Mission):
         self.results = []
 
     # ---------------------------------------------------------------- tracking
-    def track(self, traj, yaw_t, phase, settle=2.0, tol=0.12):
+    def track(self, traj, yaw_t, phase, settle=2.0, tol=0.12, stop=None):
         """Follow the trajectory: feedforward from the model + P on the EKF position. The reference is frozen
-        while the pose is not trusted (markers lost), and the drone hovers."""
+        while the pose is not trusted (markers lost), and the drone hovers. stop(): True ends it at once."""
         problem = check(traj, self.zone, clearance, self.z_lim)
         if problem:
             self.say(f"  {phase}: trajectory refused ({problem}), skipped")
@@ -77,6 +78,8 @@ class Strike(Mission):
         def step():
             nonlocal frozen
             now = time.time()
+            if stop is not None and stop():
+                return False
             if self.pose_age() > 0.6:
                 frozen += 1.0 / RATE  # pause the reference until the markers come back
                 self.send()
@@ -88,14 +91,20 @@ class Strike(Mission):
             ex, ey, ez = pd[0] - x, pd[1] - y, pd[2] - z
             if abs(ex) < 0.3 and abs(ey) < 0.3:
                 self.integ = np.clip(self.integ + self.ki * np.array([ex, ey]) / RATE, -0.15, 0.15)
-            ux = (vff[0] + self.tau * aff[0]) / self.K + self.kp * ex + self.integ[0]
-            uy = (vff[1] + self.tau * aff[1]) / self.K + self.kp * ey + self.integ[1]
+            c, s = math.cos(yaw), math.sin(yaw)
+            fx, fy = vff[0] + self.tau * aff[0], vff[1] + self.tau * aff[1]   # model feedforward, world frame
+            if self.K_body:  # per body axis gain (forward 0.66, left 0.83): the hunt flies sideways as well
+                bf, bl = (c * fx + s * fy) / self.K_body[0], (-s * fx + c * fy) / self.K_body[1]
+                fx, fy = c * bf - s * bl, s * bf + c * bl
+            else:
+                fx, fy = fx / self.K, fy / self.K
+            ux = fx + self.kp * ex + self.integ[0]
+            uy = fy + self.kp * ey + self.integ[1]
             n = math.hypot(ux, uy)
             if n > 1.3 * self.v_max:
                 ux, uy = ux * 1.3 * self.v_max / n, uy * 1.3 * self.v_max / n
             uz = max(-0.4, min(0.4, vff[2] + self.kp_z * ez))
             wz = max(-0.8, min(0.8, self.kp_yaw * wrap(yaw_t - yaw)))
-            c, s = math.cos(yaw), math.sin(yaw)
             self.send(c * ux + s * uy, -s * ux + c * uy, uz, wz)
             e = math.hypot(ex, ey)
             errs.append(e)
@@ -109,7 +118,7 @@ class Strike(Mission):
         if not errs:
             return None
         return {"T": traj.T, "rms": float(np.sqrt(np.mean(np.square(errs)))), "max": float(np.max(errs)),
-                "dist": traj.d, "elapsed": time.time() - t0}
+                "dist": traj.d, "elapsed": time.time() - t0, "frozen": frozen}
 
     def turn_to(self, yaw_t, timeout=6.0):
         def step():
