@@ -12,6 +12,7 @@ with several of one colour, the most confident detection of each image is kept.
     ros2 run tello_driver tello_balloons          (or real.launch.py balloons:=true)
 """
 import json
+import math
 import os
 import socket
 import struct
@@ -24,8 +25,10 @@ import rclpy.executors
 import yaml
 from geometry_msgs.msg import Point
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from geometry_msgs.msg import TransformStamped
+from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
+from tf2_ros import StaticTransformBroadcaster
 from visualization_msgs.msg import Marker, MarkerArray
 
 RGB = {"red": (1.0, 0.1, 0.1), "blue": (0.1, 0.3, 1.0)}
@@ -50,6 +53,16 @@ class Balloons(Node):
         self.sock_img.setblocking(False)
         self.img_frame, self.img_parts = -1, {}
         self.pub_img = self.create_publisher(Image, "/balloons/image", 1)
+        self.pub_info = self.create_publisher(CameraInfo, "/balloons/camera_info", 1)
+        # the Logitech camera in the SAME TF tree as the drone: map -> ext_camera_optical (static, from its
+        # self-calibration on the wall markers); the Tello camera is map -> base_link -> tello_camera_optical
+        self.static_tf = StaticTransformBroadcaster(self)
+        self.cal = None
+        try:
+            self.cal = yaml.safe_load(open(self.cam_file))
+            self.static_tf.sendTransform(self.camera_tf())
+        except OSError:
+            self.get_logger().warn(f"no {self.cam_file}: the external camera is not in TF")
         self.hist = {c: [] for c in RGB}   # colour -> [(t_received, x, y, z)]
         self.last = {}                     # colour -> (t, x, y, z, n): last estimate, kept forever
         self.n_rx, self.t_rx = 0, 0.0
@@ -85,11 +98,44 @@ class Balloons(Node):
         if img is None:
             return
         m = Image()
-        m.header.stamp, m.header.frame_id = self.get_clock().now().to_msg(), "ext_camera"
+        m.header.stamp, m.header.frame_id = self.get_clock().now().to_msg(), "ext_camera_optical"
         m.height, m.width = img.shape[:2]
         m.encoding, m.step = "bgr8", img.shape[1] * 3
         m.data = img.tobytes()
         self.pub_img.publish(m)
+        if self.cal:  # intrinsics scaled to the sent image (1280x720 -> 640x360)
+            s = m.width / float(self.cal["image_size"][0])
+            K = np.array(self.cal["K"], float)
+            K[:2] *= s
+            info = CameraInfo()
+            info.header = m.header
+            info.width, info.height = m.width, m.height
+            info.distortion_model = "plumb_bob"
+            info.d = [float(v) for v in self.cal["D"]]
+            info.k = K.ravel().tolist()
+            info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+            info.p = [K[0, 0], 0.0, K[0, 2], 0.0, 0.0, K[1, 1], K[1, 2], 0.0, 0.0, 0.0, 1.0, 0.0]
+            self.pub_info.publish(info)
+
+    def camera_tf(self):
+        """map -> ext_camera_optical: rotation R_cam_to_map (camera axes in the map), origin C_map."""
+        R = np.array(self.cal["R_cam_to_map"], float)
+        C = np.array(self.cal["C_map"], float)
+        w = math.sqrt(max(0.0, 1.0 + R[0, 0] + R[1, 1] + R[2, 2])) / 2.0
+        if w > 1e-3:
+            q = ((R[2, 1] - R[1, 2]) / (4 * w), (R[0, 2] - R[2, 0]) / (4 * w), (R[1, 0] - R[0, 1]) / (4 * w), w)
+        else:  # 180 deg rotation: largest diagonal term
+            i = int(np.argmax(np.diag(R)))
+            j, k = (i + 1) % 3, (i + 2) % 3
+            r = math.sqrt(max(0.0, 1.0 + R[i, i] - R[j, j] - R[k, k]))
+            v = [0.0, 0.0, 0.0]
+            v[i], v[j], v[k] = r / 2, (R[j, i] + R[i, j]) / (2 * r), (R[k, i] + R[i, k]) / (2 * r)
+            q = (*v, (R[k, j] - R[j, k]) / (2 * r))
+        t = TransformStamped()
+        t.header.stamp, t.header.frame_id, t.child_frame_id = self.get_clock().now().to_msg(), "map", "ext_camera_optical"
+        t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = map(float, C)
+        t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w = map(float, q)
+        return t
 
     def poll(self):
         self.poll_image()

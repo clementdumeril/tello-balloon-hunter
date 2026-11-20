@@ -86,6 +86,22 @@ Visualization Manager:
       Enabled: true
       Topic:
         Value: /aruco/debug_image
+    - Class: rviz_default_plugins/TF
+      Name: TF (map, drone, both cameras)
+      Enabled: true
+      Show Names: true
+      Show Arrows: false
+      Marker Scale: 0.5
+      Frames:
+        All Enabled: false
+        map:
+          Value: true
+        base_link:
+          Value: true
+        tello_camera_optical:
+          Value: true
+        ext_camera_optical:
+          Value: true
     - Class: rviz_default_plugins/Image
       Name: Logitech camera (balloon detections)
       Enabled: true
