@@ -3,6 +3,7 @@ rem Double-click: connects the USB Wi-Fi dongle to the Tello, then starts ROS (d
 rem and opens a second window ready for the commands (teleop, missions).
 rem   tello.bat          real drone (switch it on first: LED blinking yellow)
 rem   tello.bat mock     fake drone, no Wi-Fi needed
+rem   tello.bat hunt     real drone + the Logitech balloon detection (Windows window), for tello_hunt
 setlocal EnableDelayedExpansion
 
 rem ---- your drone and your Wi-Fi dongle (netsh wlan show interfaces)
@@ -15,6 +16,11 @@ set "LAUNCH_ARGS="
 if /i "%~1"=="mock" (
     set "LAUNCH_ARGS=mock:=true"
     goto start_ros
+)
+if /i "%~1"=="hunt" (
+    rem the external camera sees the balloons and sends them to ROS (UDP 9870); Esc in its window stops it
+    echo Starting the balloon detection on the Logitech camera ...
+    start "Balloons - Logitech camera" /d "%~dp0" cmd /k python tools\ext_camera.py detect --diameter 0.28
 )
 
 rem ---- 1. Wi-Fi: the dongle on the Tello (the built-in card stays on the internet)
@@ -44,5 +50,5 @@ start "Tello ROS - Ctrl+C here lands and stops everything" wsl.exe bash -c "%ROS
 
 rem ---- 3. A ready terminal for the commands
 timeout /t 8 /nobreak >nul
-start "Tello commands" wsl.exe bash -c "%ROS_ENV% && cd ~/tello_ws/src/tello-balloon-hunter && echo && echo '  ros2 run tello_driver tello_teleop          fly by hand (t take off, g land)' && echo '  ros2 run tello_driver tello_goto 49 35      mission: in front of 49, then 35' && echo '  python3 tools/flight_report.py --band 1.7 2.0   after the flight' && echo && exec bash"
+start "Tello commands" wsl.exe bash -c "%ROS_ENV% && cd ~/tello_ws/src/tello-balloon-hunter && echo && echo '  ros2 run tello_driver tello_teleop          fly by hand (t take off, g land)' && echo '  ros2 run tello_driver tello_goto 49 35      mission: in front of 49, then 35' && echo '  ros2 run tello_driver tello_hunt            patrol, then hit the red balloon (tello.bat hunt)' && echo '  python3 tools/flight_report.py --band 1.7 2.0   after the flight' && echo && exec bash"
 endlocal
