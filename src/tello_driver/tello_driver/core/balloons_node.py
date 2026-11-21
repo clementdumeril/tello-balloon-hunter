@@ -41,7 +41,7 @@ class Balloons(Node):
         self.port = int(p("port", 9870).value)
         self.window = p("window", 0.5).value     # s of detections averaged (median): noise vs lag
         self.max_age = p("max_age", 1.0).value   # s without detection: "stale" (kept, drawn pale)
-        self.diameter = p("diameter", 0.28).value
+        self.diameter = p("diameter", 0.20).value
         repo = os.environ.get("TELLO_REPO", str(Path.home() / "tello_ws/src/tello-balloon-hunter"))
         self.cam_file = p("ext_camera_file", os.path.join(repo, "config", "ext_camera.yaml")).value
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

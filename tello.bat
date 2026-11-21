@@ -21,7 +21,10 @@ rem hunt: the external camera sees the balloons and sends them to ROS, UDP 9870;
 rem No parentheses block here: a ")" in a comment inside one closed it early and the camera never started (Nov 19).
 if /i not "%~1"=="hunt" goto no_cam
 echo Starting the balloon detection on the Logitech camera ...
-start "Balloons - Logitech camera" /d "%~dp0." cmd /k python tools\ext_camera.py detect --diameter 0.28
+rem colour detection only: ~15 fps instead of ~5 with YOLO (which found nothing on Nov 19); balloon ~20 cm wide
+start "Balloons - Logitech camera" /d "%~dp0." cmd /k python tools\ext_camera.py detect --method colour --diameter 0.20
+rem the hunt faces the 49 wall and may fly with the cage 30 cm from it: wall guard at 0.4 m instead of 0.7
+set "LAUNCH_ARGS=min_wall:=0.4"
 :no_cam
 
 rem ---- 1. Wi-Fi: the dongle on the Tello (the built-in card stays on the internet)
