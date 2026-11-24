@@ -64,8 +64,8 @@ class BalloonPoseNode(Node):
         super().__init__('balloon_pose_node')
 
         # ---- parameters ----
-        self.declare_parameter('balloon_diameter_m', 0.30)
-        self.declare_parameter('target_class', '')
+        self.declare_parameter('balloon_diameter_m', 0.30) # TODO: Update with true measured balloon diameter in meters
+        self.declare_parameter('target_class', '') # TODO: Define target class as "sports ball"
         self.declare_parameter('camera_frame', '')
         self.declare_parameter('child_frame', 'balloon')
         self.declare_parameter('publish_tf', True)

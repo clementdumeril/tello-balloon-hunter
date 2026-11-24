@@ -64,7 +64,7 @@ class BalloonDetector(Node):
         super().__init__('balloon_detector')
  
         # ---- parameters ----
-        self.declare_parameter('model_path', 'yolo11n.pt')
+        self.declare_parameter('model_path', 'tools/yolo11n.pt')
         self.declare_parameter('conf', 0.4)
         self.declare_parameter('imgsz', 320)
         self.declare_parameter('device', '')
