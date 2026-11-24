@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'detector_node = balloon_detector.detector_node:main'
+            'detector_node = balloon_detector.detector_node:main',
+            'balloon_pose_node = balloon_detector.balloon_pose_node:main',
         ],
     },
 )
